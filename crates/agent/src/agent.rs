@@ -884,25 +884,42 @@ impl NativeAgent {
                     continue;
                 }
                 let session_id_text = session_id.to_string();
-                #[cfg(feature = "lnmarkets")]
-                let portfolio_cadence = match cx.update(|cx| {
-                    lnmarkets::portfolio_review_cadence(&session_id_text, cx)
-                }) {
-                    Ok(cadence) => cadence,
-                    Err(error) => {
-                        log::error!("could not read LN Markets portfolio review cadence: {error}");
-                        None
-                    }
-                };
-                #[cfg(feature = "lnmarkets")]
-                let pending_portfolio_wakeup = cx.update(|cx| {
-                    lnmarkets::pending_portfolio_wakeup(&session_id_text, cx)
+                let review_drivers = cx.update(|cx| {
+                    plugin_api::registry(cx)
+                        .map(|registry| registry.review_drivers().to_vec())
+                        .unwrap_or_default()
                 });
-                #[cfg(feature = "lnmarkets")]
-                let mut portfolio_acknowledgement = None;
-                #[cfg(feature = "lnmarkets")]
-                let event_wakeup = match pending_portfolio_wakeup {
-                    Some((source, event_instruction)) => {
+                // The registered driver that claimed this session, if any,
+                // with its cadence.
+                let mut cadence_driver: Option<(
+                    Rc<dyn plugin_api::SessionReviewDriver>,
+                    plugin_api::ReviewCadence,
+                )> = None;
+                for driver in &review_drivers {
+                    match cx.update(|cx| driver.review_cadence(&session_id_text, cx)) {
+                        Ok(Some(cadence)) => {
+                            cadence_driver = Some((driver.clone(), cadence));
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            log::error!("could not read a plugin review cadence: {error}");
+                        }
+                    }
+                }
+                let mut pending_event = None;
+                for driver in &review_drivers {
+                    if let Some((source, instruction)) =
+                        cx.update(|cx| driver.pending_wakeup(&session_id_text, cx))
+                    {
+                        pending_event = Some((driver.clone(), source, instruction));
+                        break;
+                    }
+                }
+                let mut event_driver = None;
+                let mut event_acknowledgement = None;
+                let event_wakeup = match pending_event {
+                    Some((driver, source, event_instruction)) => {
                         let now_ms_signed = match i64::try_from(now_ms) {
                             Ok(now_ms) => now_ms,
                             Err(error) => {
@@ -916,7 +933,7 @@ impl NativeAgent {
                             event_instruction.trim()
                         );
                         let instruction = match cx.update(|cx| {
-                            lnmarkets::portfolio_review_instruction(
+                            driver.review_instruction(
                                 &session_id_text,
                                 now_ms_signed,
                                 &trigger,
@@ -926,63 +943,59 @@ impl NativeAgent {
                             Ok(Some(instruction)) => instruction,
                             Ok(None) => {
                                 log::error!(
-                                    "LN Markets emitted a portfolio event without a claimed review session"
+                                    "a plugin emitted a review event without a claimed review session"
                                 );
                                 continue;
                             }
                             Err(error) => {
                                 log::error!(
-                                    "could not prepare event-triggered portfolio review: {error}"
+                                    "could not prepare event-triggered review: {error}"
                                 );
                                 continue;
                             }
                         };
-                        portfolio_acknowledgement =
+                        event_acknowledgement =
                             Some((source.clone(), event_instruction.clone()));
-                        Some(AgentWakeup::new(
+                        let wakeup = AgentWakeup::new(
                             session_id_text.clone(),
                             now_ms,
                             settings
                                 .max_tokens_per_turn
-                                .min(lnmarkets::PORTFOLIO_REVIEW_TOKEN_BUDGET),
+                                .min(driver.review_token_budget()),
                             source,
                             instruction,
-                        ))
+                        );
+                        event_driver = Some(driver);
+                        Some(wakeup)
                     }
                     None => None,
                 };
-                #[cfg(not(feature = "lnmarkets"))]
-                let event_wakeup: Option<AgentWakeup> = None;
 
-                #[cfg(feature = "lnmarkets")]
-                let (effective_settings, schedule_portfolio_review) = {
+                let (effective_settings, schedule_review) = {
                     let mut effective_settings = settings.clone();
-                    if portfolio_cadence.is_some() {
+                    if let Some((driver, _)) = cadence_driver.as_ref() {
                         effective_settings.max_tokens_per_turn = effective_settings
                             .max_tokens_per_turn
-                            .min(lnmarkets::PORTFOLIO_REVIEW_TOKEN_BUDGET);
+                            .min(driver.review_token_budget());
                     }
-                    let schedule_portfolio_review = match portfolio_cadence.as_ref() {
-                        Some(lnmarkets::ReviewCadence::FundingSettlement) => false,
-                        Some(lnmarkets::ReviewCadence::Interval { seconds }) => {
-                            effective_settings.interval_seconds = *seconds;
-                            effective_settings.poll_seconds =
-                                effective_settings.poll_seconds.min(*seconds);
-                            true
-                        }
-                        None => true,
-                    };
-                    (effective_settings, schedule_portfolio_review)
+                    let schedule_review =
+                        match cadence_driver.as_ref().map(|(_, cadence)| cadence) {
+                            Some(plugin_api::ReviewCadence::EventDriven) => false,
+                            Some(plugin_api::ReviewCadence::Interval { seconds }) => {
+                                effective_settings.interval_seconds = *seconds;
+                                effective_settings.poll_seconds =
+                                    effective_settings.poll_seconds.min(*seconds);
+                                true
+                            }
+                            None => true,
+                        };
+                    (effective_settings, schedule_review)
                 };
-                #[cfg(not(feature = "lnmarkets"))]
-                let effective_settings = settings.clone();
-                #[cfg(not(feature = "lnmarkets"))]
-                let schedule_portfolio_review = true;
 
                 let is_event_wakeup = event_wakeup.is_some();
                 let wakeup = if is_event_wakeup {
                     event_wakeup
-                } else if schedule_portfolio_review {
+                } else if schedule_review {
                     match agent.update(cx, |agent, _cx| {
                         agent.wakeup_governor.scheduled_wakeup(
                             &session_id_text,
@@ -999,11 +1012,10 @@ impl NativeAgent {
                 } else {
                     None
                 };
-                #[cfg(feature = "lnmarkets")]
                 let wakeup = {
                     let mut wakeup = wakeup;
                     if !is_event_wakeup
-                        && portfolio_cadence.is_some()
+                        && let Some((driver, _)) = cadence_driver.as_ref()
                         && let Some(scheduled_wakeup) = wakeup.as_mut()
                     {
                         let now_ms_signed = match i64::try_from(now_ms) {
@@ -1015,7 +1027,7 @@ impl NativeAgent {
                         };
                         let trigger = scheduled_wakeup.source.transcript_label();
                         match cx.update(|cx| {
-                            lnmarkets::portfolio_review_instruction(
+                            driver.review_instruction(
                                 &session_id_text,
                                 now_ms_signed,
                                 &trigger,
@@ -1025,12 +1037,12 @@ impl NativeAgent {
                             Ok(Some(instruction)) => scheduled_wakeup.instruction = instruction,
                             Ok(None) => {
                                 log::error!(
-                                    "scheduled LN Markets review lost its claimed review session"
+                                    "a scheduled plugin review lost its claimed review session"
                                 );
                                 continue;
                             }
                             Err(error) => {
-                                log::error!("could not prepare scheduled portfolio review: {error}");
+                                log::error!("could not prepare a scheduled review: {error}");
                                 continue;
                             }
                         }
@@ -1040,22 +1052,22 @@ impl NativeAgent {
                 let Some(wakeup) = wakeup else {
                     continue;
                 };
-                #[cfg(feature = "lnmarkets")]
                 let review_source = wakeup.source.clone();
-                #[cfg(feature = "lnmarkets")]
                 let review_at_ms = i64::try_from(now_ms).unwrap_or(i64::MAX);
-                #[cfg(feature = "lnmarkets")]
-                let is_portfolio_review = portfolio_cadence.is_some();
                 let connection = NativeAgentConnection(agent);
-                #[cfg(feature = "lnmarkets")]
-                let tokens_before_turn = session_total_tokens(&connection, &session_id, cx);
+                let tokens_before_turn = if cadence_driver.is_some() {
+                    session_total_tokens(&connection, &session_id, cx)
+                } else {
+                    0
+                };
                 let turn = cx.update(|cx| connection.publish_wakeup(wakeup, cx));
                 match turn.await {
                     Ok(_) => {
-                        #[cfg(feature = "lnmarkets")]
-                        if let Some((source, instruction)) = portfolio_acknowledgement {
+                        if let (Some(driver), Some((source, instruction))) =
+                            (event_driver.as_ref(), event_acknowledgement)
+                        {
                             let acknowledged = cx.update(|cx| {
-                                lnmarkets::acknowledge_portfolio_wakeup(
+                                driver.acknowledge_wakeup(
                                     &session_id_text,
                                     &source,
                                     &instruction,
@@ -1064,24 +1076,24 @@ impl NativeAgent {
                             });
                             if !acknowledged {
                                 log::error!(
-                                    "completed LN Markets review could not acknowledge its event"
+                                    "a completed plugin review could not acknowledge its event"
                                 );
                             }
                         }
-                        #[cfg(feature = "lnmarkets")]
-                        if is_portfolio_review {
-                            let evidence = collect_signet_soak_review_turn(
+                        if let Some((driver, _)) = cadence_driver.as_ref() {
+                            let evidence = collect_review_turn_evidence(
                                 &connection,
                                 &session_id,
                                 review_at_ms,
                                 review_source.clone(),
                                 tokens_before_turn,
+                                driver.evidence_tool_names(),
                                 cx,
                             )
                             .await;
                             if let Some(evidence) = evidence {
                                 let recorded = cx.update(|cx| {
-                                    lnmarkets::record_signet_soak_review_turn(
+                                    driver.record_review_evidence(
                                         &session_id_text,
                                         evidence,
                                         cx,
@@ -1089,41 +1101,40 @@ impl NativeAgent {
                                 });
                                 if !recorded {
                                     log::error!(
-                                        "completed LN Markets review evidence could not be added to the signet soak"
+                                        "completed plugin review evidence could not be recorded"
                                     );
                                 }
                             }
                             let recorded = cx.update(|cx| {
-                                lnmarkets::record_portfolio_review_turn(
+                                driver.record_review_turn(
                                     &session_id_text,
                                     review_at_ms,
                                     review_source.clone(),
-                                    lnmarkets::ReviewTurnOutcome::Completed,
+                                    plugin_api::ReviewTurnOutcome::Completed,
                                     cx,
                                 )
                             });
                             if !recorded {
                                 log::error!(
-                                    "completed LN Markets review could not be added to operator history"
+                                    "a completed plugin review could not be added to operator history"
                                 );
                             }
                         }
                     }
                     Err(error) => {
-                        #[cfg(feature = "lnmarkets")]
-                        if is_portfolio_review {
+                        if let Some((driver, _)) = cadence_driver.as_ref() {
                             let recorded = cx.update(|cx| {
-                                lnmarkets::record_portfolio_review_turn(
+                                driver.record_review_turn(
                                     &session_id_text,
                                     review_at_ms,
                                     review_source,
-                                    lnmarkets::ReviewTurnOutcome::Failed,
+                                    plugin_api::ReviewTurnOutcome::Failed,
                                     cx,
                                 )
                             });
                             if !recorded {
                                 log::error!(
-                                    "failed LN Markets review could not be added to operator history"
+                                    "a failed plugin review could not be added to operator history"
                                 );
                             }
                         }
@@ -2376,7 +2387,6 @@ impl NativeAgent {
     }
 }
 
-#[cfg(feature = "lnmarkets")]
 fn session_total_tokens(
     connection: &NativeAgentConnection,
     session_id: &acp::SessionId,
@@ -2394,15 +2404,18 @@ fn session_total_tokens(
         .map_or(0, |usage| usage.total_tokens())
 }
 
-#[cfg(feature = "lnmarkets")]
-async fn collect_signet_soak_review_turn(
+/// Measure the venue-neutral evidence for one completed review turn: whether
+/// the model wrote a reasoning note, how many calls it made to the driver's
+/// tracked tool names, and how many tokens the turn used.
+async fn collect_review_turn_evidence(
     connection: &NativeAgentConnection,
     session_id: &acp::SessionId,
     at_ms: i64,
     source: WakeupSource,
     tokens_before_turn: u64,
+    tracked_tool_names: &[&str],
     cx: &mut AsyncApp,
-) -> Option<lnmarkets::SoakReviewTurn> {
+) -> Option<plugin_api::ReviewTurnEvidence> {
     let thread = connection.0.read_with(cx, |agent, _cx| {
         agent
             .sessions
@@ -2414,7 +2427,7 @@ async fn collect_signet_soak_review_turn(
         .total_tokens();
     let db_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
     let mut reasoning_note_present = false;
-    let mut strategy_card_updates = 0_u32;
+    let mut tracked_tool_calls = 0_u32;
     for message in db_thread.messages.iter().rev() {
         if message.role() == language_model::Role::User {
             break;
@@ -2427,21 +2440,20 @@ async fn collect_signet_soak_review_turn(
                         reasoning_note_present |= !text.trim().is_empty();
                     }
                     language_model::MessageContent::ToolUse(tool_use)
-                        if tool_use.name.as_ref() == "lnmarkets_strategy" =>
+                        if tracked_tool_names.contains(&tool_use.name.as_ref()) =>
                     {
-                        strategy_card_updates = strategy_card_updates.saturating_add(1);
+                        tracked_tool_calls = tracked_tool_calls.saturating_add(1);
                     }
                     _ => {}
                 }
             }
         }
     }
-    Some(lnmarkets::SoakReviewTurn {
+    Some(plugin_api::ReviewTurnEvidence {
         at_ms,
-        transcript_label: source.transcript_label(),
         source,
         reasoning_note_present,
-        strategy_card_updates,
+        tracked_tool_calls,
         tokens_used: tokens_after_turn.saturating_sub(tokens_before_turn),
     })
 }

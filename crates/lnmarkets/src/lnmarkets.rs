@@ -3,21 +3,30 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::Context as _;
 use futures::{AsyncReadExt as _, FutureExt as _, future::BoxFuture};
 use gpui::{App, AppContext as _, Global, Task};
 use http_client::{AsyncBody, HttpClient};
 use lnmarkets_data::{Collector, CollectorConfig, CollectorHandle, MarketDataStore};
 use parking_lot::Mutex;
+use plugin_api::{
+    BackgroundServiceRegistration, CardSchemaRegistration, HostDeclaration, Maturity,
+    PluginManifest, PluginRegistry, Protocol, SettingsPageRegistration,
+};
 
+mod agent_tools;
+mod review_driver;
 mod review_turn;
 mod signet_soak;
 mod trading_runtime;
 
+pub use agent_tools::*;
 pub use agent_wakeup::WakeupSource;
 pub use lnmarkets_ui::{
     LnMarketsOperatorPanel, OperatorBacktestSnapshot, OperatorConsoleSnapshot,
     OperatorConsoleSource, OperatorReviewTurn, OperatorStrategySnapshot,
 };
+pub use review_driver::LnMarketsReviewDriver;
 pub use review_turn::{PORTFOLIO_REVIEW_SCHEMA, PORTFOLIO_REVIEW_TOKEN_BUDGET, PortfolioReview};
 pub use signet_soak::{
     SIGNET_SOAK_SCHEMA, SignetSoakEvidence, SignetSoakReceipt, SignetSoakRefusal, SignetSoakStatus,
@@ -49,32 +58,144 @@ pub use trading_mandate::{
 
 const MAX_TRANSPORT_RESPONSE_BYTES: u64 = 1_048_577;
 
-pub const REST_HOSTS: &[&str] = &["api.signet.lnmarkets.com", "api.lnmarkets.com"];
-pub const STREAM_HOSTS: &[&str] = &["stream.signet.lnmarkets.com", "stream.lnmarkets.com"];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PluginManifest {
-    pub name: &'static str,
-    pub rest_hosts: &'static [&'static str],
-    pub stream_hosts: &'static [&'static str],
-}
-
 pub const MANIFEST: PluginManifest = PluginManifest {
+    id: "lnmarkets",
     name: "LN Markets",
-    rest_hosts: REST_HOSTS,
-    stream_hosts: STREAM_HOSTS,
+    version: env!("CARGO_PKG_VERSION"),
+    // Automated strategies remain signet-only; manual account and swap tools
+    // may address mainnet.
+    maturity: Maturity::Signet,
+    hosts: &[
+        HostDeclaration {
+            host: "api.signet.lnmarkets.com",
+            purpose: "LN Markets plugin v3 signet account, market-data, and trading requests",
+            protocols: &[Protocol::Https],
+        },
+        HostDeclaration {
+            host: "api.lnmarkets.com",
+            purpose: "LN Markets plugin v3 mainnet account, market-data, and explicitly requested trading calls",
+            protocols: &[Protocol::Https],
+        },
+        HostDeclaration {
+            host: "stream.signet.lnmarkets.com",
+            purpose: "LN Markets plugin v1 signet market and account streams",
+            protocols: &[Protocol::Wss],
+        },
+        HostDeclaration {
+            host: "stream.lnmarkets.com",
+            purpose: "LN Markets plugin v1 mainnet market and account streams",
+            protocols: &[Protocol::Wss],
+        },
+    ],
 };
 
-pub struct LnMarketsPlugin {
+/// The LN Markets plugin. Everything the application sees is registered
+/// through [`plugin_api::PluginRegistry`]; core crates never name this crate.
+pub struct LnMarketsPlugin;
+
+impl LnMarketsPlugin {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for LnMarketsPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl plugin_api::OmegaPlugin for LnMarketsPlugin {
+    fn manifest(&self) -> &'static PluginManifest {
+        &MANIFEST
+    }
+
+    fn register(&self, registry: &mut PluginRegistry, cx: &mut App) {
+        start_market_data_service(cx.http_client(), cx);
+        registry.add_background_service(BackgroundServiceRegistration {
+            plugin_id: MANIFEST.id,
+            service_id: "lnmarkets_market_data_collector",
+            description: "App-lifetime LN Markets market-data collector and strategy tick loop",
+        });
+        registry.add_review_driver(std::rc::Rc::new(LnMarketsReviewDriver));
+        registry.add_extension(agent_tools_registration());
+        registry.add_settings_page(settings_page_registration());
+        registry.add_extension(operator_panel_loader());
+        for schema in [
+            "omega.lnmarkets.account.v1",
+            "omega.lnmarkets.market-data.v2",
+            "omega.lnmarkets.market-data.v3",
+            "omega.lnmarkets.features.v1",
+            "omega.lnmarkets.ledger.v1",
+            "omega.lnmarkets.mandate.v1",
+            "omega.lnmarkets.strategy.v1",
+            "omega.lnmarkets.backtest_tool.v1",
+            "omega.lnmarkets.backtest_history.v1",
+            "omega.lnmarkets.swap.v1",
+        ] {
+            registry.add_card_schema(CardSchemaRegistration {
+                plugin_id: MANIFEST.id,
+                schema,
+            });
+        }
+    }
+}
+
+fn settings_page_registration() -> SettingsPageRegistration {
+    SettingsPageRegistration {
+        plugin_id: MANIFEST.id,
+        section: "Trading",
+        title: "LN Markets",
+        description: "Connect an LN Markets account and test its API credentials.",
+        search_aliases: &["LNMarkets", "Bitcoin", "synthetic USD"],
+        page_key: "lnmarkets",
+        build: std::rc::Rc::new(|window, cx| {
+            let page = cx.new(|cx| {
+                LnMarketsSettingsPage::new(
+                    http_transport(cx.http_client()),
+                    zed_credentials_provider::global(cx),
+                    window,
+                    cx,
+                )
+            });
+            page.update(cx, |page, cx| page.load(window, cx));
+            page.into()
+        }),
+    }
+}
+
+fn operator_panel_loader() -> workspace::PluginPanelLoader {
+    workspace::PluginPanelLoader {
+        plugin_id: MANIFEST.id,
+        load: std::rc::Rc::new(|workspace_handle, mut cx| {
+            Box::pin(async move {
+                let source = cx
+                    .update(|_window, cx| operator_console_source(cx))
+                    .context("failed to obtain the LN Markets operator source")?
+                    .map_err(anyhow::Error::msg)?;
+                let operator_panel =
+                    LnMarketsOperatorPanel::load(workspace_handle.clone(), source, cx.clone())
+                        .await
+                        .context("failed to load the LN Markets operator panel")?;
+                workspace_handle.update_in(&mut cx, |workspace, window, cx| {
+                    workspace.add_panel(operator_panel, window, cx);
+                })?;
+                Ok(())
+            })
+        }),
+    }
+}
+
+struct LnMarketsGlobal {
     collector: Arc<Mutex<Option<CollectorHandle>>>,
     trading_runtime: Result<Arc<TradingRuntime>, String>,
     _collector_task: Task<()>,
     _strategy_tick_task: Task<()>,
 }
 
-impl Global for LnMarketsPlugin {}
+impl Global for LnMarketsGlobal {}
 
-pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
+fn start_market_data_service(http_client: Arc<dyn HttpClient>, cx: &mut App) {
     let _registrations = (
         lnmarkets_data::REGISTRATION,
         lnmarkets_trading::REGISTRATION,
@@ -170,7 +291,7 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
             }
         }
     });
-    cx.set_global(LnMarketsPlugin {
+    cx.set_global(LnMarketsGlobal {
         collector,
         trading_runtime,
         _collector_task: collector_task,
@@ -180,12 +301,12 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
 }
 
 pub fn collector(cx: &App) -> Option<CollectorHandle> {
-    cx.try_global::<LnMarketsPlugin>()
+    cx.try_global::<LnMarketsGlobal>()
         .and_then(|plugin| plugin.collector.lock().clone())
 }
 
 pub fn trading_runtime(cx: &App) -> Result<Arc<TradingRuntime>, String> {
-    cx.try_global::<LnMarketsPlugin>()
+    cx.try_global::<LnMarketsGlobal>()
         .ok_or_else(|| "LN Markets is not initialized".to_string())?
         .trading_runtime
         .clone()
@@ -220,7 +341,7 @@ pub fn portfolio_review_cadence(
     session_id: &str,
     cx: &App,
 ) -> Result<Option<ReviewCadence>, String> {
-    let Some(plugin) = cx.try_global::<LnMarketsPlugin>() else {
+    let Some(plugin) = cx.try_global::<LnMarketsGlobal>() else {
         return Ok(None);
     };
     plugin
@@ -263,7 +384,7 @@ pub fn record_signet_soak_review_turn(session_id: &str, turn: SoakReviewTurn, cx
 
 pub fn operator_console_source(cx: &App) -> Result<Arc<dyn OperatorConsoleSource>, String> {
     let plugin = cx
-        .try_global::<LnMarketsPlugin>()
+        .try_global::<LnMarketsGlobal>()
         .ok_or_else(|| "LN Markets is not initialized".to_string())?;
     Ok(Arc::new(PluginOperatorConsoleSource {
         collector: plugin.collector.clone(),

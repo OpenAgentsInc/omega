@@ -5471,20 +5471,78 @@ async fn test_basic_profile_exposes_named_tools(cx: &mut TestAppContext) {
         "resume_thread",
         "write",
     ];
-    #[cfg(feature = "lnmarkets")]
-    expected_tool_names.extend([
-        "lnmarkets_account",
-        "lnmarkets_features",
-        "lnmarkets_ledger",
-        "lnmarkets_mandate",
-        "lnmarkets_market_data",
-        "lnmarkets_strategy",
-        "lnmarkets_swap",
-    ]);
     expected_tool_names.sort_unstable();
     assert_eq!(tool_names_for_completion(&completion), expected_tool_names);
 
     fake_model.send_last_completion_stream_text_chunk("Fixture coding turn complete.");
+    fake_model.end_last_completion_stream();
+    assert_eq!(
+        stop_events(events.collect::<Vec<_>>().await),
+        vec![acp::StopReason::EndTurn]
+    );
+}
+
+/// Tools contributed through the plugin registry reach the model on the
+/// basic profile under their own names, with no plugin named in this crate.
+#[gpui::test]
+async fn test_plugin_registered_tools_reach_the_basic_profile(cx: &mut TestAppContext) {
+    let ThreadTest {
+        model, thread, fs, ..
+    } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    cx.update(|cx| {
+        let mut registry =
+            plugin_api::PluginRegistry::new(std::path::PathBuf::from("/plugin-data"));
+        registry.add_extension(crate::tools::PluginAgentTools {
+            plugin_id: "test_plugin",
+            tool_names: &[EchoTool::NAME],
+            build: Rc::new(|_context, _cx| vec![EchoTool.erase()]),
+        });
+        plugin_api::init_global(registry, cx);
+    });
+
+    fs.insert_file(
+        paths::settings_file(),
+        json!({
+            "agent": {
+                "default_profile": "basic",
+                "profiles": {
+                    "basic": {
+                        "name": "Basic",
+                        "enable_all_context_servers": false,
+                        "tools": {
+                            "echo": true,
+                        },
+                    },
+                },
+            },
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .await;
+    cx.run_until_parked();
+
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let events = thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId("basic".into()), cx);
+        thread.add_default_tools(environment, cx);
+        thread
+            .send(ClientUserMessageId::new(), ["Use the plugin tool"], cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+
+    let completion = fake_model.pending_completions().pop().unwrap();
+    assert!(
+        tool_names_for_completion(&completion).contains(&"echo".to_string()),
+        "the registry-contributed tool did not reach the model surface"
+    );
+
+    fake_model.send_last_completion_stream_text_chunk("Plugin tool turn complete.");
     fake_model.end_last_completion_stream();
     assert_eq!(
         stop_events(events.collect::<Vec<_>>().await),

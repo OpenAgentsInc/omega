@@ -1,0 +1,19 @@
+[package]
+name = "plugin_api"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/plugin_api.rs"
+
+[dependencies]
+agent_wakeup.workspace = true
+gpui.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod omega_zero_base_ui;
+mod plugins;
 mod reliability;
 mod zed;
 
@@ -817,8 +818,7 @@ fn main() {
         account_ui::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
-        #[cfg(feature = "lnmarkets")]
-        lnmarkets::init(app_state.client.http_client(), cx);
+        plugins::init(cx);
         json_schema_store::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);

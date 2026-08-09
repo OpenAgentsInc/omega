@@ -319,7 +319,6 @@ dependencies = [
  "language",
  "language_model",
  "language_models",
- "lnmarkets",
  "log",
  "lsp",
  "omega_agent_detect",
@@ -328,6 +327,7 @@ dependencies = [
  "omega_front_door",
  "parking_lot",
  "paths",
+ "plugin_api",
  "pretty_assertions",
  "project",
  "prompt_store",
@@ -620,6 +620,7 @@ dependencies = [
  "paths",
  "picker",
  "platform_title_bar",
+ "plugin_api",
  "postage",
  "pretty_assertions",
  "project",
@@ -9324,12 +9325,16 @@ dependencies = [
 name = "lnmarkets"
 version = "0.1.0"
 dependencies = [
+ "agent",
+ "agent-client-protocol",
  "agent_wakeup",
  "anyhow",
+ "credentials_provider",
  "futures 0.3.32",
  "gpui",
  "http 1.3.1",
  "http_client",
+ "language_model",
  "lnmarkets_client",
  "lnmarkets_data",
  "lnmarkets_trading",
@@ -9337,12 +9342,16 @@ dependencies = [
  "log",
  "parking_lot",
  "paths",
+ "plugin_api",
  "reqwest_client",
+ "schemars 1.0.4",
  "serde",
  "serde_json",
  "tempfile",
  "trading_ledger",
  "trading_mandate",
+ "ui",
+ "workspace",
  "zed-reqwest",
  "zed_credentials_provider",
 ]
@@ -11369,6 +11378,7 @@ dependencies = [
  "paths",
  "picker",
  "pkg-config",
+ "plugin_api",
  "pretty_assertions",
  "profiling",
  "project",
@@ -13213,6 +13223,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "plugin_api"
+version = "0.1.0"
+dependencies = [
+ "agent_wakeup",
+ "gpui",
 ]
 
 [[package]]
@@ -15885,7 +15903,6 @@ dependencies = [
  "itertools 0.14.0",
  "language",
  "language_model",
- "lnmarkets",
  "log",
  "menu",
  "omega_actions",
@@ -15894,6 +15911,7 @@ dependencies = [
  "paths",
  "picker",
  "platform_title_bar",
+ "plugin_api",
  "pretty_assertions",
  "project",
  "regex",

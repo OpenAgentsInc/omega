@@ -230,6 +230,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0257",
     "OMEGA-DELTA-0258",
     "OMEGA-DELTA-0259",
+    "OMEGA-DELTA-0260",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29005,9 +29006,7 @@ mod tests {
             );
         }
 
-        let tools = without_comments(&read_repository_file(
-            "crates/agent/src/tools/lnmarkets_tools.rs",
-        ));
+        let tools = without_comments(&read_repository_file("crates/lnmarkets/src/agent_tools.rs"));
         for required in [
             "lnmarkets_account",
             "lnmarkets_market_data",
@@ -29045,7 +29044,8 @@ mod tests {
 
         let umbrella = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
         for required in [
-            "pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App)",
+            "fn register(&self, registry: &mut PluginRegistry, cx: &mut App)",
+            "impl plugin_api::OmegaPlugin for LnMarketsPlugin",
             "lnmarkets_data::REGISTRATION",
             "lnmarkets_trading::REGISTRATION",
             "pub const MANIFEST",
@@ -29060,7 +29060,7 @@ mod tests {
         let omega_manifest = without_comments(&read_repository_file("crates/omega/Cargo.toml"));
         for required in [
             "default = [\"lnmarkets\"]",
-            "lnmarkets = [\"dep:lnmarkets\", \"agent/lnmarkets\", \"settings_ui/lnmarkets\"]",
+            "lnmarkets = [\"dep:lnmarkets\"]",
             "lnmarkets = { workspace = true, optional = true }",
         ] {
             assert!(
@@ -29070,8 +29070,8 @@ mod tests {
         }
         let agent_manifest = read_repository_file("crates/agent/Cargo.toml");
         let settings_manifest = read_repository_file("crates/settings_ui/Cargo.toml");
-        assert!(!agent_manifest.contains("lnmarkets_client.workspace"));
-        assert!(!settings_manifest.contains("lnmarkets_client.workspace"));
+        assert!(!agent_manifest.contains("lnmarkets"));
+        assert!(!settings_manifest.contains("lnmarkets"));
 
         let checks = read_repository_file("script/omega-checks");
         for required in [
@@ -29085,8 +29085,15 @@ mod tests {
             );
         }
 
+        // OMEGA-DELTA-0260: plugin hosts come from the registered manifest's
+        // declarations, never from core-owned allowlist data. The core fixture
+        // must not enumerate them; the manifest must declare every one.
         let allowlist =
             read_repository_file("crates/app_identity/fixtures/endpoint_allowlist.json");
+        assert!(
+            !allowlist.contains("lnmarkets"),
+            "OMEGA-DELTA-0260: plugin hosts returned to the core endpoint fixture"
+        );
         for host in [
             "api.signet.lnmarkets.com",
             "api.lnmarkets.com",
@@ -29094,8 +29101,8 @@ mod tests {
             "stream.lnmarkets.com",
         ] {
             assert!(
-                allowlist.contains(host),
-                "OMEGA-DELTA-0241: release endpoint evidence lost `{host}`"
+                umbrella.contains(host),
+                "OMEGA-DELTA-0241: the plugin manifest lost the host declaration `{host}`"
             );
         }
     }
@@ -29663,9 +29670,7 @@ mod tests {
     /// typed, card-backed, and available to the default agent surface.
     #[test]
     fn lnmarkets_agent_tools_are_versioned_bounded_and_visible() {
-        let tools = without_comments(&read_repository_file(
-            "crates/agent/src/tools/lnmarkets_tools.rs",
-        ));
+        let tools = without_comments(&read_repository_file("crates/lnmarkets/src/agent_tools.rs"));
         for required in [
             "const NAME: &'static str = \"lnmarkets_features\"",
             "const NAME: &'static str = \"lnmarkets_ledger\"",
@@ -29781,17 +29786,37 @@ mod tests {
             );
         }
 
+        // OMEGA-DELTA-0260: the agent consults registered review drivers and
+        // never names the plugin; the plugin's driver maps those calls onto
+        // the portfolio review runtime.
         let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
         for required in [
-            "lnmarkets::pending_portfolio_wakeup(",
-            "lnmarkets::portfolio_review_instruction(",
-            "lnmarkets::portfolio_review_cadence(",
-            "lnmarkets::acknowledge_portfolio_wakeup(",
-            ".min(lnmarkets::PORTFOLIO_REVIEW_TOKEN_BUDGET)",
+            "driver.pending_wakeup(",
+            "driver.review_instruction(",
+            "driver.review_cadence(",
+            "driver.acknowledge_wakeup(",
+            ".min(driver.review_token_budget())",
+            "registry.review_drivers()",
         ] {
             assert!(
                 agent.contains(required),
                 "OMEGA-DELTA-0252: portfolio wakeup integration lost `{required}`"
+            );
+        }
+
+        let driver = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/review_driver.rs",
+        ));
+        for required in [
+            "impl SessionReviewDriver for LnMarketsReviewDriver",
+            "pending_portfolio_wakeup(session_id, cx)",
+            "portfolio_review_instruction(session_id, now_ms, trigger, cx)",
+            "acknowledge_portfolio_wakeup(session_id, source, instruction, cx)",
+            "PORTFOLIO_REVIEW_TOKEN_BUDGET",
+        ] {
+            assert!(
+                driver.contains(required),
+                "OMEGA-DELTA-0252: the plugin review driver lost `{required}`"
             );
         }
 
@@ -29897,16 +29922,26 @@ mod tests {
             );
         }
 
-        let startup = without_comments(&read_repository_file("crates/omega/src/zed.rs"));
+        // OMEGA-DELTA-0260: the panel is loaded through the registered plugin
+        // panel loader; startup iterates loaders without naming any plugin.
         for required in [
-            "#[cfg(feature = \"lnmarkets\")]",
-            "lnmarkets::operator_console_source(cx)",
-            "lnmarkets::LnMarketsOperatorPanel::load(",
+            "fn operator_panel_loader() -> workspace::PluginPanelLoader",
+            "LnMarketsOperatorPanel::load(",
             "workspace.add_panel(operator_panel, window, cx)",
         ] {
             assert!(
+                facade.contains(required),
+                "OMEGA-DELTA-0253: the registered operator panel loader lost `{required}`"
+            );
+        }
+        let startup = without_comments(&read_repository_file("crates/omega/src/zed.rs"));
+        for required in [
+            "extensions::<workspace::PluginPanelLoader>()",
+            "(panel_loader.load)(workspace_handle.clone(), cx.clone())",
+        ] {
+            assert!(
                 startup.contains(required),
-                "OMEGA-DELTA-0253: feature-gated operator startup lost `{required}`"
+                "OMEGA-DELTA-0253: generic plugin panel startup lost `{required}`"
             );
         }
     }
@@ -29970,17 +30005,29 @@ mod tests {
             );
         }
 
+        // OMEGA-DELTA-0260: the agent measures venue-neutral review evidence
+        // and hands it to the registered driver; the driver names the tracked
+        // strategy tool and records the soak turn.
         let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
         for required in [
-            "collect_signet_soak_review_turn(",
+            "collect_review_turn_evidence(",
             "thread.cumulative_token_usage()",
             "reasoning_note_present",
-            "lnmarkets_strategy",
-            "record_signet_soak_review_turn(",
+            "driver.evidence_tool_names()",
+            "driver.record_review_evidence(",
         ] {
             assert!(
                 agent.contains(required),
                 "OMEGA-DELTA-0254: autonomous review measurement lost `{required}`"
+            );
+        }
+        let driver = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/review_driver.rs",
+        ));
+        for required in ["\"lnmarkets_strategy\"", "record_signet_soak_review_turn("] {
+            assert!(
+                driver.contains(required),
+                "OMEGA-DELTA-0254: soak evidence recording lost `{required}`"
             );
         }
     }
@@ -30136,9 +30183,7 @@ mod tests {
             );
         }
 
-        let tools = without_comments(&read_repository_file(
-            "crates/agent/src/tools/lnmarkets_tools.rs",
-        ));
+        let tools = without_comments(&read_repository_file("crates/lnmarkets/src/agent_tools.rs"));
         for required in [
             "ThresholdSwing",
             "start_threshold_swing(client, config, at_ms, cx)",
@@ -30276,5 +30321,95 @@ mod tests {
             backtest.contains("backtest execution models do not support cancel intents yet"),
             "OMEGA-DELTA-0259: backtests silently accept cancel intents they cannot model"
         );
+    }
+
+    /// Core crates consume plugin surfaces only through the registry: no
+    /// plugin identifier appears in `crates/agent`, `crates/settings_ui`, or
+    /// `crates/app_identity`, and inside `crates/omega` only `plugins.rs` and
+    /// the Cargo manifest may name a plugin.
+    #[test]
+    fn plugin_identifiers_stay_out_of_core_crates() {
+        const PLUGIN_IDENTIFIERS: &[&str] = &["lnmarkets"];
+
+        for sealed_crate in ["crates/agent", "crates/settings_ui", "crates/app_identity"] {
+            for_each_source_file(
+                &repository_path(sealed_crate),
+                &["rs", "toml", "json"],
+                |path, source| {
+                    for identifier in PLUGIN_IDENTIFIERS {
+                        assert!(
+                            !source.contains(identifier),
+                            "OMEGA-DELTA-0260: `{identifier}` appears in sealed core file {}",
+                            path.display()
+                        );
+                    }
+                },
+            );
+        }
+
+        for_each_source_file(&repository_path("crates/omega"), &["rs"], |path, source| {
+            if path.file_name().is_some_and(|name| name == "plugins.rs") {
+                return;
+            }
+            for identifier in PLUGIN_IDENTIFIERS {
+                assert!(
+                    !source.contains(identifier),
+                    "OMEGA-DELTA-0260: `{identifier}` appears outside plugins.rs in {}",
+                    path.display()
+                );
+            }
+        });
+
+        let plugins = without_comments(&read_repository_file("crates/omega/src/plugins.rs"));
+        for required in [
+            "pub fn builtin_plugins() -> Vec<Box<dyn OmegaPlugin>>",
+            "#[cfg(feature = \"lnmarkets\")]",
+            "lnmarkets::LnMarketsPlugin::new()",
+            "registry.register_plugin(plugin.as_ref(), cx)",
+            "plugin_api::init_global(registry, cx)",
+        ] {
+            assert!(
+                plugins.contains(required),
+                "OMEGA-DELTA-0260: the single plugin registration point lost `{required}`"
+            );
+        }
+
+        // The registry seams the sealed crates consume instead of naming
+        // plugins: agent tools and review drivers in `agent`, settings pages
+        // in `settings_ui`, panel loaders at startup, and the host-declaration
+        // union in `plugin_api`.
+        let thread = without_comments(&read_repository_file("crates/agent/src/thread.rs"));
+        assert!(
+            thread.contains("registry.extensions::<PluginAgentTools>()"),
+            "OMEGA-DELTA-0260: thread construction no longer consults the plugin tool registry"
+        );
+        let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
+        assert!(
+            agent.contains("registry.review_drivers()"),
+            "OMEGA-DELTA-0260: the wakeup scheduler no longer consults registered review drivers"
+        );
+        let settings = without_comments(&read_repository_file(
+            "crates/settings_ui/src/settings_ui.rs",
+        ));
+        assert!(
+            settings.contains("registry")
+                && settings.contains("settings_pages()")
+                && settings.contains("plugin_settings_pages"),
+            "OMEGA-DELTA-0260: the settings surface no longer consults the page registry"
+        );
+        let registry_api =
+            without_comments(&read_repository_file("crates/plugin_api/src/plugin_api.rs"));
+        for required in [
+            "pub trait OmegaPlugin",
+            "pub struct PluginRegistry",
+            "pub fn allowed_hosts(",
+            "pub fn plugin_data_directory(",
+            "pub trait SessionReviewDriver",
+        ] {
+            assert!(
+                registry_api.contains(required),
+                "OMEGA-DELTA-0260: the plugin contract lost `{required}`"
+            );
+        }
     }
 }

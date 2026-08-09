@@ -17,7 +17,7 @@ workspace = true
 
 [features]
 default = ["lnmarkets"]
-lnmarkets = ["dep:lnmarkets", "agent/lnmarkets", "settings_ui/lnmarkets"]
+lnmarkets = ["dep:lnmarkets"]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features omega/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
@@ -156,6 +156,7 @@ notifications.workspace = true
 onboarding.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
+plugin_api.workspace = true
 picker.workspace = true
 profiling.workspace = true
 project.workspace = true

@@ -371,6 +371,17 @@ impl ManageProfilesModal {
         };
 
         let provider = self.active_model.as_ref().map(|model| model.provider_id());
+        // Plugin-registered tools are offered under their declared names; the
+        // per-instance provider check still applies at request time.
+        let plugin_tool_names = plugin_api::registry(cx)
+            .map(|registry| {
+                registry
+                    .extensions::<agent::PluginAgentTools>()
+                    .iter()
+                    .flat_map(|tools| tools.tool_names.iter().copied())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let tool_names: Vec<Arc<str>> = agent::ALL_TOOL_NAMES
             .iter()
             .copied()
@@ -383,6 +394,7 @@ impl ManageProfilesModal {
                 // they reach the model (#56778).
                 supported_by_provider && agent::tool_feature_flag_enabled(name, cx)
             })
+            .chain(plugin_tool_names)
             .map(Arc::from)
             .collect();
 

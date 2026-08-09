@@ -783,24 +783,21 @@ pub(crate) fn initialize_panels(
             }
         }
 
-        #[cfg(feature = "lnmarkets")]
-        if let Some(source) = cx
-            .update(|_window, cx| lnmarkets::operator_console_source(cx))
-            .context("failed to obtain the LN Markets operator source")
-            .and_then(|source| source.map_err(anyhow::Error::msg))
-            .log_err()
-            && let Some(operator_panel) = lnmarkets::LnMarketsOperatorPanel::load(
-                workspace_handle.clone(),
-                source,
-                cx.clone(),
-            )
-            .await
-            .context("failed to load the LN Markets operator panel")
-            .log_err()
-        {
-            workspace_handle
-                .update_in(cx, |workspace, window, cx| {
-                    workspace.add_panel(operator_panel, window, cx);
+        // Plugin-contributed dock panels load after the built-in workbench
+        // panels. Each registered loader owns its whole flow, so a failing
+        // plugin panel is logged without blocking the rest of startup.
+        let plugin_panel_loaders = cx
+            .update(|_window, cx| {
+                plugin_api::registry(cx)
+                    .map(|registry| registry.extensions::<workspace::PluginPanelLoader>())
+                    .unwrap_or_default()
+            })
+            .context("failed to read the plugin panel registrations")?;
+        for panel_loader in plugin_panel_loaders {
+            (panel_loader.load)(workspace_handle.clone(), cx.clone())
+                .await
+                .with_context(|| {
+                    format!("failed to load a {} plugin panel", panel_loader.plugin_id)
                 })
                 .log_err();
         }

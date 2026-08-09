@@ -18,8 +18,6 @@ mod go_to_definition_tool;
 mod grep_tool;
 mod list_agents_and_models_tool;
 mod list_directory_tool;
-#[cfg(feature = "lnmarkets")]
-mod lnmarkets_tools;
 mod market_demo_tools;
 mod move_path_tool;
 mod read_file_tool;
@@ -95,8 +93,6 @@ pub use go_to_definition_tool::*;
 pub use grep_tool::*;
 pub use list_agents_and_models_tool::*;
 pub use list_directory_tool::*;
-#[cfg(feature = "lnmarkets")]
-pub use lnmarkets_tools::*;
 pub use market_demo_tools::*;
 pub use move_path_tool::*;
 pub use read_file_tool::*;
@@ -235,20 +231,6 @@ tools! {
     GrepTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsAccountTool,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsFeaturesTool,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsLedgerTool,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsMandateTool,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsMarketDataTool,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsStrategyTool,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsSwapTool,
     MarketNetworkStatusTool,
     MarketProvisionCloudTool,
     MarketSwapQuoteTool,
@@ -280,20 +262,6 @@ pub const BASIC_TOOL_NAMES: &[&str] = &[
     MarketSwapQuoteTool::NAME,
     MarketExecuteSwapTool::NAME,
     MarketSwapStatusTool::NAME,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsAccountTool::NAME,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsFeaturesTool::NAME,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsLedgerTool::NAME,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsMandateTool::NAME,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsMarketDataTool::NAME,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsStrategyTool::NAME,
-    #[cfg(feature = "lnmarkets")]
-    LnMarketsSwapTool::NAME,
 ];
 
 pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
@@ -309,22 +277,41 @@ pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
         MarketSwapQuoteTool::NAME => Some(MarketSwapQuoteTool::NAME),
         MarketExecuteSwapTool::NAME => Some(MarketExecuteSwapTool::NAME),
         MarketSwapStatusTool::NAME => Some(MarketSwapStatusTool::NAME),
-        #[cfg(feature = "lnmarkets")]
-        LnMarketsAccountTool::NAME => Some(LnMarketsAccountTool::NAME),
-        #[cfg(feature = "lnmarkets")]
-        LnMarketsFeaturesTool::NAME => Some(LnMarketsFeaturesTool::NAME),
-        #[cfg(feature = "lnmarkets")]
-        LnMarketsLedgerTool::NAME => Some(LnMarketsLedgerTool::NAME),
-        #[cfg(feature = "lnmarkets")]
-        LnMarketsMandateTool::NAME => Some(LnMarketsMandateTool::NAME),
-        #[cfg(feature = "lnmarkets")]
-        LnMarketsMarketDataTool::NAME => Some(LnMarketsMarketDataTool::NAME),
-        #[cfg(feature = "lnmarkets")]
-        LnMarketsStrategyTool::NAME => Some(LnMarketsStrategyTool::NAME),
-        #[cfg(feature = "lnmarkets")]
-        LnMarketsSwapTool::NAME => Some(LnMarketsSwapTool::NAME),
         _ => None,
     }
+}
+
+/// Everything a plugin's tool factory receives when a thread is constructed.
+pub struct PluginToolContext {
+    pub http_client: std::sync::Arc<dyn http_client::HttpClient>,
+    pub credentials_provider: std::sync::Arc<dyn credentials_provider::CredentialsProvider>,
+    pub session_id: String,
+}
+
+/// A plugin's agent-tool contribution, registered through the plugin
+/// registry's extension surface. The plugin implements [`crate::AgentTool`]
+/// against this crate and hands back erased tools; the thread consults the
+/// registry at construction instead of naming any plugin.
+pub struct PluginAgentTools {
+    pub plugin_id: &'static str,
+    /// The exact tool names `build` produces. Declared statically so profile
+    /// filtering (including the basic profile's pass-through) and the profile
+    /// configuration UI can see plugin tools without instantiating them.
+    pub tool_names: &'static [&'static str],
+    pub build: std::rc::Rc<
+        dyn Fn(&PluginToolContext, &mut App) -> Vec<std::sync::Arc<dyn crate::AnyAgentTool>>,
+    >,
+}
+
+/// The registered plugin tool name matching `tool_name`, if any. Plugin tools
+/// keep their own names on every profile, including the basic profile.
+pub fn registered_plugin_tool_name(tool_name: &str, cx: &App) -> Option<&'static str> {
+    let registry = plugin_api::registry(cx)?;
+    registry
+        .extensions::<PluginAgentTools>()
+        .iter()
+        .flat_map(|tools| tools.tool_names.iter().copied())
+        .find(|name| *name == tool_name)
 }
 
 /// Some built-in tools are gated behind a feature flag and only become usable

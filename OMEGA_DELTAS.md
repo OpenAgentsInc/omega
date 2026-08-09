@@ -9961,7 +9961,7 @@ accessors preserve the values needed by account cards.
 - **Enforced by:** signer, retry, request-body, and credential tests in
   `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in
   `omega_deltas`; the feature-off checks in `script/omega-checks`; and the
-  endpoint declarations in `app_identity`.
+  host declarations in the plugin manifest (see OMEGA-DELTA-0260).
 
 ### OMEGA-DELTA-0244 — Trading profit has one venue-neutral ledger
 
@@ -10301,3 +10301,36 @@ simulate them honestly.
 - **Enforced by:** `strategy_engine` unit tests and
   `strategy_cancels_are_admissible_single_attempt_and_typed` in
   `omega_deltas`.
+### OMEGA-DELTA-0260 — Plugins register through one registry; core crates name no plugin
+
+Omega has a plugin contract in `plugin_api`: a plugin implements one
+registration trait and contributes its manifest, background services, agent
+tools, settings pages, card schemas, session review drivers, and workbench
+panels through one registry populated at startup. Core crates read the
+registry; `crates/omega/src/plugins.rs` is the only file in the application
+that names a plugin, and the Cargo feature there remains the whole
+ship-or-omit decision. The registry also hands each plugin a
+`plugins/<id>/` data directory under the app data dir.
+
+The agent constructs plugin tools from registered factories at thread
+construction, exposes them on the basic profile under their declared names,
+and drives unattended review turns through registered review drivers —
+cadence, token budget, pending events, instructions, outcomes, and measured
+turn evidence all cross that seam. The settings surface builds registered
+pages per window and links them under their declared sections. Startup loads
+registered panels after the built-in workbench panels. The allowed plugin
+network hosts are the union of registered manifests' host declarations, each
+with a stated purpose; the core endpoint fixture no longer enumerates any
+plugin host, so adding a host is a manifest change with its own delta entry.
+
+No plugin identifier appears in `crates/agent`, `crates/settings_ui`, or
+`crates/app_identity`, and inside `crates/omega` only `plugins.rs` and the
+Cargo manifest may name one. The feature-off build now proves the registry
+seam rather than scattered cfg gates. Behavior is unchanged: the same tools,
+settings page, operator panel, review turns, and hosts as before the
+inversion.
+
+- **Enforced by:** `plugin_api` and `agent` unit tests, the
+  `builtin_plugin_manifests_declare_their_hosts_with_purposes` test in
+  `crates/omega`, `plugin_identifiers_stay_out_of_core_crates` in
+  `omega_deltas`, and the feature-off checks in `script/omega-checks`.

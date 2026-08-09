@@ -8,17 +8,18 @@ use credentials_provider::CredentialsProvider;
 use gpui::{App, AsyncApp, Task};
 use http_client::HttpClient;
 use language_model::LanguageModelToolResultContent;
-use lnmarkets::{
-    AccountHistoryQuery, CREDENTIAL_STORAGE_URL, CandleResolution, CandlesQuery, Credentials,
-    LightningDepositsQuery, LnMarketsClient, LnMarketsStreamClient, Network, NewSwapRequest,
-    NotificationsQuery, Pagination, StoredCredentials, StreamTopic, http_transport,
-};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use ui::SharedString;
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use agent::{AgentTool, ToolCallEventStream, ToolInput};
+
+use crate::{
+    AccountHistoryQuery, CREDENTIAL_STORAGE_URL, CandleResolution, CandlesQuery, Credentials,
+    LightningDepositsQuery, LnMarketsClient, LnMarketsStreamClient, Network, NewSwapRequest,
+    NotificationsQuery, Pagination, StoredCredentials, StreamTopic, http_transport,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -309,7 +310,7 @@ impl AgentTool for LnMarketsMarketDataTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let collector = lnmarkets::collector(cx);
+        let collector = crate::collector(cx);
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -628,7 +629,7 @@ impl AgentTool for LnMarketsFeaturesTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let collector = lnmarkets::collector(cx);
+        let collector = crate::collector(cx);
         cx.spawn(async move |_cx| {
             input
                 .recv()
@@ -700,7 +701,7 @@ impl AgentTool for LnMarketsLedgerTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let runtime = lnmarkets::trading_runtime(cx);
+        let runtime = crate::trading_runtime(cx);
         cx.spawn(async move |_cx| {
             let input = input
                 .recv()
@@ -709,7 +710,7 @@ impl AgentTool for LnMarketsLedgerTool {
             require_limit("ledger entry count", input.entry_limit, 0, 100)
                 .map_err(LnMarketsToolOutput::error)?;
             let runtime = runtime.map_err(LnMarketsToolOutput::error)?;
-            let query = lnmarkets::LedgerQuery {
+            let query = crate::LedgerQuery {
                 from_ms: input.from_ms,
                 to_ms: input.to_ms,
                 strategy_id: input.strategy_id,
@@ -764,7 +765,7 @@ impl AgentTool for LnMarketsMandateTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let runtime = lnmarkets::trading_runtime(cx);
+        let runtime = crate::trading_runtime(cx);
         cx.spawn(async move |_cx| {
             let input = input
                 .recv()
@@ -879,7 +880,7 @@ pub struct LnMarketsBacktestCostModelInput {
     measured_at_ms: i64,
 }
 
-impl From<LnMarketsBacktestCostModelInput> for lnmarkets::BacktestCostModel {
+impl From<LnMarketsBacktestCostModelInput> for crate::BacktestCostModel {
     fn from(model: LnMarketsBacktestCostModelInput) -> Self {
         Self {
             taker_fee_bps: model.taker_fee_bps,
@@ -897,7 +898,7 @@ pub struct LnMarketsBacktestPolicyInput {
     maximum_drawdown_sats: u64,
 }
 
-impl From<LnMarketsBacktestPolicyInput> for lnmarkets::BacktestPolicy {
+impl From<LnMarketsBacktestPolicyInput> for crate::BacktestPolicy {
     fn from(policy: LnMarketsBacktestPolicyInput) -> Self {
         Self {
             minimum_trade_count: policy.minimum_trade_count,
@@ -949,8 +950,8 @@ impl AgentTool for LnMarketsStrategyTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let runtime = lnmarkets::trading_runtime(cx);
-        let collector = lnmarkets::collector(cx);
+        let runtime = crate::trading_runtime(cx);
+        let collector = crate::collector(cx);
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -1214,7 +1215,7 @@ fn pending_strategy_status(action: &str) -> &'static str {
 
 fn completed_strategy_status(
     action: &str,
-    strategies: &[lnmarkets::StrategyRuntimeSnapshot],
+    strategies: &[crate::StrategyRuntimeSnapshot],
 ) -> &'static str {
     match action {
         "backtest" => "completed",
@@ -1342,6 +1343,39 @@ impl AgentTool for LnMarketsSwapTool {
     }
 }
 
+/// The plugin's agent-tool contribution, consumed by the agent's thread
+/// construction through the plugin registry.
+pub fn agent_tools_registration() -> agent::PluginAgentTools {
+    agent::PluginAgentTools {
+        plugin_id: "lnmarkets",
+        tool_names: &[
+            LnMarketsAccountTool::NAME,
+            LnMarketsMarketDataTool::NAME,
+            LnMarketsSwapTool::NAME,
+            LnMarketsFeaturesTool::NAME,
+            LnMarketsLedgerTool::NAME,
+            LnMarketsStrategyTool::NAME,
+            LnMarketsMandateTool::NAME,
+        ],
+        build: std::rc::Rc::new(|context, _cx| {
+            let (account, market_data, swap, features, ledger, strategy, mandate) = lnmarkets_tools(
+                context.http_client.clone(),
+                context.credentials_provider.clone(),
+                context.session_id.clone(),
+            );
+            vec![
+                account.erase(),
+                market_data.erase(),
+                swap.erase(),
+                features.erase(),
+                ledger.erase(),
+                strategy.erase(),
+                mandate.erase(),
+            ]
+        }),
+    }
+}
+
 pub fn lnmarkets_tools(
     http_client: Arc<dyn HttpClient>,
     credentials_provider: Arc<dyn CredentialsProvider>,
@@ -1396,7 +1430,7 @@ fn require_limit(label: &str, value: u16, minimum: u16, maximum: u16) -> Result<
     ))
 }
 
-fn tool_section<T: Serialize>(result: Result<T, lnmarkets::Error>) -> Value {
+fn tool_section<T: Serialize>(result: Result<T, crate::Error>) -> Value {
     match result {
         Ok(data) => match serde_json::to_value(data) {
             Ok(data) => json!({ "ok": true, "data": data }),
@@ -1501,7 +1535,7 @@ mod tests {
 
     #[test]
     fn strategy_card_status_tracks_the_command_lifecycle() {
-        let strategies = vec![lnmarkets::StrategyRuntimeSnapshot {
+        let strategies = vec![crate::StrategyRuntimeSnapshot {
             strategy_id: "funding_carry".to_string(),
             status: "running".to_string(),
             started_at_ms: Some(1),

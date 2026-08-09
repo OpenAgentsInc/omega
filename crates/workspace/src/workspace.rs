@@ -1343,6 +1343,21 @@ struct DispatchingKeystrokes {
     task: Option<Shared<Task<()>>>,
 }
 
+/// A dock panel contributed by a plugin. Plugins register one of these
+/// through the plugin registry's extension surface at startup; the app loads
+/// every registered panel after the built-in workbench panels, without naming
+/// any plugin. The loader owns the whole flow, including
+/// [`Workspace::add_panel`], because panel types are only known to the plugin.
+pub struct PluginPanelLoader {
+    pub plugin_id: &'static str,
+    pub load: std::rc::Rc<
+        dyn Fn(
+            WeakEntity<Workspace>,
+            AsyncWindowContext,
+        ) -> futures::future::LocalBoxFuture<'static, anyhow::Result<()>>,
+    >,
+}
+
 /// Collects everything project-related for a certain window opened.
 /// In some way, is a counterpart of a window, as the [`WindowHandle`] could be downcast into `Workspace`.
 ///

@@ -60,10 +60,24 @@ use crate::pages::{
     CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,
     render_output_audio_device_dropdown,
 };
-#[cfg(feature = "lnmarkets")]
-use lnmarkets::LnMarketsSettingsPage;
-
 const NAVBAR_CONTAINER_TAB_INDEX: isize = 0;
+
+/// Build the settings-page views every registered plugin contributed. Views
+/// are constructed once per settings window and rendered through
+/// `pages::render_plugin_settings_page`, keyed by the registration's page key.
+fn build_plugin_settings_pages(
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<(&'static str, gpui::AnyView)> {
+    let Some(registry) = plugin_api::registry(cx) else {
+        return Vec::new();
+    };
+    registry
+        .settings_pages()
+        .iter()
+        .map(|page| (page.page_key, (page.build)(window, cx)))
+        .collect()
+}
 const NAVBAR_GROUP_TAB_INDEX: isize = 1;
 
 const HEADER_CONTAINER_TAB_INDEX: isize = 2;
@@ -1111,8 +1125,9 @@ pub struct SettingsWindow {
     /// Cached configuration views per provider, created lazily.
     pub(crate) provider_configuration_views:
         HashMap<language_model::LanguageModelProviderId, gpui::AnyView>,
-    #[cfg(feature = "lnmarkets")]
-    pub(crate) lnmarkets_settings_page: Entity<LnMarketsSettingsPage>,
+    /// Plugin-registered settings-page views, keyed by their registration's
+    /// page key.
+    pub(crate) plugin_settings_pages: Vec<(&'static str, gpui::AnyView)>,
     /// The provider whose configuration sub-page is currently open, if any.
     pub(crate) configuring_provider: Option<language_model::LanguageModelProviderId>,
     /// Directory path of the skill whose share link was most recently copied,
@@ -2137,17 +2152,7 @@ impl SettingsWindow {
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(0.0)).measure_all();
         list_state.set_scroll_handler(|_, _, _| {});
 
-        #[cfg(feature = "lnmarkets")]
-        let lnmarkets_settings_page = cx.new(|cx| {
-            LnMarketsSettingsPage::new(
-                lnmarkets::http_transport(cx.http_client()),
-                zed_credentials_provider::global(cx),
-                window,
-                cx,
-            )
-        });
-        #[cfg(feature = "lnmarkets")]
-        lnmarkets_settings_page.update(cx, |page, cx| page.load(window, cx));
+        let plugin_settings_pages = build_plugin_settings_pages(window, cx);
 
         let mut this = Self {
             kind,
@@ -2199,8 +2204,7 @@ impl SettingsWindow {
             list_state,
             last_copied_link_path: None,
             provider_configuration_views: HashMap::default(),
-            #[cfg(feature = "lnmarkets")]
-            lnmarkets_settings_page,
+            plugin_settings_pages,
             configuring_provider: None,
             last_copied_skill_directory_path: None,
             llm_provider_form: None,
@@ -5892,15 +5896,7 @@ pub mod test {
         #[cfg(any(test, feature = "test-support"))]
         pub fn test(window: &mut Window, cx: &mut Context<Self>) -> Self {
             let search_bar = cx.new(|cx| Editor::single_line(window, cx));
-            #[cfg(feature = "lnmarkets")]
-            let lnmarkets_settings_page = cx.new(|cx| {
-                LnMarketsSettingsPage::new(
-                    lnmarkets::http_transport(cx.http_client()),
-                    zed_credentials_provider::global(cx),
-                    window,
-                    cx,
-                )
-            });
+            let plugin_settings_pages = build_plugin_settings_pages(window, cx);
             let dummy_page = SettingsPage {
                 title: "Test",
                 items: Box::new([]),
@@ -5950,8 +5946,7 @@ pub mod test {
                 sandbox_host_validation_error: None,
                 last_copied_link_path: None,
                 provider_configuration_views: HashMap::default(),
-                #[cfg(feature = "lnmarkets")]
-                lnmarkets_settings_page,
+                plugin_settings_pages,
                 configuring_provider: None,
                 last_copied_skill_directory_path: None,
                 llm_provider_form: None,
@@ -6053,15 +6048,7 @@ pub mod test {
             })
             .collect();
 
-        #[cfg(feature = "lnmarkets")]
-        let lnmarkets_settings_page = cx.new(|cx| {
-            LnMarketsSettingsPage::new(
-                lnmarkets::http_transport(cx.http_client()),
-                zed_credentials_provider::global(cx),
-                window,
-                cx,
-            )
-        });
+        let plugin_settings_pages = build_plugin_settings_pages(window, cx);
         let mut settings_window = SettingsWindow {
             kind: SettingsWindowKind::Legacy,
             embedded: false,
@@ -6107,8 +6094,7 @@ pub mod test {
             sandbox_host_validation_error: None,
             last_copied_link_path: None,
             provider_configuration_views: HashMap::default(),
-            #[cfg(feature = "lnmarkets")]
-            lnmarkets_settings_page,
+            plugin_settings_pages,
             configuring_provider: None,
             last_copied_skill_directory_path: None,
             llm_provider_form: None,

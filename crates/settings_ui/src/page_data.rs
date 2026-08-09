@@ -127,23 +127,38 @@ pub(crate) fn omega_settings_data(cx: &App) -> Vec<SettingsPage> {
         SettingsPageItem::SectionHeader("Providers"),
     ];
     items.extend(provider_items);
-    #[cfg(feature = "lnmarkets")]
-    items.push(SettingsPageItem::SectionHeader("Trading"));
-    #[cfg(feature = "lnmarkets")]
-    items.push(SettingsPageItem::SubPageLink(SubPageLink {
-        title: "LN Markets".into(),
-        r#type: Default::default(),
-        description: Some("Connect an LN Markets account and test its API credentials.".into()),
-        search_aliases: &["LNMarkets", "Bitcoin", "synthetic USD"],
-        json_path: Some("lnmarkets"),
-        in_json: false,
-        files: USER,
-        render: crate::pages::render_lnmarkets_settings_page,
-    }));
+    items.extend(plugin_settings_page_items(cx));
     vec![SettingsPage {
         title: "API Keys",
         items: items.into_boxed_slice(),
     }]
+}
+
+/// The section headers and sub-page links for every settings page registered
+/// through the plugin registry, in registration order.
+fn plugin_settings_page_items(cx: &App) -> Vec<SettingsPageItem> {
+    let Some(registry) = plugin_api::registry(cx) else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    let mut current_section = None;
+    for page in registry.settings_pages() {
+        if current_section != Some(page.section) {
+            items.push(SettingsPageItem::SectionHeader(page.section));
+            current_section = Some(page.section);
+        }
+        items.push(SettingsPageItem::SubPageLink(SubPageLink {
+            title: page.title.into(),
+            r#type: Default::default(),
+            description: Some(page.description.into()),
+            search_aliases: page.search_aliases,
+            json_path: Some(page.page_key),
+            in_json: false,
+            files: USER,
+            render: crate::pages::render_plugin_settings_page,
+        }));
+    }
+    items
 }
 
 fn developer_page(cx: &App) -> SettingsPage {

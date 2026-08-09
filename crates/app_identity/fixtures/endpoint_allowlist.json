@@ -67,46 +67,6 @@
       ]
     },
     {
-      "host": "api.signet.lnmarkets.com",
-      "purpose": "LN Markets plugin v3 signet account, market-data, and trading requests",
-      "owner": "OpenAgents",
-      "disposition": "approved",
-      "expiry": "none",
-      "paths": [
-        "/v3/"
-      ]
-    },
-    {
-      "host": "api.lnmarkets.com",
-      "purpose": "LN Markets plugin v3 mainnet account, market-data, and explicitly requested trading calls",
-      "owner": "OpenAgents",
-      "disposition": "approved",
-      "expiry": "none",
-      "paths": [
-        "/v3/"
-      ]
-    },
-    {
-      "host": "stream.signet.lnmarkets.com",
-      "purpose": "LN Markets plugin v1 signet market and account streams",
-      "owner": "OpenAgents",
-      "disposition": "approved",
-      "expiry": "none",
-      "paths": [
-        "/v1/"
-      ]
-    },
-    {
-      "host": "stream.lnmarkets.com",
-      "purpose": "LN Markets plugin v1 mainnet market and account streams",
-      "owner": "OpenAgents",
-      "disposition": "approved",
-      "expiry": "none",
-      "paths": [
-        "/v1/"
-      ]
-    },
-    {
       "host": "zed.dev",
       "purpose": "Inherited Zed production app server",
       "owner": "OpenAgents",

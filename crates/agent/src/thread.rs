@@ -1,5 +1,3 @@
-#[cfg(feature = "lnmarkets")]
-use crate::lnmarkets_tools;
 use crate::{
     ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
     CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
@@ -14,7 +12,9 @@ use crate::{
     ThreadForkOrigin, ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock,
     TranscriptEntry, TranscriptRole, TranscriptWindowRequest,
     ValidateCandidateDiffApplicabilityTool, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings, market_demo_tools, tool_result_artifact_source,
+    decide_permission_from_settings, market_demo_tools, registered_plugin_tool_name,
+    tool_result_artifact_source,
+    tools::{PluginAgentTools, PluginToolContext},
 };
 use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
 use action_log::ActionLog;
@@ -2545,29 +2545,17 @@ impl Thread {
         self.add_tool(swap_status);
         self.add_tool(provision_cloud);
 
-        #[cfg(feature = "lnmarkets")]
-        {
-            let http_client = self.project.read(cx).client().http_client();
-            let (
-                lnmarkets_account,
-                lnmarkets_market_data,
-                lnmarkets_swap,
-                lnmarkets_features,
-                lnmarkets_ledger,
-                lnmarkets_strategy,
-                lnmarkets_mandate,
-            ) = lnmarkets_tools(
-                http_client,
-                zed_credentials_provider::global(cx),
-                self.id().to_string(),
-            );
-            self.add_tool(lnmarkets_account);
-            self.add_tool(lnmarkets_market_data);
-            self.add_tool(lnmarkets_swap);
-            self.add_tool(lnmarkets_features);
-            self.add_tool(lnmarkets_ledger);
-            self.add_tool(lnmarkets_strategy);
-            self.add_tool(lnmarkets_mandate);
+        if let Some(registry) = plugin_api::registry(cx) {
+            let context = PluginToolContext {
+                http_client: self.project.read(cx).client().http_client(),
+                credentials_provider: zed_credentials_provider::global(cx),
+                session_id: self.id().to_string(),
+            };
+            for plugin_tools in registry.extensions::<PluginAgentTools>() {
+                for tool in (plugin_tools.build)(&context, cx) {
+                    self.add_erased_tool(tool);
+                }
+            }
         }
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
@@ -2646,6 +2634,17 @@ impl Thread {
             T::NAME,
         );
         self.tools.insert(T::NAME.into(), tool.erase());
+    }
+
+    /// Add an already erased tool, as produced by a registered plugin's tool
+    /// factory.
+    pub fn add_erased_tool(&mut self, tool: Arc<dyn AnyAgentTool>) {
+        let name = tool.name();
+        debug_assert!(
+            !self.tools.contains_key(&name),
+            "Duplicate tool name: {name}",
+        );
+        self.tools.insert(name, tool);
     }
 
     pub fn add_forensic_discovery_tools(&mut self) {
@@ -4979,7 +4978,10 @@ impl Thread {
                     TerminalTool::NAME | SandboxedTerminalTool::NAME
                 );
                 let exposed_tool_name = if uses_basic_tool_names {
-                    crate::tools::basic_tool_name(tool_name.as_ref())?
+                    // Plugin tools keep their own names on the basic profile,
+                    // exactly like the built-in market tools.
+                    crate::tools::basic_tool_name(tool_name.as_ref())
+                        .or_else(|| registered_plugin_tool_name(tool_name.as_ref(), cx))?
                 } else if terminal_variant {
                     TerminalTool::NAME
                 } else {
