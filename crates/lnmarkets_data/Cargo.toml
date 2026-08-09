@@ -12,4 +12,18 @@ workspace = true
 path = "src/lnmarkets_data.rs"
 
 [dependencies]
+anyhow.workspace = true
+async-io.workspace = true
+chrono.workspace = true
 lnmarkets_client.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+http.workspace = true
+tempfile.workspace = true

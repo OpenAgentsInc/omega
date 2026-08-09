@@ -29025,7 +29025,7 @@ mod tests {
 
         let umbrella = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
         for required in [
-            "pub fn init(cx: &mut App)",
+            "pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App)",
             "lnmarkets_data::REGISTRATION",
             "lnmarkets_trading::REGISTRATION",
             "pub const MANIFEST",
@@ -29076,6 +29076,50 @@ mod tests {
             assert!(
                 allowlist.contains(host),
                 "OMEGA-DELTA-0241: release endpoint evidence lost `{host}`"
+            );
+        }
+    }
+
+    /// The LN Markets collector owns a bounded local history independently of
+    /// agent turns and exposes its lag and topic state to later operator UI.
+    #[test]
+    fn ln_markets_collector_is_app_lifetime_persistent_and_observable() {
+        let data = without_comments(&read_repository_file(
+            "crates/lnmarkets_data/src/lnmarkets_data.rs",
+        ));
+        for required in [
+            "pub struct MarketDataStore",
+            "lnmarkets_market_events",
+            "rest/futures/candles/1h",
+            "rest/futures/funding-settlements",
+            "rest/oracle/index",
+            "pub struct CollectorHealth",
+            "last_event_by_topic_ms",
+            "pub async fn backfill_once",
+            "pub async fn run(self)",
+            "insert_stream_batch",
+            "collector_topics(self.config.credentials.is_some())",
+            "futures/inverse/btc_usd/ohlc/1m",
+            "wallet/deposit",
+            "futures/inverse/btc_usd/cross/position",
+            "self.store.prune",
+        ] {
+            assert!(
+                data.contains(required),
+                "OMEGA-DELTA-0242: the persistent LN Markets collector lost `{required}`"
+            );
+        }
+
+        let umbrella = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
+        for required in [
+            "paths::data_dir().join(\"threads\").join(\"lnmarkets.db\")",
+            "_collector_task: Task<()>",
+            "_cx.background_spawn(service.run()).await",
+            "pub fn collector(cx: &App) -> Option<CollectorHandle>",
+        ] {
+            assert!(
+                umbrella.contains(required),
+                "OMEGA-DELTA-0242: the app-lifetime LN Markets collector lost `{required}`"
             );
         }
     }

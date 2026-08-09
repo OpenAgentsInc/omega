@@ -221,7 +221,7 @@ fn default_live_timeout_seconds() -> u16 {
     5
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum LnMarketsCandleResolution {
     #[serde(rename = "1m")]
     OneMinute,
@@ -305,6 +305,7 @@ impl AgentTool for LnMarketsMarketDataTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
+        let collector = lnmarkets::collector(cx);
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -359,6 +360,22 @@ impl AgentTool for LnMarketsMarketDataTool {
                 } => {
                     require_limit("history", limit, 1, 1_000)
                         .map_err(LnMarketsToolOutput::error)?;
+                    if resolution == LnMarketsCandleResolution::OneHour
+                        && let Some(collector) = collector
+                        && collector.health().network == network
+                    {
+                        let history = collector
+                            .history(&from, to.as_deref(), usize::from(limit))
+                            .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
+                        return Ok(LnMarketsToolOutput::success(json!({
+                            "schema": "omega.lnmarkets.market-data.v3",
+                            "view": "history",
+                            "source": "local_collector",
+                            "network": network,
+                            "collector": collector.health(),
+                            "history": history,
+                        })));
+                    }
                     let client = LnMarketsClient::public(
                         http_transport(self.client.http_client.clone()),
                         network,

@@ -818,7 +818,7 @@ fn main() {
         onboarding::init(cx);
         settings_ui::init(cx);
         #[cfg(feature = "lnmarkets")]
-        lnmarkets::init(cx);
+        lnmarkets::init(app_state.client.http_client(), cx);
         json_schema_store::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);

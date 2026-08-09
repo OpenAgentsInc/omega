@@ -1,10 +1,16 @@
 use std::sync::Arc;
 
 use futures::{AsyncReadExt as _, FutureExt as _, future::BoxFuture};
-use gpui::{App, Global};
+use gpui::{App, AppContext as _, Global, Task};
 use http_client::{AsyncBody, HttpClient};
+use lnmarkets_data::{Collector, CollectorConfig, CollectorHandle, MarketDataStore};
+use parking_lot::Mutex;
 
 pub use lnmarkets_client::*;
+pub use lnmarkets_data::{
+    CANDLE_TOPIC, CollectorHealth, CollectorHistory, CollectorStatus, FUNDING_SETTLEMENT_TOPIC,
+    ORACLE_INDEX_TOPIC, StoredMarketEvent,
+};
 pub use lnmarkets_ui::LnMarketsSettingsPage;
 
 const MAX_TRANSPORT_RESPONSE_BYTES: u64 = 1_048_577;
@@ -25,17 +31,86 @@ pub const MANIFEST: PluginManifest = PluginManifest {
     stream_hosts: STREAM_HOSTS,
 };
 
-#[derive(Default)]
-pub struct LnMarketsPlugin;
+pub struct LnMarketsPlugin {
+    collector: Arc<Mutex<Option<CollectorHandle>>>,
+    _collector_task: Task<()>,
+}
 
 impl Global for LnMarketsPlugin {}
 
-pub fn init(cx: &mut App) {
+pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
     let _registrations = (
         lnmarkets_data::REGISTRATION,
         lnmarkets_trading::REGISTRATION,
     );
-    cx.set_global(LnMarketsPlugin);
+    let collector = Arc::new(Mutex::new(None));
+    let collector_task = cx.spawn({
+        let collector = collector.clone();
+        let credentials_provider = zed_credentials_provider::global(cx);
+        let transport = http_transport(http_client);
+        async move |_cx| {
+            let stored_credentials = match credentials_provider
+                .read_credentials(CREDENTIAL_STORAGE_URL, _cx)
+                .await
+            {
+                Ok(Some((_username, encoded))) => match StoredCredentials::decode(&encoded) {
+                    Ok(stored) => match stored.credentials() {
+                        Ok(credentials) => Some((stored.network, credentials)),
+                        Err(error) => {
+                            log::warn!("could not load LN Markets collector credentials: {error}");
+                            None
+                        }
+                    },
+                    Err(error) => {
+                        log::warn!("could not decode LN Markets collector credentials: {error}");
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(error) => {
+                    log::warn!("could not read LN Markets collector credentials: {error}");
+                    None
+                }
+            };
+            let (network, config, client) = match stored_credentials {
+                Some((network, credentials)) => (
+                    network,
+                    CollectorConfig::authenticated(network, credentials.clone()),
+                    LnMarketsClient::authenticated(transport, network, credentials),
+                ),
+                None => (
+                    Network::Signet,
+                    CollectorConfig::public(Network::Signet),
+                    LnMarketsClient::public(transport, Network::Signet),
+                ),
+            };
+            let store_path = paths::data_dir().join("threads").join("lnmarkets.db");
+            let store = match MarketDataStore::open(
+                &store_path,
+                MarketDataStore::default_retention(),
+            ) {
+                Ok(store) => store,
+                Err(error) => {
+                    log::error!(
+                        "could not start LN Markets {network:?} collector at {store_path:?}: {error:#}"
+                    );
+                    return;
+                }
+            };
+            let service = Collector::new(client, store, config);
+            *collector.lock() = Some(service.handle());
+            _cx.background_spawn(service.run()).await;
+        }
+    });
+    cx.set_global(LnMarketsPlugin {
+        collector,
+        _collector_task: collector_task,
+    });
+}
+
+pub fn collector(cx: &App) -> Option<CollectorHandle> {
+    cx.try_global::<LnMarketsPlugin>()
+        .and_then(|plugin| plugin.collector.lock().clone())
 }
 
 struct OmegaHttpTransport {
