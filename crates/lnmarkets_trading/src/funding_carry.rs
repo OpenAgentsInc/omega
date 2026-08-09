@@ -1646,6 +1646,8 @@ mod tests {
                     FundingSign::Negative
                 },
                 sign_flipped_at_ms: None,
+                measurement_started_at_ms: Some(1),
+                measurement_ended_at_ms: Some(10),
                 samples: 10,
             },
             liquidity: LiquidityFeatures {

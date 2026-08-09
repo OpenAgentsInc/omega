@@ -22,6 +22,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use agent_wakeup::WakeupSource;
+pub use carry_surface::{
+    CARRY_SURFACE_SCHEMA, CarryCostBreakdown, CarrySurface, CarrySurfaceError, CarrySurfaceInput,
+    CarrySurfaceProvider, CarrySurfaceRequest, ContractKind, ExpectedFundingPayment,
+    ExpectedSlippage, FeeSchedule, MeasurementWindow, PositionSide, SettlementCadence,
+    normalize_carry,
+};
 pub use review_accounting::{ReviewTokenUsage, ReviewToolCall};
 
 /// A network protocol a plugin host declaration covers.

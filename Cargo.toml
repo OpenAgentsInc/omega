@@ -25,6 +25,7 @@ members = [
     "crates/benchmarks",
     "crates/breadcrumbs",
     "crates/buffer_diff",
+    "crates/carry_surface",
     "crates/channel",
     "crates/cli",
     "crates/client",
@@ -298,6 +299,7 @@ aws_http_client = { path = "crates/aws_http_client" }
 bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
+carry_surface = { path = "crates/carry_surface" }
 channel = { path = "crates/channel" }
 cli = { path = "crates/cli" }
 client = { path = "crates/client" }

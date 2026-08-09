@@ -10432,3 +10432,32 @@ horizon; mainnet data or effectful behavior is not introduced by this delta.
 - **Enforced by:** `prediction_events`, `strategy_engine`, and `lnmarkets`
   unit tests and `pre_action_predictions_are_append_only_scored_and_enforced`
   in `omega_deltas`.
+
+### OMEGA-DELTA-0265 — Venue carry is normalized before allocation
+
+Omega exposes one venue-neutral carry contract before adding another venue or
+any cross-venue allocator. A `CarrySurface` converts the venue-native expected
+funding payment into a declared reporting numeraire, annualizes it from the
+explicit settlement cadence, and subtracts entry and exit fees, expected
+round-trip slippage at a stated clip size, hedge cost, and collateral-conversion
+cost over an explicit expected holding period. Contract kind and the exact
+funding measurement window remain visible fields instead of disappearing into
+the net scalar.
+
+The contract deliberately excludes risk adjustment and counterparty weighting.
+Those remain allocator constraints backed by mandates and the separately
+recorded counterparty-exposure measurement. This keeps two economically
+identical native contract shapes comparable without turning a measurement type
+into hidden allocation policy.
+
+The LN Markets plugin implements the shared provider trait for its typed
+`FeatureSnapshot`: it converts inverse BTC settlement into USD at the observed
+index price, uses the measured funding EMA (or current rate when the EMA is
+unavailable), declares its eight-hour cadence, and preserves the funding
+sample window. Synthetic fixtures prove inverse BTC and linear stablecoin
+contracts normalize to the same annualized carry, while cadence and fee
+changes move the appropriate output fields.
+
+- **Enforced by:** `carry_surface`, `lnmarkets_data`, and `lnmarkets` unit tests
+  and `venue_carry_is_normalized_with_explicit_costs_and_cadence` in
+  `omega_deltas`.

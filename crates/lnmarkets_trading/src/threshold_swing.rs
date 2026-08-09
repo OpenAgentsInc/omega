@@ -1001,6 +1001,8 @@ mod tests {
                 ema: None,
                 sign: FundingSign::Neutral,
                 sign_flipped_at_ms: None,
+                measurement_started_at_ms: None,
+                measurement_ended_at_ms: None,
                 samples: 0,
             },
             liquidity: LiquidityFeatures {

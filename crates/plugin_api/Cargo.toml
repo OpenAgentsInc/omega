@@ -13,6 +13,7 @@ path = "src/plugin_api.rs"
 
 [dependencies]
 agent_wakeup.workspace = true
+carry_surface.workspace = true
 gpui.workspace = true
 parking_lot.workspace = true
 review_accounting.workspace = true

@@ -235,6 +235,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0262",
     "OMEGA-DELTA-0263",
     "OMEGA-DELTA-0264",
+    "OMEGA-DELTA-0265",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30693,5 +30694,67 @@ mod tests {
                 && resolver.contains("fixed_horizon_resolves_from_stored_signet_prices"),
             "OMEGA-DELTA-0264: stored-price resolution disappeared"
         );
+    }
+
+    /// Venue-native funding and execution terms become one comparable
+    /// measurement without absorbing counterparty or risk policy.
+    #[test]
+    fn venue_carry_is_normalized_with_explicit_costs_and_cadence() {
+        let surface = without_comments(&read_repository_file(
+            "crates/carry_surface/src/carry_surface.rs",
+        ));
+        for required in [
+            "pub enum ContractKind",
+            "pub struct SettlementCadence",
+            "pub struct MeasurementWindow",
+            "pub struct FeeSchedule",
+            "pub struct ExpectedSlippage",
+            "pub struct CarrySurface",
+            "pub trait CarrySurfaceProvider",
+            "pub fn normalize_carry(",
+            "pub annualized_expected_funding_bps: f64",
+            "pub annualized_net_carry_bps: f64",
+            "pub collateral_conversion_cost_bps: f64",
+            "inverse_and_linear_contracts_normalize_the_same_synthetic_market",
+            "settlement_cadence_changes_annualized_funding_without_hiding_the_cadence",
+            "higher_fees_reduce_net_carry_and_remain_itemized",
+        ] {
+            assert!(
+                surface.contains(required),
+                "OMEGA-DELTA-0265: normalized carry lost `{required}`"
+            );
+        }
+
+        let plugin_api =
+            without_comments(&read_repository_file("crates/plugin_api/src/plugin_api.rs"));
+        assert!(
+            plugin_api.contains("CarrySurfaceProvider") && plugin_api.contains("normalize_carry"),
+            "OMEGA-DELTA-0265: the venue plugin API stopped exposing normalized carry"
+        );
+
+        let features = without_comments(&read_repository_file(
+            "crates/lnmarkets_data/src/lnmarkets_data.rs",
+        ));
+        assert!(
+            features.contains("pub measurement_started_at_ms: Option<i64>")
+                && features.contains("pub measurement_ended_at_ms: Option<i64>"),
+            "OMEGA-DELTA-0265: the funding measurement window disappeared"
+        );
+
+        let lnmarkets = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/normalized_carry.rs",
+        ));
+        for required in [
+            "impl CarrySurfaceProvider for LnMarketsPlugin",
+            "ContractKind::Inverse",
+            "LN_MARKETS_FUNDING_SETTLEMENT_INTERVAL_MS",
+            "settlement_asset: \"BTC\".into()",
+            "plugin_normalizes_inverse_bitcoin_funding_into_usd_carry",
+        ] {
+            assert!(
+                lnmarkets.contains(required),
+                "OMEGA-DELTA-0265: LN Markets carry adoption lost `{required}`"
+            );
+        }
     }
 }

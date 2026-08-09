@@ -18,6 +18,7 @@ use plugin_api::{
 
 mod agent_tools;
 mod counterparty_exposure;
+mod normalized_carry;
 mod prediction_resolution;
 mod review_driver;
 mod review_turn;
@@ -54,6 +55,7 @@ pub use lnmarkets_trading::{
     ThresholdSwingConfig, ThresholdSwingPosition, ThresholdSwingState, ThresholdSwingWindow,
 };
 pub use lnmarkets_ui::LnMarketsSettingsPage;
+pub use normalized_carry::LN_MARKETS_FUNDING_SETTLEMENT_INTERVAL_MS;
 pub use trading_ledger::{
     AssetId, Counterparty, CounterpartyExposure, CounterpartyExposureDivergence,
     CounterpartySnapshot, LedgerEntry, LedgerQuery, LedgerStore, ProfitReport,

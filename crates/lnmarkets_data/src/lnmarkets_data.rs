@@ -144,6 +144,10 @@ pub struct FundingFeatures {
     pub ema: Option<f64>,
     pub sign: FundingSign,
     pub sign_flipped_at_ms: Option<i64>,
+    #[serde(default)]
+    pub measurement_started_at_ms: Option<i64>,
+    #[serde(default)]
+    pub measurement_ended_at_ms: Option<i64>,
     pub samples: usize,
 }
 
@@ -320,6 +324,8 @@ fn funding_features(rates: &[TimedValue]) -> FundingFeatures {
             .map(funding_sign)
             .unwrap_or(FundingSign::Neutral),
         sign_flipped_at_ms,
+        measurement_started_at_ms: rates.first().map(|rate| rate.time_ms),
+        measurement_ended_at_ms: rates.last().map(|rate| rate.time_ms),
         samples: rates.len(),
     }
 }
@@ -1747,6 +1753,8 @@ mod tests {
         assert_eq!(snapshot.funding.current_rate, Some(-0.01));
         assert_eq!(snapshot.funding.sign, FundingSign::Negative);
         assert_eq!(snapshot.funding.sign_flipped_at_ms, Some(3));
+        assert_eq!(snapshot.funding.measurement_started_at_ms, Some(1));
+        assert_eq!(snapshot.funding.measurement_ended_at_ms, Some(3));
     }
 
     #[test]

@@ -357,6 +357,8 @@ mod tests {
                 ema: Some(0.00008),
                 sign: FundingSign::Positive,
                 sign_flipped_at_ms: None,
+                measurement_started_at_ms: Some(1),
+                measurement_ended_at_ms: Some(8),
                 samples: 8,
             },
             liquidity: LiquidityFeatures {
