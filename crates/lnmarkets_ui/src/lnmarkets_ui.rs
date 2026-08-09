@@ -1,11 +1,21 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeSet,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use credentials_provider::CredentialsProvider;
 use editor::Editor;
-use gpui::{AppContext as _, Entity, Focusable as _, ScrollHandle, Task, prelude::*};
+use gpui::{
+    App, AppContext as _, Entity, Focusable as _, PromptLevel, ScrollHandle, Task, prelude::*,
+};
 use lnmarkets_client::{
     Account, CREDENTIAL_STORAGE_URL, Credentials, HttpTransport, LnMarketsClient, Network,
     StoredCredentials,
+};
+use trading_mandate::{
+    MandateChangeClass, MandateSnapshot, MandateStore, ReviewCadence, TradingMandate,
+    TradingNetwork,
 };
 use ui::{Divider, prelude::*};
 use util::ResultExt as _;
@@ -19,6 +29,20 @@ pub struct LnMarketsSettingsPage {
     http_transport: Arc<dyn HttpTransport>,
     credentials_provider: Arc<dyn CredentialsProvider>,
     operation: Option<Task<()>>,
+    mandate_store: Option<MandateStore>,
+    mandate_network: TradingNetwork,
+    mandate_objective: Entity<Editor>,
+    mandate_max_venue_balance: Entity<Editor>,
+    mandate_max_position: Entity<Editor>,
+    mandate_max_leverage: Entity<Editor>,
+    mandate_daily_loss_stop: Entity<Editor>,
+    mandate_allowed_strategies: Entity<Editor>,
+    mandate_review_cadence: ReviewCadence,
+    mandate_review_interval: Entity<Editor>,
+    mandate_expires_at: Entity<Editor>,
+    mandate_status: MandateStatus,
+    mandate_active_revision: Option<u64>,
+    mandate_operation: Option<Task<()>>,
     scroll_handle: ScrollHandle,
 }
 
@@ -31,6 +55,13 @@ enum ConnectionStatus {
     Error(SharedString),
 }
 
+enum MandateStatus {
+    Empty,
+    Saved { revision: u64 },
+    Saving,
+    Error(SharedString),
+}
+
 impl LnMarketsSettingsPage {
     pub fn new(
         http_transport: Arc<dyn HttpTransport>,
@@ -38,6 +69,15 @@ impl LnMarketsSettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (mandate_store, mandate_status) = match MandateStore::open_default() {
+            Ok(store) => (Some(store), MandateStatus::Empty),
+            Err(error) => (
+                None,
+                MandateStatus::Error(
+                    format!("Could not open the trading mandate store: {error}").into(),
+                ),
+            ),
+        };
         Self {
             access_key: new_masked_input("API key", window, cx),
             secret: new_masked_input("Secret", window, cx),
@@ -47,11 +87,51 @@ impl LnMarketsSettingsPage {
             http_transport,
             credentials_provider,
             operation: None,
+            mandate_store,
+            mandate_network: TradingNetwork::Signet,
+            mandate_objective: new_text_input(
+                "Maximize ledger profit in sats",
+                "Trading objective",
+                window,
+                cx,
+            ),
+            mandate_max_venue_balance: new_text_input(
+                "100000",
+                "Maximum venue balance in sats",
+                window,
+                cx,
+            ),
+            mandate_max_position: new_text_input("500", "Maximum USD notional", window, cx),
+            mandate_max_leverage: new_text_input("3", "Maximum leverage", window, cx),
+            mandate_daily_loss_stop: new_text_input("5000", "Daily loss stop in sats", window, cx),
+            mandate_allowed_strategies: new_text_input(
+                "rebalance_to_target",
+                "Comma-separated strategy IDs",
+                window,
+                cx,
+            ),
+            mandate_review_cadence: ReviewCadence::FundingSettlement,
+            mandate_review_interval: new_text_input(
+                "3600",
+                "Review interval in seconds",
+                window,
+                cx,
+            ),
+            mandate_expires_at: new_text_input(
+                &default_expiry_text(),
+                "Expiry as Unix milliseconds",
+                window,
+                cx,
+            ),
+            mandate_status,
+            mandate_active_revision: None,
+            mandate_operation: None,
             scroll_handle: ScrollHandle::new(),
         }
     }
 
     pub fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_mandate(window, cx);
         let credentials_provider = self.credentials_provider.clone();
         self.status = ConnectionStatus::Loading;
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -89,6 +169,241 @@ impl LnMarketsSettingsPage {
         });
         self.operation = Some(task);
         cx.notify();
+    }
+
+    fn load_mandate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.mandate_store.clone() else {
+            return;
+        };
+        match store.snapshot() {
+            Ok(snapshot) => self.apply_mandate_snapshot(snapshot, window, cx),
+            Err(error) => {
+                self.mandate_status = MandateStatus::Error(
+                    format!("Could not read the trading mandate: {error}").into(),
+                );
+            }
+        }
+    }
+
+    fn apply_mandate_snapshot(
+        &mut self,
+        snapshot: MandateSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mandate) = snapshot.mandate else {
+            self.mandate_status = MandateStatus::Empty;
+            self.mandate_active_revision = None;
+            cx.notify();
+            return;
+        };
+        self.mandate_network = mandate.network;
+        self.mandate_review_cadence = mandate.review_cadence.clone();
+        set_editor_text(&self.mandate_objective, &mandate.objective, window, cx);
+        set_editor_text(
+            &self.mandate_max_venue_balance,
+            &mandate.max_venue_balance_sats.to_string(),
+            window,
+            cx,
+        );
+        set_editor_text(
+            &self.mandate_max_position,
+            &mandate.max_position_usd.to_string(),
+            window,
+            cx,
+        );
+        set_editor_text(
+            &self.mandate_max_leverage,
+            &mandate.max_leverage.to_string(),
+            window,
+            cx,
+        );
+        set_editor_text(
+            &self.mandate_daily_loss_stop,
+            &mandate.daily_loss_stop_sats.to_string(),
+            window,
+            cx,
+        );
+        set_editor_text(
+            &self.mandate_allowed_strategies,
+            &mandate
+                .allowed_strategies
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            window,
+            cx,
+        );
+        if let ReviewCadence::Interval { seconds } = mandate.review_cadence {
+            set_editor_text(
+                &self.mandate_review_interval,
+                &seconds.to_string(),
+                window,
+                cx,
+            );
+        }
+        set_editor_text(
+            &self.mandate_expires_at,
+            &mandate.expires_at_ms.to_string(),
+            window,
+            cx,
+        );
+        self.mandate_status = MandateStatus::Saved {
+            revision: snapshot.revision,
+        };
+        self.mandate_active_revision = Some(snapshot.revision);
+        cx.notify();
+    }
+
+    fn mandate_candidate(&self, cx: &App) -> anyhow::Result<TradingMandate> {
+        let objective = self.mandate_objective.read(cx).text(cx).trim().to_owned();
+        let allowed_strategies = self
+            .mandate_allowed_strategies
+            .read(cx)
+            .text(cx)
+            .split(',')
+            .map(str::trim)
+            .filter(|strategy| !strategy.is_empty())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let review_cadence = match &self.mandate_review_cadence {
+            ReviewCadence::FundingSettlement => ReviewCadence::FundingSettlement,
+            ReviewCadence::Interval { .. } => ReviewCadence::Interval {
+                seconds: parse_editor(
+                    &self.mandate_review_interval,
+                    "review interval seconds",
+                    cx,
+                )?,
+            },
+        };
+        let mandate = TradingMandate {
+            network: self.mandate_network,
+            objective,
+            max_venue_balance_sats: parse_editor(
+                &self.mandate_max_venue_balance,
+                "maximum venue balance",
+                cx,
+            )?,
+            max_position_usd: parse_editor(&self.mandate_max_position, "maximum position", cx)?,
+            max_leverage: parse_editor(&self.mandate_max_leverage, "maximum leverage", cx)?,
+            daily_loss_stop_sats: parse_editor(
+                &self.mandate_daily_loss_stop,
+                "daily loss stop",
+                cx,
+            )?,
+            allowed_strategies,
+            review_cadence,
+            expires_at_ms: parse_editor(&self.mandate_expires_at, "mandate expiry", cx)?,
+        };
+        mandate.validate()?;
+        Ok(mandate)
+    }
+
+    fn save_mandate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.mandate_store.clone() else {
+            self.mandate_status =
+                MandateStatus::Error("The trading mandate store is not available.".into());
+            cx.notify();
+            return;
+        };
+        let candidate = match self.mandate_candidate(cx) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.mandate_status = MandateStatus::Error(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let proposal = match store.propose(candidate) {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                self.mandate_status = MandateStatus::Error(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        if !proposal.change_class().needs_ui_approval() {
+            let result = unix_time_ms().and_then(|now_ms| store.save_restriction(proposal, now_ms));
+            match result {
+                Ok(snapshot) => self.apply_mandate_snapshot(snapshot, window, cx),
+                Err(error) => {
+                    self.mandate_status = MandateStatus::Error(error.to_string().into());
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
+        let action = match proposal.change_class() {
+            MandateChangeClass::Creation => "create",
+            MandateChangeClass::Widening => "widen",
+            MandateChangeClass::Restriction | MandateChangeClass::Unchanged => return,
+        };
+        let detail = mandate_approval_detail(proposal.candidate());
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Approve this request to {action} the trading mandate?"),
+            Some(&detail),
+            &["Approve mandate", "Cancel"],
+            cx,
+        );
+        let base_revision = proposal.base_revision();
+        self.mandate_status = MandateStatus::Saving;
+        let task = cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                this.update(cx, |this, cx| {
+                    this.mandate_operation = None;
+                    this.mandate_status = if base_revision == 0 {
+                        MandateStatus::Empty
+                    } else {
+                        MandateStatus::Saved {
+                            revision: base_revision,
+                        }
+                    };
+                    this.mandate_active_revision = (base_revision != 0).then_some(base_revision);
+                    cx.notify();
+                })
+                .log_err();
+                return;
+            }
+            let result = unix_time_ms()
+                .and_then(|approved_at_ms| store.apply_ui_approved(proposal, approved_at_ms));
+            this.update(cx, |this, cx| {
+                this.mandate_operation = None;
+                match result {
+                    Ok(snapshot) => {
+                        this.mandate_status = MandateStatus::Saved {
+                            revision: snapshot.revision,
+                        };
+                        this.mandate_active_revision = Some(snapshot.revision);
+                    }
+                    Err(error) => {
+                        this.mandate_status = MandateStatus::Error(error.to_string().into());
+                    }
+                }
+                cx.notify();
+            })
+            .log_err();
+        });
+        self.mandate_operation = Some(task);
+        cx.notify();
+    }
+
+    fn revoke_mandate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.mandate_store.clone() else {
+            self.mandate_status =
+                MandateStatus::Error("The trading mandate store is not available.".into());
+            cx.notify();
+            return;
+        };
+        match unix_time_ms().and_then(|now_ms| store.revoke(now_ms)) {
+            Ok(snapshot) => self.apply_mandate_snapshot(snapshot, window, cx),
+            Err(error) => {
+                self.mandate_status = MandateStatus::Error(error.to_string().into());
+                cx.notify();
+            }
+        }
     }
 
     fn set_credentials(
@@ -207,6 +522,25 @@ impl Render for LnMarketsSettingsPage {
             ConnectionStatus::Testing => Some((IconName::ArrowCircle, Color::Accent, "Testing")),
             ConnectionStatus::Connected(_) => Some((IconName::Check, Color::Success, "Connected")),
             ConnectionStatus::Empty | ConnectionStatus::Error(_) => None,
+        };
+        let mandate_busy = matches!(self.mandate_status, MandateStatus::Saving);
+        let mandate_active = self.mandate_active_revision.is_some();
+        let mandate_status: (IconName, Color, SharedString) = match &self.mandate_status {
+            MandateStatus::Empty => (IconName::Circle, Color::Muted, "No active mandate".into()),
+            MandateStatus::Saved { revision } => (
+                IconName::Check,
+                Color::Success,
+                format!("Active · revision {revision}").into(),
+            ),
+            MandateStatus::Saving => (IconName::ArrowCircle, Color::Accent, "Saving".into()),
+            MandateStatus::Error(_) => (
+                IconName::XCircle,
+                Color::Error,
+                self.mandate_active_revision.map_or_else(
+                    || "Error".into(),
+                    |revision| format!("Active · revision {revision} · edit error").into(),
+                ),
+            ),
         };
 
         v_flex()
@@ -332,6 +666,214 @@ impl Render for LnMarketsSettingsPage {
                             ),
                     ),
             )
+            .child(Divider::horizontal())
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Label::new("Trading mandate"))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Icon::new(mandate_status.0)
+                                            .size(IconSize::XSmall)
+                                            .color(mandate_status.1),
+                                    )
+                                    .child(
+                                        Label::new(mandate_status.2)
+                                            .size(LabelSize::Small)
+                                            .color(mandate_status.1),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        Label::new(
+                            "No mandate means no trading. Creating or widening these limits requires a separate approval prompt. Restrictions and revocation take effect immediately.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(
+                            "Funds held at a venue are counterparty exposure. Keep the venue balance limit small.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(Label::new("Mandate network").size(LabelSize::Small))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .children(
+                                [TradingNetwork::Signet, TradingNetwork::Mainnet]
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, network)| {
+                                        let label = match network {
+                                            TradingNetwork::Signet => "Signet",
+                                            TradingNetwork::Mainnet => "Mainnet",
+                                        };
+                                        Button::new(("trading-mandate-network", index), label)
+                                            .style(if self.mandate_network == network {
+                                                ButtonStyle::Filled
+                                            } else {
+                                                ButtonStyle::Outlined
+                                            })
+                                            .disabled(mandate_busy)
+                                            .on_click(cx.listener(
+                                                move |this, _, _window, cx| {
+                                                    this.mandate_network = network;
+                                                    cx.notify();
+                                                },
+                                            ))
+                                    }),
+                            ),
+                    ),
+            )
+            .child(render_field(
+                "Objective",
+                &self.mandate_objective,
+                cx,
+            ))
+            .child(render_field(
+                "Maximum venue balance (sats)",
+                &self.mandate_max_venue_balance,
+                cx,
+            ))
+            .child(render_field(
+                "Maximum position (USD notional)",
+                &self.mandate_max_position,
+                cx,
+            ))
+            .child(render_field(
+                "Maximum leverage",
+                &self.mandate_max_leverage,
+                cx,
+            ))
+            .child(render_field(
+                "Daily loss stop (sats)",
+                &self.mandate_daily_loss_stop,
+                cx,
+            ))
+            .child(render_field(
+                "Allowed strategies (comma-separated)",
+                &self.mandate_allowed_strategies,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(Label::new("Review cadence").size(LabelSize::Small))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(
+                                    "trading-mandate-cadence-funding",
+                                    "Funding settlement",
+                                )
+                                .style(
+                                    if matches!(
+                                        self.mandate_review_cadence,
+                                        ReviewCadence::FundingSettlement
+                                    ) {
+                                        ButtonStyle::Filled
+                                    } else {
+                                        ButtonStyle::Outlined
+                                    },
+                                )
+                                .disabled(mandate_busy)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.mandate_review_cadence =
+                                        ReviewCadence::FundingSettlement;
+                                    cx.notify();
+                                })),
+                            )
+                            .child(
+                                Button::new("trading-mandate-cadence-interval", "Interval")
+                                    .style(
+                                        if matches!(
+                                            self.mandate_review_cadence,
+                                            ReviewCadence::Interval { .. }
+                                        ) {
+                                            ButtonStyle::Filled
+                                        } else {
+                                            ButtonStyle::Outlined
+                                        },
+                                    )
+                                    .disabled(mandate_busy)
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.mandate_review_cadence =
+                                            ReviewCadence::Interval { seconds: 3_600 };
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .when(
+                matches!(
+                    self.mandate_review_cadence,
+                    ReviewCadence::Interval { .. }
+                ),
+                |page| {
+                    page.child(render_field(
+                        "Review interval (seconds)",
+                        &self.mandate_review_interval,
+                        cx,
+                    ))
+                },
+            )
+            .child(render_field(
+                "Expires at (Unix milliseconds)",
+                &self.mandate_expires_at,
+                cx,
+            ))
+            .when_some(
+                match &self.mandate_status {
+                    MandateStatus::Error(error) => Some(error.clone()),
+                    _ => None,
+                },
+                |page, error| {
+                    page.child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Icon::new(IconName::XCircle)
+                                    .size(IconSize::Small)
+                                    .color(Color::Error),
+                            )
+                            .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
+                    )
+                },
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .justify_end()
+                    .child(
+                        Button::new("trading-mandate-revoke", "Revoke")
+                            .style(ButtonStyle::Outlined)
+                            .disabled(mandate_busy || !mandate_active)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.revoke_mandate(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("trading-mandate-save", "Save mandate")
+                            .style(ButtonStyle::Filled)
+                            .disabled(mandate_busy || self.mandate_store.is_none())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_mandate(window, cx)
+                            })),
+                    ),
+            )
     }
 }
 
@@ -346,6 +888,92 @@ fn new_masked_input(
         editor.set_masked(true, cx);
         editor
     })
+}
+
+fn new_text_input(
+    text: &str,
+    placeholder: &str,
+    window: &mut Window,
+    cx: &mut Context<LnMarketsSettingsPage>,
+) -> Entity<Editor> {
+    cx.new(|cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_placeholder_text(placeholder, window, cx);
+        editor.set_text(text, window, cx);
+        editor
+    })
+}
+
+fn set_editor_text(
+    editor: &Entity<Editor>,
+    text: &str,
+    window: &mut Window,
+    cx: &mut Context<LnMarketsSettingsPage>,
+) {
+    editor.update(cx, |editor, cx| editor.set_text(text, window, cx));
+}
+
+fn parse_editor<T>(editor: &Entity<Editor>, label: &str, cx: &App) -> anyhow::Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = editor.read(cx).text(cx);
+    value
+        .trim()
+        .parse()
+        .map_err(|error| anyhow::anyhow!("Invalid {label}: {error}"))
+}
+
+fn unix_time_ms() -> anyhow::Result<i64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| anyhow::anyhow!("system clock is before Unix epoch: {error}"))?;
+    i64::try_from(duration.as_millis()).map_err(|_| anyhow::anyhow!("system time exceeded range"))
+}
+
+fn default_expiry_text() -> String {
+    const THIRTY_DAYS_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+    match unix_time_ms()
+        .and_then(|now_ms| {
+            now_ms
+                .checked_add(THIRTY_DAYS_MS)
+                .ok_or_else(|| anyhow::anyhow!("default mandate expiry exceeded range"))
+        })
+        .map(|expires_at_ms| expires_at_ms.to_string())
+    {
+        Ok(expiry) => expiry,
+        Err(error) => {
+            log::error!("could not initialize the trading mandate expiry: {error}");
+            String::new()
+        }
+    }
+}
+
+fn mandate_approval_detail(mandate: &TradingMandate) -> String {
+    let network = match mandate.network {
+        TradingNetwork::Signet => "signet",
+        TradingNetwork::Mainnet => "mainnet",
+    };
+    let cadence = match &mandate.review_cadence {
+        ReviewCadence::FundingSettlement => "each funding settlement".to_owned(),
+        ReviewCadence::Interval { seconds } => format!("every {seconds} seconds"),
+    };
+    format!(
+        "Network: {network}\nObjective: {}\nMaximum venue balance: {} sats\nMaximum position: {} USD notional\nMaximum leverage: {}x\nDaily loss stop: {} sats\nAllowed strategies: {}\nReview: {cadence}\nExpires at: {} Unix ms",
+        mandate.objective,
+        mandate.max_venue_balance_sats,
+        mandate.max_position_usd,
+        mandate.max_leverage,
+        mandate.daily_loss_stop_sats,
+        mandate
+            .allowed_strategies
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        mandate.expires_at_ms,
+    )
 }
 
 fn render_field(

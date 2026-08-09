@@ -9980,3 +9980,21 @@ beside the thread store and survives application restarts.
 - **Enforced by:** `trading_ledger` unit tests and
   `trading_ledger_is_venue_neutral_append_only_and_reconciled` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0245 — Trading authority is one approved mandate
+
+The platform owns a typed, venue-neutral trading mandate. It names the network,
+objective, venue-balance cap, position cap, leverage cap, daily loss stop,
+allowed strategies, review cadence, and expiry. No mandate and an expired
+mandate both require a flat-risk posture. Every proposed instruction is checked
+against every limit regardless of whether it came from chat, a scheduled agent
+turn, or strategy code.
+
+Mandate history is append-only and durable beside the thread store. Creating or
+widening authority requires an explicit settings prompt whose acceptance is
+bound to the displayed candidate and base revision. Restriction and revocation
+take effect immediately. The store exposes no unclassified mutation method,
+and production code has one call site for the widening door: the settings UI.
+
+- **Enforced by:** `trading_mandate` unit tests and
+  `trading_mandate_has_one_ui_approved_widening_door` in `omega_deltas`.

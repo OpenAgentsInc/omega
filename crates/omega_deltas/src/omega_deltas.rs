@@ -215,6 +215,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0234",
     "OMEGA-DELTA-0241",
     "OMEGA-DELTA-0244",
+    "OMEGA-DELTA-0245",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29225,6 +29226,114 @@ mod tests {
         assert!(
             !ledger.contains("lnmarkets_client"),
             "OMEGA-DELTA-0244: the platform ledger gained a venue dependency"
+        );
+    }
+
+    /// Trading authority can be created or widened only after the settings UI
+    /// approves the exact proposal and current revision. The public method
+    /// inventory makes a second widening door an intentional policy change,
+    /// not an unnoticed helper added by a later strategy.
+    #[test]
+    fn trading_mandate_has_one_ui_approved_widening_door() {
+        let mandate_path = "crates/trading_mandate/src/trading_mandate.rs";
+        let mandate = read_repository_file(mandate_path);
+        let store_impl = mandate
+            .split_once("impl MandateStore {")
+            .and_then(|(_, rest)| rest.split_once("\n}\n\nfn refused"))
+            .map(|(body, _)| body)
+            .expect("OMEGA-DELTA-0245: MandateStore implementation has a stable boundary");
+        let public_methods = store_impl
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub fn "))
+            .filter_map(|signature| signature.split_once('(').map(|(name, _)| name))
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            "apply_ui_approved",
+            "authorize",
+            "default_path",
+            "history",
+            "in_memory",
+            "open",
+            "open_default",
+            "propose",
+            "revoke",
+            "save_restriction",
+            "snapshot",
+            "verify",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            public_methods, expected,
+            "OMEGA-DELTA-0245: MandateStore gained or lost a public door; classify it as read, immediate restriction, revocation, enforcement, or UI-approved widening"
+        );
+
+        for required in [
+            "pub struct TradingMandate",
+            "pub network: TradingNetwork",
+            "pub objective: String",
+            "pub max_venue_balance_sats: u64",
+            "pub max_position_usd: u64",
+            "pub max_leverage: u8",
+            "pub daily_loss_stop_sats: u64",
+            "pub allowed_strategies: BTreeSet<String>",
+            "pub review_cadence: ReviewCadence",
+            "pub expires_at_ms: i64",
+            "creating or widening a mandate requires explicit UI approval",
+            "mandate changed after the proposal was displayed",
+            "MandateRefusal::Missing",
+            "MandateRefusal::Expired",
+            "RequiredRiskPosture::FlatRisk",
+            "trading_mandate_no_update",
+            "trading_mandate_no_delete",
+        ] {
+            assert!(
+                mandate.contains(required),
+                "OMEGA-DELTA-0245: the mandate authority boundary lost `{required}`"
+            );
+        }
+
+        let ui_path = repository_path("crates/lnmarkets_ui/src/lnmarkets_ui.rs");
+        let ui = std::fs::read_to_string(&ui_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
+        for required in [
+            "window.prompt(",
+            "Approve mandate",
+            "answer.await != Ok(0)",
+            "store.apply_ui_approved(proposal, approved_at_ms)",
+            "store.save_restriction(proposal, now_ms)",
+            "store.revoke(now_ms)",
+        ] {
+            assert!(
+                ui.contains(required),
+                "OMEGA-DELTA-0245: the mandate settings UI lost `{required}`"
+            );
+        }
+        assert_eq!(
+            code_of(&ui).matches(".apply_ui_approved(").count(),
+            1,
+            "OMEGA-DELTA-0245: the settings UI must have exactly one UI-approved widening call"
+        );
+
+        let mut forbidden_callers = Vec::new();
+        for_each_source_file(&repository_path("crates"), &["rs"], |path, source| {
+            let relative = path
+                .strip_prefix(repository_path("."))
+                .unwrap_or(path)
+                .to_string_lossy();
+            if relative == mandate_path
+                || relative == "crates/lnmarkets_ui/src/lnmarkets_ui.rs"
+                || relative == "crates/omega_deltas/src/omega_deltas.rs"
+            {
+                return;
+            }
+            if code_of(source).contains(".apply_ui_approved(") {
+                forbidden_callers.push(relative.into_owned());
+            }
+        });
+        assert!(
+            forbidden_callers.is_empty(),
+            "OMEGA-DELTA-0245: code outside the explicit settings approval path can widen a mandate: {forbidden_callers:?}"
         );
     }
 }

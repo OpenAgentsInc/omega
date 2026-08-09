@@ -13,6 +13,10 @@ pub use lnmarkets_data::{
     LiquidityFeatures, ORACLE_INDEX_TOPIC, StoredMarketEvent, VolatilityFeatures,
 };
 pub use lnmarkets_ui::LnMarketsSettingsPage;
+pub use trading_mandate::{
+    MandateDecision, MandateRefusal, MandateSnapshot, MandateStore, ReviewCadence,
+    TradingInstruction, TradingMandate, TradingNetwork,
+};
 
 const MAX_TRANSPORT_RESPONSE_BYTES: u64 = 1_048_577;
 

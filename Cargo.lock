@@ -9324,6 +9324,7 @@ dependencies = [
  "log",
  "parking_lot",
  "paths",
+ "trading_mandate",
  "zed-reqwest",
  "zed_credentials_provider",
 ]
@@ -9384,6 +9385,8 @@ dependencies = [
  "editor",
  "gpui",
  "lnmarkets_client",
+ "log",
+ "trading_mandate",
  "ui",
  "util",
 ]
@@ -17836,6 +17839,20 @@ dependencies = [
 
 [[package]]
 name = "trading_ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "paths",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "trading_mandate"
 version = "0.1.0"
 dependencies = [
  "anyhow",
