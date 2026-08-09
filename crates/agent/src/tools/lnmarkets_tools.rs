@@ -775,7 +775,7 @@ impl AgentTool for LnMarketsMandateTool {
                 .mandate_snapshot()
                 .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
             let now_ms = unix_timestamp_ms().map_err(LnMarketsToolOutput::error)?;
-            let status = match &snapshot.mandate {
+            let status = match snapshot.mandates.first() {
                 None => "missing",
                 Some(mandate) if mandate.expires_at_ms <= now_ms => "expired",
                 Some(_) => "active",

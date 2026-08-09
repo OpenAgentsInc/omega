@@ -15,7 +15,8 @@ use strategy_engine::{
     VenueExecutor, VenueRiskSnapshot,
 };
 use trading_ledger::{
-    LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerQuery, LedgerStore,
+    AssetId, LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerQuery,
+    LedgerStore,
 };
 use trading_mandate::TradingNetwork;
 
@@ -350,6 +351,7 @@ impl StrategyProgram for RebalanceToTargetProgram {
         };
         intent.validate()?;
         Ok(StrategyStep {
+            cancels: Vec::new(),
             next_state,
             intents: vec![intent],
         })
@@ -367,6 +369,7 @@ fn step_without_order(
     last_action: RebalanceAction,
 ) -> StrategyStep<RebalanceToTargetState> {
     StrategyStep {
+        cancels: Vec::new(),
         next_state: RebalanceToTargetState {
             schema: REBALANCE_TO_TARGET_SCHEMA.into(),
             sequence,
@@ -532,7 +535,8 @@ impl VenueExecutor for SyntheticUsdExecutor {
         Ok(VenueRiskSnapshot {
             network: TradingNetwork::Signet,
             venue: "lnmarkets".into(),
-            venue_balance_after_sats,
+            collateral_asset: AssetId::sats(),
+            venue_balance_after: venue_balance_after_sats,
             position_notional_before_usd: 0,
             position_notional_after_usd: 0,
             leverage: 1,
@@ -581,16 +585,13 @@ impl VenueExecutor for SyntheticUsdExecutor {
                 strategy_id: self.strategy_id.into(),
                 kind: LedgerEntryKind::Fee,
                 postings: vec![
-                    LedgerPosting {
-                        account: LedgerAccount::VenueBalance {
+                    LedgerPosting::sats(
+                        LedgerAccount::VenueBalance {
                             venue: "lnmarkets".into(),
                         },
-                        amount_sats: -realized_cost_sats,
-                    },
-                    LedgerPosting {
-                        account: LedgerAccount::FeeExpense,
-                        amount_sats: realized_cost_sats,
-                    },
+                        -realized_cost_sats,
+                    ),
+                    LedgerPosting::sats(LedgerAccount::FeeExpense, realized_cost_sats),
                 ],
                 metadata: json!({
                     "schema": self.cost_schema,

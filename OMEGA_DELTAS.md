@@ -9965,16 +9965,17 @@ accessors preserve the values needed by account cards.
 
 ### OMEGA-DELTA-0244 — Trading profit has one venue-neutral ledger
 
-The platform owns a durable sats ledger independently of any venue plugin.
-Every financial event has balanced postings and a strategy attribution.
-Entries are sequenced, hash-chained, and protected from updates and deletes by
-SQLite triggers. Reads and writes verify the complete chain and stop on a gap
-or altered record.
+The platform owns a durable multi-asset ledger independently of any venue
+plugin. Every financial event has balanced postings and a strategy
+attribution. Entries are sequenced, hash-chained, and protected from updates
+and deletes by SQLite triggers. Reads and writes verify the complete chain and
+stop on a gap or altered record.
 
-Venue balance snapshots check the ledger without changing it. A mismatch
-appends an attributed reconciliation alert with no postings, so observed venue
-state cannot silently rewrite profit. The read API reports profit, fees,
-funding, and worst drawdown per strategy and period. The default database lives
+Venue balance snapshots check the ledger without changing it, per (venue,
+asset). A mismatch appends an attributed reconciliation alert with no
+postings, so observed venue state cannot silently rewrite profit. The read API
+reports profit, fees, funding, and worst drawdown per strategy and period,
+with per-asset totals beside the sats totals. The default database lives
 beside the thread store and survives application restarts.
 
 - **Enforced by:** `trading_ledger` unit tests and
@@ -9983,12 +9984,12 @@ beside the thread store and survives application restarts.
 
 ### OMEGA-DELTA-0245 — Trading authority is one approved mandate
 
-The platform owns a typed, venue-neutral trading mandate. It names the network,
-objective, venue-balance cap, position cap, leverage cap, daily loss stop,
-allowed strategies, review cadence, and expiry. No mandate and an expired
-mandate both require a flat-risk posture. Every proposed instruction is checked
-against every limit regardless of whether it came from chat, a scheduled agent
-turn, or strategy code.
+The platform owns a typed, venue-neutral trading mandate. It names the venue,
+network, collateral asset, objective, venue-balance cap, position cap,
+leverage cap, daily loss stop, allowed strategies, review cadence, and expiry.
+No mandate and an expired mandate both require a flat-risk posture. Every
+proposed instruction is checked against every limit regardless of whether it
+came from chat, a scheduled agent turn, or strategy code.
 
 Mandate history is append-only and durable beside the thread store. Creating or
 widening authority requires an explicit settings prompt whose acceptance is
@@ -10234,4 +10235,69 @@ and operator surfaces as the other bounded strategies. Its executions carry
 - **Enforced by:** `lnmarkets_data`, `lnmarkets_trading`, `lnmarkets`, and
   `agent` unit tests and
   `threshold_swing_is_feature_driven_bounded_and_runtime_integrated` in
+  `omega_deltas`.
+
+### OMEGA-DELTA-0257 — Ledger postings balance within each asset
+
+A venue whose collateral is not sats cannot keep honest books in a
+sats-hardcoded ledger, and converting at fluctuating prices inside postings
+would break append-only exactness. Every posting therefore names a registered,
+validated asset identifier, and double-entry balance is enforced per asset: a
+posting set must sum to zero within each asset. A cross-asset conversion never
+appears inside one entry — a trade is two legs that each balance, with the
+price recorded in metadata. Conversion to a reporting currency is a display
+concern, never a ledger concern.
+
+Reports carry per-asset totals while sats books keep their existing sats
+totals. Reconciliation is keyed by (venue, asset), so a mismatch on one book
+never touches another. Version 1 databases migrate in place: existing rows
+become explicit sats rows, and sats postings keep their original serialized
+layout so every recorded entry hash still verifies. Append-only, sequenced,
+fail-closed-on-gaps behavior is unchanged.
+
+- **Enforced by:** `trading_ledger` unit tests and
+  `trading_ledger_postings_balance_within_each_asset` in `omega_deltas`.
+
+### OMEGA-DELTA-0258 — One mandate governs one (venue, network) pair
+
+Trading mandates are venue-scoped and denominated in the venue's collateral
+asset. `TradingMandate` names its venue and collateral asset; the venue
+balance cap and daily loss stop are amounts in that asset, while USD-notional,
+leverage, order-rate, and liquidation-buffer limits stay venue-neutral. The
+mandate store keys its active set by (venue, network); authorization routes
+each instruction to its scope, refuses on a collateral-asset mismatch, and
+treats an absent scope as no mandate.
+
+The approval boundary extends to the new dimensions: changing a mandate's
+collateral asset widens it, and a mandate for a new (venue, network) scope is
+a creation — both pass through the single UI-approved widening door. Old
+records deserialize with the restrictive legacy defaults (LN Markets venue,
+sats collateral), and the pre-scoping serialization is reproduced for that
+shape so approval digests recorded before scoping still verify. There is no
+portfolio-level cross-venue cap yet; that is a deliberately separate, later
+object.
+
+- **Enforced by:** `trading_mandate` unit tests and
+  `trading_mandates_are_scoped_per_venue_and_collateral_asset` in
+  `omega_deltas`.
+
+### OMEGA-DELTA-0259 — Strategy cancels are admissible, single-attempt, and typed
+
+Order-book venues need resting orders, cancels, and open-order tracking.
+`VenueExecutor` gains default-unimplemented `cancel` and `open_orders`
+methods, so taker-only executors are untouched and fail closed if a program
+emits a cancel anyway. A strategy step may carry cancel intents, which the
+engine records in the ledger and processes before any order intent: a cancel
+only reduces risk, so it is always admissible and never consults the mandate.
+There is no venue-native modify path — a modify is a cancel plus a new
+admitted intent, so every risk increase passes the same mandate gate.
+
+The no-retry-on-ambiguous-mutation law applies to cancels: the outcome is a
+typed value, and an ambiguous outcome halts the strategy with a dedicated
+unknown-cancel-outcome reason and publishes a typed wakeup instead of guessing
+or resending. Backtests refuse cancel intents until an execution model can
+simulate them honestly.
+
+- **Enforced by:** `strategy_engine` unit tests and
+  `strategy_cancels_are_admissible_single_attempt_and_typed` in
   `omega_deltas`.

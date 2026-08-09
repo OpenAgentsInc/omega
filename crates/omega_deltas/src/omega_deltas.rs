@@ -227,6 +227,9 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0254",
     "OMEGA-DELTA-0255",
     "OMEGA-DELTA-0256",
+    "OMEGA-DELTA-0257",
+    "OMEGA-DELTA-0258",
+    "OMEGA-DELTA-0259",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29223,6 +29226,8 @@ mod tests {
             "trading ledger sequence gap",
             "hash_entry",
             "pub fn reconcile",
+            "pub fn reconcile_asset",
+            "pub fn venue_asset_balance",
             "ReconciliationMismatch",
             "pub fn profit_report",
             "profit_sats",
@@ -29285,12 +29290,14 @@ mod tests {
 
         for required in [
             "pub struct TradingMandate",
+            "pub venue: String",
             "pub network: TradingNetwork",
+            "pub collateral_asset: AssetId",
             "pub objective: String",
-            "pub max_venue_balance_sats: u64",
+            "pub max_venue_balance: u64",
             "pub max_position_usd: u64",
             "pub max_leverage: u8",
-            "pub daily_loss_stop_sats: u64",
+            "pub daily_loss_stop: u64",
             "pub allowed_strategies: BTreeSet<String>",
             "pub review_cadence: ReviewCadence",
             "pub expires_at_ms: i64",
@@ -29317,7 +29324,7 @@ mod tests {
             "answer.await != Ok(0)",
             "store.apply_ui_approved(proposal, approved_at_ms)",
             "store.save_restriction(proposal, now_ms)",
-            "store.revoke(now_ms)",
+            "store.revoke(LEGACY_VENUE, network, now_ms)",
         ] {
             assert!(
                 ui.contains(required),
@@ -29441,6 +29448,8 @@ mod tests {
             "WakeupSource::StrategyHalt",
             "LedgerEntryKind::Order",
             "pub fn background_service",
+            "async fn cancel",
+            "pub enum CancelOutcome",
             "ambiguous_mutation_failure_is_not_retried_and_halts",
             "hard_limit_halts_and_emits_typed_agent_wakeup",
         ] {
@@ -30148,6 +30157,124 @@ mod tests {
         assert!(
             cards.contains("{ \"strategy_id\": \"threshold_swing\", \"status\": \"idle\" }"),
             "OMEGA-DELTA-0256: component gallery lost threshold_swing"
+        );
+    }
+
+    /// The trading ledger keeps honest books in any collateral asset: every
+    /// posting names a validated asset, double-entry balance holds within each
+    /// asset, and a cross-asset conversion can never hide inside one entry.
+    /// Sats books recorded before the asset column keep their hash chain.
+    #[test]
+    fn trading_ledger_postings_balance_within_each_asset() {
+        let ledger = without_comments(&read_repository_file(
+            "crates/trading_ledger/src/trading_ledger.rs",
+        ));
+        for required in [
+            "pub struct AssetId",
+            "pub const LEDGER_SCHEMA_VERSION: i64 = 2",
+            "fn migrate_legacy_sats_postings",
+            "ledger postings do not balance: {sum} {asset}",
+            "must not repeat an account within one asset",
+            "pub fn venue_asset_balance",
+            "pub fn reconcile_asset",
+            "asset TEXT NOT NULL",
+            "pub assets: Vec<AssetProfit>",
+            "pub fn sats(account: LedgerAccount, amount: i64) -> Self",
+            "double_entry_balance_is_enforced_per_asset",
+            "sats_serialization_keeps_the_pre_multi_asset_layout",
+            "version_one_sats_databases_migrate_in_place",
+            "reconciliation_is_keyed_by_venue_and_asset",
+            "profit_report_totals_each_asset_independently",
+        ] {
+            assert!(
+                ledger.contains(required),
+                "OMEGA-DELTA-0257: the multi-asset ledger lost `{required}`"
+            );
+        }
+    }
+
+    /// One mandate governs one (venue, network) pair, denominated in that
+    /// venue's collateral asset. Old single-venue records keep verifying:
+    /// their serde defaults are LN Markets and sats, and the pre-scoping
+    /// serialization is reproduced so stored approval digests still match.
+    #[test]
+    fn trading_mandates_are_scoped_per_venue_and_collateral_asset() {
+        let mandate = without_comments(&read_repository_file(
+            "crates/trading_mandate/src/trading_mandate.rs",
+        ));
+        for required in [
+            "pub const LEGACY_VENUE: &str = \"lnmarkets\"",
+            "pub const MANDATE_SCHEMA_VERSION: i64 = 2",
+            "pub venue: String",
+            "pub collateral_asset: AssetId",
+            "pub fn mandate_for",
+            "CollateralAssetMismatch",
+            "fn migrate_legacy_single_scope_store",
+            "candidate.venue != current.venue",
+            "candidate.collateral_asset != current.collateral_asset",
+            "one_mandate_governs_each_venue_and_network_pair",
+            "a_mandate_for_a_new_venue_or_network_is_a_creation_requiring_approval",
+            "legacy_shape_mandates_serialize_with_their_original_layout",
+            "version_one_stores_migrate_and_their_digests_still_verify",
+        ] {
+            assert!(
+                mandate.contains(required),
+                "OMEGA-DELTA-0258: venue-scoped mandate authority lost `{required}`"
+            );
+        }
+
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "pub collateral_asset: AssetId",
+            "venue: preview.venue.clone()",
+            "collateral_asset: preview.collateral_asset.clone()",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0258: the engine stopped carrying venue scope into authorization: `{required}`"
+            );
+        }
+    }
+
+    /// Order-book venues get a bounded order lifecycle: typed single-attempt
+    /// cancels that are always admissible, open-order enumeration, and a halt
+    /// on any cancel whose outcome is unknown. There is no venue-native
+    /// modify path, so every risk increase still passes the mandate gate.
+    #[test]
+    fn strategy_cancels_are_admissible_single_attempt_and_typed() {
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "pub struct CancelIntent",
+            "pub enum CancelOutcome",
+            "Ambiguous { message: String }",
+            "pub struct OpenOrder",
+            "async fn cancel(&self, venue_order_id: &str) -> Result<CancelOutcome>",
+            "async fn open_orders(&self) -> Result<Vec<OpenOrder>>",
+            "pub cancels: Vec<CancelIntent>",
+            "UnknownCancelOutcome",
+            "LedgerEntryKind::Cancel",
+            "CancelResolved",
+            "cancels_bypass_the_mandate_and_run_before_orders",
+            "a_cancel_is_admitted_even_when_the_mandate_refuses_every_order",
+            "ambiguous_cancel_outcome_halts_and_wakes_without_retry",
+            "taker_only_executors_refuse_the_order_lifecycle_by_default",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0259: the cancel lifecycle lost `{required}`"
+            );
+        }
+
+        let backtest = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/backtest.rs",
+        ));
+        assert!(
+            backtest.contains("backtest execution models do not support cancel intents yet"),
+            "OMEGA-DELTA-0259: backtests silently accept cancel intents they cannot model"
         );
     }
 }

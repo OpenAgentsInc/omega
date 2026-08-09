@@ -301,6 +301,9 @@ where
             features: tick.features.clone(),
         };
         let step = program.on_tick(config, &state, &live_tick)?;
+        if !step.cancels.is_empty() {
+            bail!("backtest execution models do not support cancel intents yet");
+        }
         for intent in &step.intents {
             intent.validate()?;
             let trade = model.execute(intent, &tick)?;
@@ -721,6 +724,7 @@ mod tests {
                 .collect();
             Ok(StrategyStep {
                 next_state,
+                cancels: Vec::new(),
                 intents,
             })
         }

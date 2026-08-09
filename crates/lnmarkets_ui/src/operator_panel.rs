@@ -430,7 +430,7 @@ impl LnMarketsOperatorPanel {
             .snapshot
             .mandate
             .as_ref()
-            .and_then(|snapshot| snapshot.mandate.as_ref())
+            .and_then(|snapshot| snapshot.mandates.first())
         {
             Some(mandate) => v_flex()
                 .gap_1()
@@ -441,7 +441,7 @@ impl LnMarketsOperatorPanel {
                 .child(
                     Label::new(format!(
                         "{} sats venue · {} USD position · {}x · {} orders/hour",
-                        mandate.max_venue_balance_sats,
+                        mandate.max_venue_balance,
                         mandate.max_position_usd,
                         mandate.max_leverage,
                         mandate.max_orders_per_hour
@@ -706,7 +706,7 @@ mod tests {
     use gpui::TestAppContext;
     use lnmarkets_client::Network;
     use trading_ledger::{ProfitReport, StrategyProfit};
-    use trading_mandate::{ReviewCadence, TradingMandate, TradingNetwork};
+    use trading_mandate::{AssetId, ReviewCadence, TradingMandate, TradingNetwork};
 
     use super::*;
 
@@ -780,19 +780,21 @@ mod tests {
                 }),
                 mandate: Some(MandateSnapshot {
                     revision: 2,
-                    mandate: Some(TradingMandate {
+                    mandates: vec![TradingMandate {
+                        venue: "lnmarkets".into(),
                         network: TradingNetwork::Signet,
+                        collateral_asset: AssetId::sats(),
                         objective: "Bounded profit".into(),
-                        max_venue_balance_sats: 100_000,
+                        max_venue_balance: 100_000,
                         max_position_usd: 500,
                         max_leverage: 3,
-                        daily_loss_stop_sats: 5_000,
+                        daily_loss_stop: 5_000,
                         max_orders_per_hour: 12,
                         min_liquidation_buffer_bps: 1_500,
                         allowed_strategies: BTreeSet::from(["funding_carry".into()]),
                         review_cadence: ReviewCadence::Interval { seconds: 3_600 },
                         expires_at_ms: 86_400_000,
-                    }),
+                    }],
                 }),
                 review_cadence: Some(ReviewCadence::Interval { seconds: 3_600 }),
                 pending_wakeups: 1,

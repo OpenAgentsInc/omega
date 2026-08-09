@@ -41,7 +41,7 @@ pub use lnmarkets_trading::{
     ThresholdSwingConfig, ThresholdSwingPosition, ThresholdSwingState, ThresholdSwingWindow,
 };
 pub use lnmarkets_ui::LnMarketsSettingsPage;
-pub use trading_ledger::{LedgerEntry, LedgerQuery, LedgerStore, ProfitReport};
+pub use trading_ledger::{AssetId, LedgerEntry, LedgerQuery, LedgerStore, ProfitReport};
 pub use trading_mandate::{
     MandateDecision, MandateRefusal, MandateRevision, MandateSnapshot, MandateStore, ReviewCadence,
     TradingInstruction, TradingMandate, TradingNetwork,
@@ -333,8 +333,8 @@ impl OperatorConsoleSource for PluginOperatorConsoleSource {
             .collect();
         let review_cadence = review
             .mandate
-            .mandate
-            .as_ref()
+            .mandates
+            .first()
             .map(|mandate| mandate.review_cadence.clone());
         let backtests = review
             .backtests

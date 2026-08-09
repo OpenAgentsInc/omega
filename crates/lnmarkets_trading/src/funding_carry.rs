@@ -19,7 +19,7 @@ use strategy_engine::{
     VenueExecution, VenueExecutor, VenueProtection, VenueRiskSnapshot,
 };
 use trading_ledger::{
-    LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerStore,
+    AssetId, LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerStore,
 };
 use trading_mandate::TradingNetwork;
 
@@ -475,6 +475,7 @@ fn open_position_step(
         }
     };
     Ok(StrategyStep {
+        cancels: Vec::new(),
         next_state: next_state(
             config,
             sequence,
@@ -542,6 +543,7 @@ fn close_position_step(
         ),
     };
     Ok(StrategyStep {
+        cancels: Vec::new(),
         next_state: next_state(
             config,
             sequence,
@@ -596,6 +598,7 @@ fn install_stop_step(
         json!({"operation": "install_stop", "trade_id": trade_id}),
     )?;
     Ok(StrategyStep {
+        cancels: Vec::new(),
         next_state: next_state(
             config,
             sequence,
@@ -639,6 +642,7 @@ fn management_step(
         json!({"operation": operation, "trade_id": trade_id}),
     )?;
     Ok(StrategyStep {
+        cancels: Vec::new(),
         next_state: next_state(
             config,
             sequence,
@@ -698,6 +702,7 @@ fn no_intent_step(
     action: FundingCarryAction,
 ) -> StrategyStep<FundingCarryState> {
     StrategyStep {
+        cancels: Vec::new(),
         next_state: next_state(
             config,
             sequence,
@@ -996,7 +1001,8 @@ impl VenueExecutor for FundingCarryExecutor {
         Ok(VenueRiskSnapshot {
             network: TradingNetwork::Signet,
             venue: "lnmarkets".into(),
-            venue_balance_after_sats,
+            collateral_asset: AssetId::sats(),
+            venue_balance_after: venue_balance_after_sats,
             position_notional_before_usd,
             position_notional_after_usd,
             leverage,
@@ -1413,16 +1419,13 @@ fn funding_entry(
         strategy_id: STRATEGY_ID.into(),
         kind: LedgerEntryKind::FundingSettlement,
         postings: vec![
-            LedgerPosting {
-                account: LedgerAccount::VenueBalance {
+            LedgerPosting::sats(
+                LedgerAccount::VenueBalance {
                     venue: "lnmarkets".into(),
                 },
-                amount_sats: venue_amount,
-            },
-            LedgerPosting {
-                account: LedgerAccount::FundingIncome,
-                amount_sats: income_amount,
-            },
+                venue_amount,
+            ),
+            LedgerPosting::sats(LedgerAccount::FundingIncome, income_amount),
         ],
         metadata,
     })
@@ -1441,16 +1444,13 @@ fn fee_entry(
         strategy_id: STRATEGY_ID.into(),
         kind: LedgerEntryKind::Fee,
         postings: vec![
-            LedgerPosting {
-                account: LedgerAccount::VenueBalance {
+            LedgerPosting::sats(
+                LedgerAccount::VenueBalance {
                     venue: "lnmarkets".into(),
                 },
-                amount_sats: venue_amount,
-            },
-            LedgerPosting {
-                account: LedgerAccount::FeeExpense,
-                amount_sats: fee_sats,
-            },
+                venue_amount,
+            ),
+            LedgerPosting::sats(LedgerAccount::FeeExpense, fee_sats),
         ],
         metadata,
     })

@@ -1,7 +1,7 @@
 use lnmarkets_data::{FeatureSnapshot, FundingSign};
 use serde::Serialize;
 use trading_ledger::{LedgerEntry, LedgerEntryKind, ProfitReport};
-use trading_mandate::MandateSnapshot;
+use trading_mandate::{LEGACY_VENUE, MandateSnapshot};
 
 use crate::{BacktestReport, StrategyRuntimeSnapshot};
 
@@ -74,7 +74,7 @@ impl PortfolioReview {
         strategies: Vec<StrategyRuntimeSnapshot>,
         backtests: Vec<BacktestReport>,
     ) -> Self {
-        let limit_headroom = mandate.mandate.as_ref().map(|active| {
+        let limit_headroom = lnmarkets_mandate(&mandate).map(|active| {
             let by_strategy = active
                 .allowed_strategies
                 .iter()
@@ -98,7 +98,7 @@ impl PortfolioReview {
                         strategy_id: strategy_id.clone(),
                         realized_loss_sats,
                         daily_loss_headroom_sats: active
-                            .daily_loss_stop_sats
+                            .daily_loss_stop
                             .saturating_sub(realized_loss_sats),
                         orders_last_hour,
                         order_headroom: active.max_orders_per_hour.saturating_sub(orders_last_hour),
@@ -107,7 +107,7 @@ impl PortfolioReview {
                 .collect();
             LimitHeadroom {
                 mandate_expires_in_ms: active.expires_at_ms.saturating_sub(generated_at_ms),
-                maximum_venue_balance_sats: active.max_venue_balance_sats,
+                maximum_venue_balance_sats: active.max_venue_balance,
                 maximum_position_usd: active.max_position_usd,
                 maximum_leverage: active.max_leverage,
                 minimum_liquidation_buffer_bps: active.min_liquidation_buffer_bps,
@@ -153,9 +153,7 @@ fn opportunity_inventory(
     mandate: &MandateSnapshot,
 ) -> Vec<Opportunity> {
     let allowed = |strategy_id: &str| {
-        mandate
-            .mandate
-            .as_ref()
+        lnmarkets_mandate(mandate)
             .is_some_and(|active| active.allowed_strategies.contains(strategy_id))
     };
     let funding_availability = if !allowed("funding_carry") {
@@ -261,6 +259,13 @@ fn opportunity_inventory(
     ]
 }
 
+fn lnmarkets_mandate(mandate: &MandateSnapshot) -> Option<&trading_mandate::TradingMandate> {
+    mandate
+        .mandates
+        .iter()
+        .find(|active| active.venue == LEGACY_VENUE)
+}
+
 pub fn hourly_start(now_ms: i64) -> i64 {
     now_ms.saturating_sub(ONE_HOUR_MS).max(0)
 }
@@ -280,13 +285,15 @@ mod tests {
     fn mandate() -> MandateSnapshot {
         MandateSnapshot {
             revision: 3,
-            mandate: Some(TradingMandate {
+            mandates: vec![TradingMandate {
+                venue: LEGACY_VENUE.into(),
                 network: TradingNetwork::Signet,
+                collateral_asset: trading_mandate::AssetId::sats(),
                 objective: "maximize ledger profit in sats".into(),
-                max_venue_balance_sats: 100_000,
+                max_venue_balance: 100_000,
                 max_position_usd: 50,
                 max_leverage: 2,
-                daily_loss_stop_sats: 500,
+                daily_loss_stop: 500,
                 max_orders_per_hour: 4,
                 min_liquidation_buffer_bps: 2_000,
                 allowed_strategies: BTreeSet::from([
@@ -295,7 +302,7 @@ mod tests {
                 ]),
                 review_cadence: ReviewCadence::Interval { seconds: 300 },
                 expires_at_ms: 20_000,
-            }),
+            }],
         }
     }
 
@@ -350,14 +357,8 @@ mod tests {
             strategy_id: strategy_id.into(),
             kind: LedgerEntryKind::Order,
             postings: vec![
-                LedgerPosting {
-                    account: LedgerAccount::FeeExpense,
-                    amount_sats: 1,
-                },
-                LedgerPosting {
-                    account: LedgerAccount::TradingProfit,
-                    amount_sats: -1,
-                },
+                LedgerPosting::sats(LedgerAccount::FeeExpense, 1),
+                LedgerPosting::sats(LedgerAccount::TradingProfit, -1),
             ],
             metadata: serde_json::json!({}),
             previous_hash: "00".into(),

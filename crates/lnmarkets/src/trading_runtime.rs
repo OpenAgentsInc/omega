@@ -25,6 +25,7 @@ use trading_mandate::{
 use crate::review_turn::{PortfolioReview, hourly_start};
 use crate::{SoakLimitBreach, SoakReviewTurn, SoakWindow};
 
+const LNMARKETS_VENUE: &str = trading_mandate::LEGACY_VENUE;
 const REBALANCE_STRATEGY_ID: &str = "rebalance_to_target";
 const FUNDING_STRATEGY_ID: &str = "funding_carry";
 const THRESHOLD_SWING_STRATEGY_ID: &str = "threshold_swing";
@@ -296,14 +297,16 @@ impl TradingRuntime {
     pub fn narrow_mandate(&self, changed_at_ms: i64) -> Result<MandateSnapshot> {
         let snapshot = self.mandate.snapshot()?;
         let mandate = snapshot
-            .mandate
-            .context("no active mandate is available to narrow")?;
+            .mandate_for(LNMARKETS_VENUE, TradingNetwork::Signet)
+            .context("no active mandate is available to narrow")?
+            .clone();
         let proposal = self.mandate.propose(narrowed_mandate(mandate))?;
         self.mandate.save_restriction(proposal, changed_at_ms)
     }
 
     pub fn revoke_mandate(&self, changed_at_ms: i64) -> Result<MandateSnapshot> {
-        self.mandate.revoke(changed_at_ms)
+        self.mandate
+            .revoke(LNMARKETS_VENUE, TradingNetwork::Signet, changed_at_ms)
     }
 
     pub fn strategy_snapshots(&self) -> Vec<StrategyRuntimeSnapshot> {
@@ -340,8 +343,8 @@ impl TradingRuntime {
         Ok(self
             .mandate
             .snapshot()?
-            .mandate
-            .map(|mandate| mandate.review_cadence))
+            .mandate_for(LNMARKETS_VENUE, TradingNetwork::Signet)
+            .map(|mandate| mandate.review_cadence.clone()))
     }
 
     pub fn pending_review_wakeup(
@@ -782,9 +785,11 @@ impl TradingRuntime {
         leverage: u8,
     ) -> Result<()> {
         let snapshot = self.mandate.snapshot()?;
-        let mandate = snapshot.mandate.context(
-            "no trading mandate is active; approve one in Settings before starting a strategy",
-        )?;
+        let mandate = snapshot
+            .mandate_for(LNMARKETS_VENUE, TradingNetwork::Signet)
+            .context(
+                "no trading mandate is active; approve one in Settings before starting a strategy",
+            )?;
         if mandate.expires_at_ms <= at_ms {
             bail!("the active trading mandate has expired");
         }
@@ -816,6 +821,7 @@ fn lifecycle_strategy_id(event: &StrategyLifecycleEvent) -> &str {
         | StrategyLifecycleEvent::TickProcessed { strategy_id, .. }
         | StrategyLifecycleEvent::OrderAuthorized { strategy_id, .. }
         | StrategyLifecycleEvent::OrderSubmitted { strategy_id, .. }
+        | StrategyLifecycleEvent::CancelResolved { strategy_id, .. }
         | StrategyLifecycleEvent::BacktestApproved { strategy_id, .. }
         | StrategyLifecycleEvent::StateUpdated { strategy_id, .. }
         | StrategyLifecycleEvent::LedgerEntryAppended { strategy_id, .. }
@@ -837,6 +843,9 @@ fn lifecycle_summary(event: &StrategyLifecycleEvent) -> String {
         StrategyLifecycleEvent::OrderSubmitted { venue_order_id, .. } => {
             format!("submitted venue order {venue_order_id}")
         }
+        StrategyLifecycleEvent::CancelResolved { venue_order_id, .. } => {
+            format!("cancelled venue order {venue_order_id}")
+        }
         StrategyLifecycleEvent::BacktestApproved { .. } => "backtest approved".to_string(),
         StrategyLifecycleEvent::StateUpdated { at_ms, .. } => {
             format!("updated state at {at_ms}")
@@ -851,10 +860,10 @@ fn lifecycle_summary(event: &StrategyLifecycleEvent) -> String {
 fn narrowed_mandate(
     mut mandate: trading_mandate::TradingMandate,
 ) -> trading_mandate::TradingMandate {
-    mandate.max_venue_balance_sats = (mandate.max_venue_balance_sats / 2).max(1);
+    mandate.max_venue_balance = (mandate.max_venue_balance / 2).max(1);
     mandate.max_position_usd = (mandate.max_position_usd / 2).max(1);
     mandate.max_leverage = (mandate.max_leverage / 2).max(1);
-    mandate.daily_loss_stop_sats = (mandate.daily_loss_stop_sats / 2).max(1);
+    mandate.daily_loss_stop = (mandate.daily_loss_stop / 2).max(1);
     mandate.max_orders_per_hour /= 2;
     mandate
 }
@@ -999,12 +1008,14 @@ mod tests {
     #[test]
     fn one_click_narrowing_only_reduces_mandate_authority() {
         let original = TradingMandate {
+            venue: LNMARKETS_VENUE.into(),
             network: TradingNetwork::Signet,
+            collateral_asset: trading_mandate::AssetId::sats(),
             objective: "Keep risk bounded".into(),
-            max_venue_balance_sats: 100_000,
+            max_venue_balance: 100_000,
             max_position_usd: 500,
             max_leverage: 5,
-            daily_loss_stop_sats: 5_000,
+            daily_loss_stop: 5_000,
             max_orders_per_hour: 9,
             min_liquidation_buffer_bps: 1_500,
             allowed_strategies: BTreeSet::from(["funding_carry".into()]),
@@ -1013,10 +1024,10 @@ mod tests {
         };
         let narrowed = narrowed_mandate(original.clone());
 
-        assert_eq!(narrowed.max_venue_balance_sats, 50_000);
+        assert_eq!(narrowed.max_venue_balance, 50_000);
         assert_eq!(narrowed.max_position_usd, 250);
         assert_eq!(narrowed.max_leverage, 2);
-        assert_eq!(narrowed.daily_loss_stop_sats, 2_500);
+        assert_eq!(narrowed.daily_loss_stop, 2_500);
         assert_eq!(narrowed.max_orders_per_hour, 4);
         assert_eq!(
             narrowed.min_liquidation_buffer_bps,

@@ -559,12 +559,12 @@ impl<V: HedgeVenue> Hedger<V> {
             kind: LedgerEntryKind::BalanceAdjustment,
             postings: vec![
                 venue_posting(balance_sats),
-                LedgerPosting {
-                    account: LedgerAccount::External,
-                    amount_sats: balance_sats
+                LedgerPosting::sats(
+                    LedgerAccount::External,
+                    balance_sats
                         .checked_neg()
                         .context("baseline posting overflowed")?,
-                },
+                ),
             ],
             metadata: json!({"schema": "openagents.omega.lnmarkets-hedger-baseline.v1"}),
         })?;
@@ -590,10 +590,7 @@ impl<V: HedgeVenue> Hedger<V> {
                                     .checked_neg()
                                     .context("fee posting overflowed")?,
                             ),
-                            LedgerPosting {
-                                account: LedgerAccount::FeeExpense,
-                                amount_sats,
-                            },
+                            LedgerPosting::sats(LedgerAccount::FeeExpense, amount_sats),
                         ],
                     )
                 }
@@ -605,12 +602,12 @@ impl<V: HedgeVenue> Hedger<V> {
                         LedgerEntryKind::FundingSettlement,
                         vec![
                             venue_posting(amount_sats),
-                            LedgerPosting {
-                                account: LedgerAccount::FundingIncome,
-                                amount_sats: amount_sats
+                            LedgerPosting::sats(
+                                LedgerAccount::FundingIncome,
+                                amount_sats
                                     .checked_neg()
                                     .context("funding posting overflowed")?,
-                            },
+                            ),
                         ],
                     )
                 }
@@ -646,12 +643,12 @@ impl<V: HedgeVenue> Hedger<V> {
             kind: LedgerEntryKind::BalanceAdjustment,
             postings: vec![
                 venue_posting(difference_sats),
-                LedgerPosting {
-                    account: LedgerAccount::TradingProfit,
-                    amount_sats: difference_sats
+                LedgerPosting::sats(
+                    LedgerAccount::TradingProfit,
+                    difference_sats
                         .checked_neg()
                         .context("profit posting overflowed")?,
-                },
+                ),
             ],
             metadata: json!({
                 "schema": "openagents.omega.lnmarkets-hedger-balance.v1",
@@ -772,12 +769,12 @@ fn liquidation_distance_bps(snapshot: &VenueSnapshot) -> Result<Option<u32>> {
 }
 
 fn venue_posting(amount_sats: i64) -> LedgerPosting {
-    LedgerPosting {
-        account: LedgerAccount::VenueBalance {
+    LedgerPosting::sats(
+        LedgerAccount::VenueBalance {
             venue: VENUE.to_owned(),
         },
         amount_sats,
-    }
+    )
 }
 
 fn decimal_f64(amount: &lnmarkets_client::DecimalAmount, label: &str) -> Result<f64> {

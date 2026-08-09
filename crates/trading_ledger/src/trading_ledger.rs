@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -7,12 +8,88 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use parking_lot::Mutex;
 use rusqlite::{Connection, Transaction, params};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct as _};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_IDENTIFIER_LENGTH: usize = 200;
+const MAX_ASSET_ID_LENGTH: usize = 32;
+
+/// Ledger schema version stored in SQLite `user_version`. Version 1 databases
+/// hard-coded sats; version 2 postings carry an explicit asset.
+pub const LEDGER_SCHEMA_VERSION: i64 = 2;
+
+/// A validated asset identifier. Amounts in this ledger are integers in the
+/// asset's smallest venue-native unit (satoshis for `sats`, micro-USDC style
+/// integer units for `usdc`, and so on); the ledger never converts between
+/// assets.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AssetId(String);
+
+impl AssetId {
+    pub fn sats() -> Self {
+        Self("sats".to_owned())
+    }
+
+    pub fn usdc() -> Self {
+        Self("usdc".to_owned())
+    }
+
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let id = id.into();
+        if id.is_empty() {
+            bail!("an asset identifier must not be empty");
+        }
+        if id.len() > MAX_ASSET_ID_LENGTH {
+            bail!("an asset identifier must not exceed {MAX_ASSET_ID_LENGTH} bytes");
+        }
+        let mut characters = id.chars();
+        if !characters
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase())
+        {
+            bail!("an asset identifier must start with a lowercase ASCII letter");
+        }
+        if !id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        }) {
+            bail!(
+                "an asset identifier may contain only lowercase ASCII letters, digits, and underscores"
+            );
+        }
+        Ok(Self(id))
+    }
+
+    pub fn is_sats(&self) -> bool {
+        self.0 == "sats"
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AssetId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for AssetId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<AssetId> for String {
+    fn from(asset: AssetId) -> Self {
+        asset.0
+    }
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -34,22 +111,111 @@ impl LedgerAccount {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationMismatch {
+    pub venue: String,
+    pub asset: AssetId,
+    pub expected: i64,
+    pub observed: i64,
+    pub difference: i64,
+}
+
+// Sats mismatches keep the pre-multi-asset field layout (`expected_sats` and
+// friends, no `asset` field) so entry hashes recorded by earlier releases
+// still verify against byte-identical serialized kinds.
+impl Serialize for ReconciliationMismatch {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.asset.is_sats() {
+            let mut state = serializer.serialize_struct("ReconciliationMismatch", 4)?;
+            state.serialize_field("venue", &self.venue)?;
+            state.serialize_field("expected_sats", &self.expected)?;
+            state.serialize_field("observed_sats", &self.observed)?;
+            state.serialize_field("difference_sats", &self.difference)?;
+            state.end()
+        } else {
+            let mut state = serializer.serialize_struct("ReconciliationMismatch", 5)?;
+            state.serialize_field("venue", &self.venue)?;
+            state.serialize_field("asset", &self.asset)?;
+            state.serialize_field("expected", &self.expected)?;
+            state.serialize_field("observed", &self.observed)?;
+            state.serialize_field("difference", &self.difference)?;
+            state.end()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ReconciliationMismatchRepr {
+    venue: String,
+    #[serde(default)]
+    asset: Option<AssetId>,
+    #[serde(default)]
+    expected: Option<i64>,
+    #[serde(default)]
+    expected_sats: Option<i64>,
+    #[serde(default)]
+    observed: Option<i64>,
+    #[serde(default)]
+    observed_sats: Option<i64>,
+    #[serde(default)]
+    difference: Option<i64>,
+    #[serde(default)]
+    difference_sats: Option<i64>,
+}
+
+impl TryFrom<ReconciliationMismatchRepr> for ReconciliationMismatch {
+    type Error = anyhow::Error;
+
+    fn try_from(repr: ReconciliationMismatchRepr) -> Result<Self> {
+        let pick = |label: &str,
+                    current: Option<i64>,
+                    legacy: Option<i64>|
+         -> Result<(i64, bool)> {
+            match (current, legacy) {
+                (Some(value), None) => Ok((value, false)),
+                (None, Some(value)) => Ok((value, true)),
+                _ => bail!(
+                    "a reconciliation mismatch requires exactly one of `{label}` and `{label}_sats`"
+                ),
+            }
+        };
+        let (expected, expected_legacy) = pick("expected", repr.expected, repr.expected_sats)?;
+        let (observed, observed_legacy) = pick("observed", repr.observed, repr.observed_sats)?;
+        let (difference, difference_legacy) =
+            pick("difference", repr.difference, repr.difference_sats)?;
+        let asset = repr.asset.unwrap_or_else(AssetId::sats);
+        if (expected_legacy || observed_legacy || difference_legacy) && !asset.is_sats() {
+            bail!("a reconciliation mismatch with sats-named fields must not name another asset");
+        }
+        Ok(Self {
+            venue: repr.venue,
+            asset,
+            expected,
+            observed,
+            difference,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ReconciliationMismatch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let repr = ReconciliationMismatchRepr::deserialize(deserializer)?;
+        Self::try_from(repr).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LedgerEntryKind {
     Order,
+    Cancel,
     Fill,
     Fee,
     FundingSettlement,
     Deposit,
     Withdrawal,
     BalanceAdjustment,
-    ReconciliationMismatch {
-        venue: String,
-        expected_sats: i64,
-        observed_sats: i64,
-        difference_sats: i64,
-    },
+    ReconciliationMismatch(ReconciliationMismatch),
 }
 
 impl LedgerEntryKind {
@@ -65,10 +231,86 @@ impl LedgerEntryKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LedgerPosting {
     pub account: LedgerAccount,
-    pub amount_sats: i64,
+    pub amount: i64,
+    pub asset: AssetId,
+}
+
+impl LedgerPosting {
+    pub fn new(account: LedgerAccount, amount: i64, asset: AssetId) -> Self {
+        Self {
+            account,
+            amount,
+            asset,
+        }
+    }
+
+    pub fn sats(account: LedgerAccount, amount: i64) -> Self {
+        Self::new(account, amount, AssetId::sats())
+    }
+}
+
+// Sats postings keep the pre-multi-asset field layout (`amount_sats`, no
+// `asset` field) so entry hashes recorded by earlier releases still verify
+// against byte-identical serialized postings.
+impl Serialize for LedgerPosting {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.asset.is_sats() {
+            let mut state = serializer.serialize_struct("LedgerPosting", 2)?;
+            state.serialize_field("account", &self.account)?;
+            state.serialize_field("amount_sats", &self.amount)?;
+            state.end()
+        } else {
+            let mut state = serializer.serialize_struct("LedgerPosting", 3)?;
+            state.serialize_field("account", &self.account)?;
+            state.serialize_field("amount", &self.amount)?;
+            state.serialize_field("asset", &self.asset)?;
+            state.end()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LedgerPostingRepr {
+    account: LedgerAccount,
+    #[serde(default)]
+    amount: Option<i64>,
+    #[serde(default)]
+    amount_sats: Option<i64>,
+    #[serde(default)]
+    asset: Option<AssetId>,
+}
+
+impl TryFrom<LedgerPostingRepr> for LedgerPosting {
+    type Error = anyhow::Error;
+
+    fn try_from(repr: LedgerPostingRepr) -> Result<Self> {
+        let (amount, asset) = match (repr.amount, repr.amount_sats) {
+            (Some(amount), None) => (amount, repr.asset.unwrap_or_else(AssetId::sats)),
+            (None, Some(amount)) => {
+                let asset = repr.asset.unwrap_or_else(AssetId::sats);
+                if !asset.is_sats() {
+                    bail!("a ledger posting with `amount_sats` must not name another asset");
+                }
+                (amount, asset)
+            }
+            _ => bail!("a ledger posting requires exactly one of `amount` and `amount_sats`"),
+        };
+        Ok(Self {
+            account: repr.account,
+            amount,
+            asset,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for LedgerPosting {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let repr = LedgerPostingRepr::deserialize(deserializer)?;
+        Self::try_from(repr).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -107,18 +349,13 @@ impl LedgerEntryDraft {
         if !self.metadata.is_object() {
             bail!("ledger metadata must be a JSON object");
         }
-        if let LedgerEntryKind::ReconciliationMismatch {
-            venue,
-            expected_sats,
-            observed_sats,
-            difference_sats,
-        } = &self.kind
-        {
-            validate_identifier("venue", venue)?;
-            let expected_difference = observed_sats
-                .checked_sub(*expected_sats)
+        if let LedgerEntryKind::ReconciliationMismatch(mismatch) = &self.kind {
+            validate_identifier("venue", &mismatch.venue)?;
+            let expected_difference = mismatch
+                .observed
+                .checked_sub(mismatch.expected)
                 .context("reconciliation difference overflowed")?;
-            if *difference_sats != expected_difference {
+            if mismatch.difference != expected_difference {
                 bail!("reconciliation alert carries an invalid balance difference");
             }
         }
@@ -135,21 +372,27 @@ impl LedgerEntryDraft {
             bail!("a financial ledger entry requires at least two postings");
         }
         let mut accounts = BTreeSet::new();
-        let mut sum = 0_i64;
+        let mut asset_sums = BTreeMap::<&AssetId, i64>::new();
         for posting in &self.postings {
             posting.account.validate()?;
-            if posting.amount_sats == 0 {
+            if posting.amount == 0 {
                 bail!("ledger postings must not have a zero amount");
             }
-            if !accounts.insert(&posting.account) {
-                bail!("a ledger entry must not repeat an account");
+            if !accounts.insert((&posting.account, &posting.asset)) {
+                bail!("a ledger entry must not repeat an account within one asset");
             }
-            sum = sum
-                .checked_add(posting.amount_sats)
+            let sum = asset_sums.entry(&posting.asset).or_insert(0);
+            *sum = sum
+                .checked_add(posting.amount)
                 .context("ledger posting sum overflowed")?;
         }
-        if sum != 0 {
-            bail!("ledger postings do not balance: {sum} sats");
+        // Balance is enforced per asset, so a cross-asset conversion can never
+        // hide inside one entry; a trade is two legs that each balance, with
+        // the price recorded in metadata.
+        for (asset, sum) in asset_sums {
+            if sum != 0 {
+                bail!("ledger postings do not balance: {sum} {asset}");
+            }
         }
         Ok(())
     }
@@ -222,6 +465,15 @@ impl LedgerQuery {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AssetProfit {
+    pub asset: AssetId,
+    pub profit: i64,
+    pub fees_paid: i64,
+    pub funding_collected: i64,
+    pub worst_drawdown: i64,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StrategyProfit {
     pub strategy_id: String,
@@ -229,6 +481,8 @@ pub struct StrategyProfit {
     pub fees_paid_sats: i64,
     pub funding_collected_sats: i64,
     pub worst_drawdown_sats: i64,
+    #[serde(default)]
+    pub assets: Vec<AssetProfit>,
     pub entry_count: usize,
 }
 
@@ -241,13 +495,27 @@ pub struct ProfitReport {
     pub total_fees_paid_sats: i64,
     pub total_funding_collected_sats: i64,
     pub worst_drawdown_sats: i64,
+    #[serde(default)]
+    pub assets: Vec<AssetProfit>,
+}
+
+impl ProfitReport {
+    pub fn asset_totals(&self, asset: &AssetId) -> Option<&AssetProfit> {
+        self.assets.iter().find(|totals| &totals.asset == asset)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReconciliationOutcome {
-    Matched { venue: String, balance_sats: i64 },
-    Mismatch { alert: LedgerEntry },
+    Matched {
+        venue: String,
+        asset: AssetId,
+        balance: i64,
+    },
+    Mismatch {
+        alert: LedgerEntry,
+    },
 }
 
 #[derive(Clone)]
@@ -282,8 +550,11 @@ impl LedgerStore {
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = FULL;
-             CREATE TABLE IF NOT EXISTS trading_ledger_entries (
+             PRAGMA synchronous = FULL;",
+        )?;
+        migrate_legacy_sats_postings(&connection)?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS trading_ledger_entries (
                  sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
                  event_id TEXT NOT NULL UNIQUE,
                  occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
@@ -297,7 +568,8 @@ impl LedgerStore {
                  sequence INTEGER NOT NULL,
                  posting_index INTEGER NOT NULL CHECK (posting_index >= 0),
                  account_json TEXT NOT NULL,
-                 amount_sats INTEGER NOT NULL CHECK (amount_sats != 0),
+                 amount INTEGER NOT NULL CHECK (amount != 0),
+                 asset TEXT NOT NULL CHECK (length(asset) > 0),
                  PRIMARY KEY (sequence, posting_index),
                  FOREIGN KEY (sequence) REFERENCES trading_ledger_entries(sequence)
              ) STRICT;
@@ -318,6 +590,7 @@ impl LedgerStore {
                  SELECT RAISE(ABORT, 'trading ledger postings are append-only');
              END;",
         )?;
+        connection.pragma_update(None, "user_version", LEDGER_SCHEMA_VERSION)?;
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
         };
@@ -351,9 +624,13 @@ impl LedgerStore {
     }
 
     pub fn venue_balance(&self, venue: &str) -> Result<i64> {
+        self.venue_asset_balance(venue, &AssetId::sats())
+    }
+
+    pub fn venue_asset_balance(&self, venue: &str, asset: &AssetId) -> Result<i64> {
         validate_identifier("venue", venue)?;
         let entries = self.entries(&LedgerQuery::default())?;
-        venue_balance_from_entries(&entries, venue)
+        venue_balance_from_entries(&entries, venue, asset)
     }
 
     pub fn reconcile(
@@ -364,6 +641,25 @@ impl LedgerStore {
         venue: impl Into<String>,
         observed_sats: i64,
     ) -> Result<ReconciliationOutcome> {
+        self.reconcile_asset(
+            event_id,
+            occurred_at_ms,
+            strategy_id,
+            venue,
+            AssetId::sats(),
+            observed_sats,
+        )
+    }
+
+    pub fn reconcile_asset(
+        &self,
+        event_id: impl Into<String>,
+        occurred_at_ms: i64,
+        strategy_id: impl Into<String>,
+        venue: impl Into<String>,
+        asset: AssetId,
+        observed: i64,
+    ) -> Result<ReconciliationOutcome> {
         let event_id = event_id.into();
         let strategy_id = strategy_id.into();
         let venue = venue.into();
@@ -373,34 +669,36 @@ impl LedgerStore {
         if occurred_at_ms < 0 {
             bail!("reconciliation timestamp must not be negative");
         }
-        if observed_sats < 0 {
+        if observed < 0 {
             bail!("observed venue balance must not be negative");
         }
         let mut connection = self.connection.lock();
         let transaction = connection.transaction()?;
         let entries = load_entries(&transaction)?;
         verify_entries(&entries)?;
-        let expected_sats = venue_balance_from_entries(&entries, &venue)?;
-        let difference_sats = observed_sats
-            .checked_sub(expected_sats)
+        let expected = venue_balance_from_entries(&entries, &venue, &asset)?;
+        let difference = observed
+            .checked_sub(expected)
             .context("reconciliation difference overflowed")?;
-        if difference_sats == 0 {
+        if difference == 0 {
             transaction.commit()?;
             return Ok(ReconciliationOutcome::Matched {
                 venue,
-                balance_sats: observed_sats,
+                asset,
+                balance: observed,
             });
         }
         let draft = LedgerEntryDraft::new(
             event_id,
             occurred_at_ms,
             strategy_id,
-            LedgerEntryKind::ReconciliationMismatch {
+            LedgerEntryKind::ReconciliationMismatch(ReconciliationMismatch {
                 venue,
-                expected_sats,
-                observed_sats,
-                difference_sats,
-            },
+                asset,
+                expected,
+                observed,
+                difference,
+            }),
         );
         draft.validate()?;
         let alert = append_verified(&transaction, draft, &entries)?;
@@ -413,13 +711,15 @@ impl LedgerStore {
         let mut strategies = BTreeMap::<String, ProfitAccumulator>::new();
         let mut total = ProfitAccumulator::default();
         for entry in entries {
-            let delta = entry_profit_delta(&entry)?;
+            let deltas = entry_profit_deltas(&entry)?;
             strategies
                 .entry(entry.strategy_id.clone())
                 .or_default()
-                .record(&entry, delta)?;
-            total.record(&entry, delta)?;
+                .record(&entry, &deltas)?;
+            total.record(&entry, &deltas)?;
         }
+        let total_assets = total.asset_profits();
+        let sats_totals = sats_profit(&total_assets);
         Ok(ProfitReport {
             from_ms: query.from_ms,
             to_ms: query.to_ms,
@@ -427,12 +727,32 @@ impl LedgerStore {
                 .into_iter()
                 .map(|(strategy_id, accumulator)| accumulator.finish(strategy_id))
                 .collect(),
-            total_profit_sats: total.profit_sats,
-            total_fees_paid_sats: total.fees_paid_sats,
-            total_funding_collected_sats: total.funding_collected_sats,
-            worst_drawdown_sats: total.worst_drawdown_sats,
+            total_profit_sats: sats_totals.profit,
+            total_fees_paid_sats: sats_totals.fees_paid,
+            total_funding_collected_sats: sats_totals.funding_collected,
+            worst_drawdown_sats: sats_totals.worst_drawdown,
+            assets: total_assets,
         })
     }
+}
+
+// Version 1 stored postings in an `amount_sats` column with no asset. The
+// rename plus constant default is the whole data migration: every existing row
+// was a sats row by construction, and `ALTER TABLE` does not fire the
+// append-only triggers.
+fn migrate_legacy_sats_postings(connection: &Connection) -> Result<()> {
+    let has_legacy_amount_column = connection
+        .prepare(
+            "SELECT 1 FROM pragma_table_info('trading_ledger_postings') WHERE name = 'amount_sats'",
+        )?
+        .exists([])?;
+    if has_legacy_amount_column {
+        connection.execute_batch(
+            "ALTER TABLE trading_ledger_postings RENAME COLUMN amount_sats TO amount;
+             ALTER TABLE trading_ledger_postings ADD COLUMN asset TEXT NOT NULL DEFAULT 'sats';",
+        )?;
+    }
+    Ok(())
 }
 
 fn append_verified(
@@ -484,13 +804,14 @@ fn append_verified(
     for (posting_index, posting) in draft.postings.iter().enumerate() {
         transaction.execute(
             "INSERT INTO trading_ledger_postings (
-                 sequence, posting_index, account_json, amount_sats
-             ) VALUES (?1, ?2, ?3, ?4)",
+                 sequence, posting_index, account_json, amount, asset
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 sequence_i64,
                 i64::try_from(posting_index).context("ledger posting index overflowed")?,
                 serde_json::to_string(&posting.account)?,
-                posting.amount_sats,
+                posting.amount,
+                posting.asset.as_str(),
             ],
         )?;
     }
@@ -507,14 +828,18 @@ fn append_verified(
     })
 }
 
-fn venue_balance_from_entries(entries: &[LedgerEntry], venue: &str) -> Result<i64> {
+fn venue_balance_from_entries(
+    entries: &[LedgerEntry],
+    venue: &str,
+    asset: &AssetId,
+) -> Result<i64> {
     entries
         .iter()
         .flat_map(|entry| &entry.postings)
         .filter_map(|posting| match &posting.account {
             LedgerAccount::VenueBalance {
                 venue: posting_venue,
-            } if posting_venue == venue => Some(posting.amount_sats),
+            } if posting_venue == venue && &posting.asset == asset => Some(posting.amount),
             _ => None,
         })
         .try_fold(0_i64, |balance, amount| {
@@ -525,77 +850,125 @@ fn venue_balance_from_entries(entries: &[LedgerEntry], venue: &str) -> Result<i6
 }
 
 #[derive(Default)]
+struct AssetAccumulator {
+    profit: i64,
+    fees_paid: i64,
+    funding_collected: i64,
+    peak_profit: i64,
+    worst_drawdown: i64,
+}
+
+#[derive(Default)]
 struct ProfitAccumulator {
-    profit_sats: i64,
-    fees_paid_sats: i64,
-    funding_collected_sats: i64,
-    peak_profit_sats: i64,
-    worst_drawdown_sats: i64,
+    assets: BTreeMap<AssetId, AssetAccumulator>,
     entry_count: usize,
 }
 
 impl ProfitAccumulator {
-    fn record(&mut self, entry: &LedgerEntry, profit_delta: i64) -> Result<()> {
-        self.profit_sats = self
-            .profit_sats
-            .checked_add(profit_delta)
-            .context("ledger profit overflowed")?;
+    fn record(&mut self, entry: &LedgerEntry, deltas: &BTreeMap<AssetId, i64>) -> Result<()> {
+        for (asset, delta) in deltas {
+            let accumulator = self.assets.entry(asset.clone()).or_default();
+            accumulator.profit = accumulator
+                .profit
+                .checked_add(*delta)
+                .context("ledger profit overflowed")?;
+        }
         for posting in &entry.postings {
+            let accumulator = self.assets.entry(posting.asset.clone()).or_default();
             match posting.account {
-                LedgerAccount::FeeExpense if posting.amount_sats > 0 => {
-                    self.fees_paid_sats = self
-                        .fees_paid_sats
-                        .checked_add(posting.amount_sats)
+                LedgerAccount::FeeExpense if posting.amount > 0 => {
+                    accumulator.fees_paid = accumulator
+                        .fees_paid
+                        .checked_add(posting.amount)
                         .context("ledger fee total overflowed")?;
                 }
                 LedgerAccount::FundingIncome => {
-                    self.funding_collected_sats = self
-                        .funding_collected_sats
-                        .checked_sub(posting.amount_sats)
+                    accumulator.funding_collected = accumulator
+                        .funding_collected
+                        .checked_sub(posting.amount)
                         .context("ledger funding total overflowed")?;
                 }
                 _ => {}
             }
         }
-        self.peak_profit_sats = self.peak_profit_sats.max(self.profit_sats);
-        self.worst_drawdown_sats = self.worst_drawdown_sats.max(
-            self.peak_profit_sats
-                .checked_sub(self.profit_sats)
-                .context("ledger drawdown overflowed")?,
-        );
+        for asset in deltas.keys() {
+            let accumulator = self
+                .assets
+                .get_mut(asset)
+                .context("profit accumulator lost an asset")?;
+            accumulator.peak_profit = accumulator.peak_profit.max(accumulator.profit);
+            accumulator.worst_drawdown = accumulator.worst_drawdown.max(
+                accumulator
+                    .peak_profit
+                    .checked_sub(accumulator.profit)
+                    .context("ledger drawdown overflowed")?,
+            );
+        }
         self.entry_count = self.entry_count.saturating_add(1);
         Ok(())
     }
 
+    fn asset_profits(&self) -> Vec<AssetProfit> {
+        self.assets
+            .iter()
+            .map(|(asset, accumulator)| AssetProfit {
+                asset: asset.clone(),
+                profit: accumulator.profit,
+                fees_paid: accumulator.fees_paid,
+                funding_collected: accumulator.funding_collected,
+                worst_drawdown: accumulator.worst_drawdown,
+            })
+            .collect()
+    }
+
     fn finish(self, strategy_id: String) -> StrategyProfit {
+        let assets = self.asset_profits();
+        let sats = sats_profit(&assets);
         StrategyProfit {
             strategy_id,
-            profit_sats: self.profit_sats,
-            fees_paid_sats: self.fees_paid_sats,
-            funding_collected_sats: self.funding_collected_sats,
-            worst_drawdown_sats: self.worst_drawdown_sats,
+            profit_sats: sats.profit,
+            fees_paid_sats: sats.fees_paid,
+            funding_collected_sats: sats.funding_collected,
+            worst_drawdown_sats: sats.worst_drawdown,
+            assets,
             entry_count: self.entry_count,
         }
     }
 }
 
-fn entry_profit_delta(entry: &LedgerEntry) -> Result<i64> {
-    let profit_accounts = entry
-        .postings
+fn sats_profit(assets: &[AssetProfit]) -> AssetProfit {
+    assets
         .iter()
-        .filter_map(|posting| match posting.account {
-            LedgerAccount::TradingProfit
-            | LedgerAccount::FeeExpense
-            | LedgerAccount::FundingIncome => Some(posting.amount_sats),
-            _ => None,
+        .find(|totals| totals.asset.is_sats())
+        .cloned()
+        .unwrap_or(AssetProfit {
+            asset: AssetId::sats(),
+            profit: 0,
+            fees_paid: 0,
+            funding_collected: 0,
+            worst_drawdown: 0,
         })
-        .try_fold(0_i64, |sum, amount| {
-            sum.checked_add(amount)
-                .context("ledger profit postings overflowed")
-        })?;
-    profit_accounts
-        .checked_neg()
-        .context("ledger profit could not be negated")
+}
+
+fn entry_profit_deltas(entry: &LedgerEntry) -> Result<BTreeMap<AssetId, i64>> {
+    let mut deltas = BTreeMap::new();
+    for posting in &entry.postings {
+        if matches!(
+            posting.account,
+            LedgerAccount::TradingProfit | LedgerAccount::FeeExpense | LedgerAccount::FundingIncome
+        ) {
+            let sum = deltas.entry(posting.asset.clone()).or_insert(0_i64);
+            *sum = sum
+                .checked_add(posting.amount)
+                .context("ledger profit postings overflowed")?;
+        }
+    }
+    for sum in deltas.values_mut() {
+        *sum = sum
+            .checked_neg()
+            .context("ledger profit could not be negated")?;
+    }
+    Ok(deltas)
 }
 
 fn validate_identifier(label: &str, value: &str) -> Result<()> {
@@ -658,20 +1031,27 @@ fn load_entries(connection: &Connection) -> Result<Vec<LedgerEntry>> {
 
 fn load_postings(connection: &Connection, sequence: u64) -> Result<Vec<LedgerPosting>> {
     let mut statement = connection.prepare(
-        "SELECT account_json, amount_sats FROM trading_ledger_postings
+        "SELECT account_json, amount, asset FROM trading_ledger_postings
          WHERE sequence = ?1 ORDER BY posting_index",
     )?;
     let rows = statement.query_map(
         params![i64::try_from(sequence).context("ledger sequence exceeded SQLite range")?],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
     )?;
     let mut postings = Vec::new();
     for row in rows {
-        let (account_json, amount_sats) = row?;
+        let (account_json, amount, asset) = row?;
         postings.push(LedgerPosting {
             account: serde_json::from_str(&account_json)
                 .context("ledger posting account is not valid JSON")?,
-            amount_sats,
+            amount,
+            asset: AssetId::new(asset).context("ledger posting names an invalid asset")?,
         });
     }
     Ok(postings)
@@ -755,10 +1135,7 @@ mod tests {
     }
 
     fn posting(account: LedgerAccount, amount_sats: i64) -> LedgerPosting {
-        LedgerPosting {
-            account,
-            amount_sats,
-        }
+        LedgerPosting::sats(account, amount_sats)
     }
 
     fn draft(
@@ -783,6 +1160,7 @@ mod tests {
         let store = LedgerStore::in_memory().expect("store");
         let entries = [
             draft("order", 1, "alpha", LedgerEntryKind::Order, vec![]),
+            draft("cancel", 1, "alpha", LedgerEntryKind::Cancel, vec![]),
             draft(
                 "fill",
                 2,
@@ -892,6 +1270,212 @@ mod tests {
     }
 
     #[test]
+    fn double_entry_balance_is_enforced_per_asset() {
+        let store = LedgerStore::in_memory().expect("store");
+        let balanced_per_asset = draft(
+            "two-legs",
+            1,
+            "alpha",
+            LedgerEntryKind::Fill,
+            vec![
+                posting(venue(), -1_000),
+                posting(LedgerAccount::TradingProfit, 1_000),
+                LedgerPosting::new(venue(), 50, AssetId::usdc()),
+                LedgerPosting::new(LedgerAccount::TradingProfit, -50, AssetId::usdc()),
+            ],
+        );
+        store.append(balanced_per_asset).expect("two-leg trade");
+
+        let cross_asset = draft(
+            "cross-asset",
+            2,
+            "alpha",
+            LedgerEntryKind::Fill,
+            vec![
+                posting(venue(), -1_000),
+                LedgerPosting::new(LedgerAccount::TradingProfit, 1_000, AssetId::usdc()),
+            ],
+        );
+        assert!(
+            store
+                .append(cross_asset)
+                .expect_err("cross-asset conversion inside one entry")
+                .to_string()
+                .contains("do not balance")
+        );
+
+        let repeated_account = draft(
+            "repeat",
+            3,
+            "alpha",
+            LedgerEntryKind::Fill,
+            vec![posting(venue(), 5), posting(venue(), -5)],
+        );
+        assert!(
+            store
+                .append(repeated_account)
+                .expect_err("repeated (account, asset)")
+                .to_string()
+                .contains("repeat an account")
+        );
+
+        assert_eq!(store.venue_balance("lnmarkets").expect("sats"), -1_000);
+        assert_eq!(
+            store
+                .venue_asset_balance("lnmarkets", &AssetId::usdc())
+                .expect("usdc"),
+            50
+        );
+    }
+
+    #[test]
+    fn sats_serialization_keeps_the_pre_multi_asset_layout() {
+        let sats_posting = posting(venue(), 5);
+        assert_eq!(
+            serde_json::to_string(&sats_posting).expect("serialize"),
+            r#"{"account":{"type":"venue_balance","venue":"lnmarkets"},"amount_sats":5}"#
+        );
+        let decoded: LedgerPosting =
+            serde_json::from_str(r#"{"account":{"type":"trading_profit"},"amount_sats":-5}"#)
+                .expect("legacy posting");
+        assert_eq!(decoded, posting(LedgerAccount::TradingProfit, -5));
+
+        let usdc_posting = LedgerPosting::new(LedgerAccount::TradingProfit, 7, AssetId::usdc());
+        let encoded = serde_json::to_string(&usdc_posting).expect("serialize usdc");
+        assert_eq!(
+            encoded,
+            r#"{"account":{"type":"trading_profit"},"amount":7,"asset":"usdc"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<LedgerPosting>(&encoded).expect("round trip"),
+            usdc_posting
+        );
+        assert!(
+            serde_json::from_str::<LedgerPosting>(
+                r#"{"account":{"type":"trading_profit"},"amount_sats":7,"asset":"usdc"}"#
+            )
+            .is_err()
+        );
+
+        let kind = LedgerEntryKind::ReconciliationMismatch(ReconciliationMismatch {
+            venue: "lnmarkets".into(),
+            asset: AssetId::sats(),
+            expected: 100,
+            observed: 90,
+            difference: -10,
+        });
+        let encoded = serde_json::to_string(&kind).expect("serialize kind");
+        assert_eq!(
+            encoded,
+            r#"{"type":"reconciliation_mismatch","venue":"lnmarkets","expected_sats":100,"observed_sats":90,"difference_sats":-10}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<LedgerEntryKind>(&encoded).expect("round trip"),
+            kind
+        );
+    }
+
+    #[test]
+    fn version_one_sats_databases_migrate_in_place() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("trading-ledger.db");
+        {
+            let connection = Connection::open(&path).expect("raw connection");
+            connection
+                .execute_batch(
+                    "CREATE TABLE trading_ledger_entries (
+                         sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
+                         event_id TEXT NOT NULL UNIQUE,
+                         occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
+                         strategy_id TEXT NOT NULL,
+                         kind_json TEXT NOT NULL,
+                         metadata_json TEXT NOT NULL,
+                         previous_hash TEXT NOT NULL,
+                         entry_hash TEXT NOT NULL UNIQUE
+                     ) STRICT;
+                     CREATE TABLE trading_ledger_postings (
+                         sequence INTEGER NOT NULL,
+                         posting_index INTEGER NOT NULL CHECK (posting_index >= 0),
+                         account_json TEXT NOT NULL,
+                         amount_sats INTEGER NOT NULL CHECK (amount_sats != 0),
+                         PRIMARY KEY (sequence, posting_index),
+                         FOREIGN KEY (sequence) REFERENCES trading_ledger_entries(sequence)
+                     ) STRICT;",
+                )
+                .expect("legacy schema");
+            // Sats drafts hash to the same bytes the version 1 code produced,
+            // so this fixture reproduces a real pre-migration chain.
+            let legacy = draft(
+                "legacy-fee",
+                1,
+                "alpha",
+                LedgerEntryKind::Fee,
+                vec![posting(venue(), -5), posting(LedgerAccount::FeeExpense, 5)],
+            );
+            let entry_hash = hash_entry(1, GENESIS_HASH, &legacy).expect("legacy hash");
+            connection
+                .execute(
+                    "INSERT INTO trading_ledger_entries (
+                         sequence, event_id, occurred_at_ms, strategy_id, kind_json,
+                         metadata_json, previous_hash, entry_hash
+                     ) VALUES (1, 'legacy-fee', 1, 'alpha', ?1, ?2, ?3, ?4)",
+                    params![
+                        serde_json::to_string(&legacy.kind).expect("kind"),
+                        serde_json::to_string(&legacy.metadata).expect("metadata"),
+                        GENESIS_HASH,
+                        entry_hash,
+                    ],
+                )
+                .expect("legacy entry");
+            for (posting_index, legacy_posting) in legacy.postings.iter().enumerate() {
+                connection
+                    .execute(
+                        "INSERT INTO trading_ledger_postings (
+                             sequence, posting_index, account_json, amount_sats
+                         ) VALUES (1, ?1, ?2, ?3)",
+                        params![
+                            i64::try_from(posting_index).expect("index"),
+                            serde_json::to_string(&legacy_posting.account).expect("account"),
+                            legacy_posting.amount,
+                        ],
+                    )
+                    .expect("legacy posting");
+            }
+        }
+
+        let store = LedgerStore::open(&path).expect("migrated store");
+        store.verify().expect("hash chain survives migration");
+        let entries = store.entries(&LedgerQuery::default()).expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0]
+                .postings
+                .iter()
+                .all(|entry| entry.asset.is_sats())
+        );
+        assert_eq!(store.venue_balance("lnmarkets").expect("balance"), -5);
+
+        store
+            .append(draft(
+                "usdc-fill",
+                2,
+                "alpha",
+                LedgerEntryKind::Fill,
+                vec![
+                    LedgerPosting::new(venue(), 9, AssetId::usdc()),
+                    LedgerPosting::new(LedgerAccount::TradingProfit, -9, AssetId::usdc()),
+                ],
+            ))
+            .expect("append after migration");
+        assert_eq!(
+            store
+                .venue_asset_balance("lnmarkets", &AssetId::usdc())
+                .expect("usdc"),
+            9
+        );
+    }
+
+    #[test]
     fn sequence_gaps_fail_closed_for_reads_and_writes() {
         let store = LedgerStore::in_memory().expect("store");
         for event_id in ["one", "two", "three"] {
@@ -993,13 +1577,13 @@ mod tests {
         };
         assert_eq!(alert.sequence, 2);
         assert!(matches!(
-            alert.kind,
-            LedgerEntryKind::ReconciliationMismatch {
-                expected_sats: 100,
-                observed_sats: 90,
-                difference_sats: -10,
+            &alert.kind,
+            LedgerEntryKind::ReconciliationMismatch(ReconciliationMismatch {
+                expected: 100,
+                observed: 90,
+                difference: -10,
                 ..
-            }
+            })
         ));
         assert!(alert.postings.is_empty());
         assert_eq!(store.venue_balance("lnmarkets").expect("balance"), 100);
@@ -1016,6 +1600,54 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn reconciliation_is_keyed_by_venue_and_asset() {
+        let store = LedgerStore::in_memory().expect("store");
+        store
+            .append(draft(
+                "opening",
+                1,
+                "system",
+                LedgerEntryKind::BalanceAdjustment,
+                vec![
+                    posting(venue(), 100),
+                    posting(LedgerAccount::BalanceAdjustment, -100),
+                    LedgerPosting::new(venue(), 40, AssetId::usdc()),
+                    LedgerPosting::new(LedgerAccount::BalanceAdjustment, -40, AssetId::usdc()),
+                ],
+            ))
+            .expect("opening balances");
+
+        assert!(matches!(
+            store
+                .reconcile_asset("usdc-1", 2, "system", "lnmarkets", AssetId::usdc(), 40)
+                .expect("usdc match"),
+            ReconciliationOutcome::Matched { asset, balance: 40, .. } if !asset.is_sats()
+        ));
+        let ReconciliationOutcome::Mismatch { alert } = store
+            .reconcile_asset("usdc-2", 3, "system", "lnmarkets", AssetId::usdc(), 39)
+            .expect("usdc mismatch")
+        else {
+            panic!("expected usdc mismatch");
+        };
+        assert!(matches!(
+            &alert.kind,
+            LedgerEntryKind::ReconciliationMismatch(ReconciliationMismatch {
+                expected: 40,
+                observed: 39,
+                difference: -1,
+                ..
+            })
+        ));
+        // The sats book is untouched by the usdc mismatch.
+        assert!(matches!(
+            store
+                .reconcile("sats-1", 4, "system", "lnmarkets", 100)
+                .expect("sats match"),
+            ReconciliationOutcome::Matched { balance: 100, .. }
+        ));
     }
 
     #[test]
@@ -1076,6 +1708,13 @@ mod tests {
                 fees_paid_sats: 5,
                 funding_collected_sats: 3,
                 worst_drawdown_sats: 5,
+                assets: vec![AssetProfit {
+                    asset: AssetId::sats(),
+                    profit: 18,
+                    fees_paid: 5,
+                    funding_collected: 3,
+                    worst_drawdown: 5,
+                }],
                 entry_count: 3,
             }
         );
@@ -1089,6 +1728,75 @@ mod tests {
             .expect("filtered report");
         assert_eq!(alpha_after_fee.total_profit_sats, -2);
         assert_eq!(alpha_after_fee.worst_drawdown_sats, 5);
+    }
+
+    #[test]
+    fn profit_report_totals_each_asset_independently() {
+        let store = LedgerStore::in_memory().expect("store");
+        for event in [
+            draft(
+                "sats-profit",
+                10,
+                "alpha",
+                LedgerEntryKind::Fill,
+                vec![
+                    posting(venue(), 20),
+                    posting(LedgerAccount::TradingProfit, -20),
+                ],
+            ),
+            draft(
+                "usdc-loss",
+                20,
+                "alpha",
+                LedgerEntryKind::Fill,
+                vec![
+                    LedgerPosting::new(venue(), -8, AssetId::usdc()),
+                    LedgerPosting::new(LedgerAccount::TradingProfit, 8, AssetId::usdc()),
+                ],
+            ),
+            draft(
+                "usdc-fee",
+                30,
+                "alpha",
+                LedgerEntryKind::Fee,
+                vec![
+                    LedgerPosting::new(venue(), -2, AssetId::usdc()),
+                    LedgerPosting::new(LedgerAccount::FeeExpense, 2, AssetId::usdc()),
+                ],
+            ),
+        ] {
+            store.append(event).expect("append");
+        }
+
+        let report = store
+            .profit_report(&LedgerQuery::default())
+            .expect("report");
+        assert_eq!(report.total_profit_sats, 20);
+        assert_eq!(report.total_fees_paid_sats, 0);
+        assert_eq!(report.worst_drawdown_sats, 0);
+        assert_eq!(
+            report.assets,
+            vec![
+                AssetProfit {
+                    asset: AssetId::sats(),
+                    profit: 20,
+                    fees_paid: 0,
+                    funding_collected: 0,
+                    worst_drawdown: 0,
+                },
+                AssetProfit {
+                    asset: AssetId::usdc(),
+                    profit: -10,
+                    fees_paid: 2,
+                    funding_collected: 0,
+                    worst_drawdown: 10,
+                },
+            ]
+        );
+        assert_eq!(
+            report.asset_totals(&AssetId::usdc()).expect("usdc").profit,
+            -10
+        );
     }
 
     #[test]
@@ -1106,5 +1814,16 @@ mod tests {
             reopened.entries(&LedgerQuery::default()).expect("entries"),
             vec![entry]
         );
+    }
+
+    #[test]
+    fn asset_identifiers_are_validated() {
+        assert!(AssetId::new("sats").is_ok());
+        assert!(AssetId::new("usdc").is_ok());
+        assert!(AssetId::new("usdt_perp2").is_ok());
+        for invalid in ["", "SATS", "1usd", "usd-c", "usd c", &"a".repeat(33)] {
+            assert!(AssetId::new(invalid.to_owned()).is_err(), "{invalid:?}");
+        }
+        assert!(serde_json::from_str::<AssetId>("\"USDC\"").is_err());
     }
 }

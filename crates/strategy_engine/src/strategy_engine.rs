@@ -10,7 +10,7 @@ use futures::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use trading_ledger::{LedgerEntryDraft, LedgerEntryKind, LedgerQuery, LedgerStore};
+use trading_ledger::{AssetId, LedgerEntryDraft, LedgerEntryKind, LedgerQuery, LedgerStore};
 use trading_mandate::{
     MandateDecision, MandateRefusal, MandateStore, TradingInstruction, TradingNetwork,
 };
@@ -116,7 +116,8 @@ impl OrderIntent {
 pub struct VenueRiskSnapshot {
     pub network: TradingNetwork,
     pub venue: String,
-    pub venue_balance_after_sats: u64,
+    pub collateral_asset: AssetId,
+    pub venue_balance_after: u64,
     pub position_notional_before_usd: u64,
     pub position_notional_after_usd: u64,
     pub leverage: u8,
@@ -142,9 +143,49 @@ pub struct StrategyTick<Features> {
     pub features: Features,
 }
 
+/// A request to cancel one resting venue order. Cancels are always admissible
+/// because they only reduce risk; a modify is expressed as a cancel plus a new
+/// intent that passes the mandate gate, never as a venue-native modify.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CancelIntent {
+    pub intent_id: String,
+    pub venue_order_id: String,
+}
+
+impl CancelIntent {
+    pub fn validate(&self) -> Result<()> {
+        validate_identifier("cancel intent ID", &self.intent_id)?;
+        validate_identifier("venue order ID", &self.venue_order_id)?;
+        Ok(())
+    }
+}
+
+/// The typed result of a single-attempt cancel. `Ambiguous` means the venue
+/// did not say whether the order is still live; the engine halts and wakes
+/// instead of guessing or retrying.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CancelOutcome {
+    Cancelled,
+    NotOpen,
+    Ambiguous { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OpenOrder {
+    pub venue_order_id: String,
+    pub instrument: String,
+    pub side: OrderSide,
+    pub kind: OrderKind,
+    pub quantity: OrderQuantity,
+    pub limit_price: Option<f64>,
+    pub reduce_only: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrategyStep<State> {
     pub next_state: State,
+    pub cancels: Vec<CancelIntent>,
     pub intents: Vec<OrderIntent>,
 }
 
@@ -188,6 +229,19 @@ pub trait VenueExecutor: Send + Sync + 'static {
     /// This method is called once for each admitted intent. Implementations
     /// must not retry an ambiguous mutation.
     async fn execute_once(&self, intent: &OrderIntent) -> Result<VenueExecution>;
+
+    /// Called once per cancel intent. Implementations must not retry an
+    /// ambiguous cancel; return `CancelOutcome::Ambiguous` so the engine
+    /// halts and wakes instead. Taker-only venues keep the default.
+    async fn cancel(&self, venue_order_id: &str) -> Result<CancelOutcome> {
+        bail!("this venue executor does not support cancelling order {venue_order_id}")
+    }
+
+    /// Enumerates the venue's resting orders. Taker-only venues keep the
+    /// default.
+    async fn open_orders(&self) -> Result<Vec<OpenOrder>> {
+        bail!("this venue executor does not track open orders")
+    }
 }
 
 pub trait MandateAuthority: Send + Sync + 'static {
@@ -203,13 +257,32 @@ impl MandateAuthority for MandateStore {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StrategyHaltReason {
-    Manual { reason: String },
-    ProgramError { message: String },
-    MandateError { message: String },
-    RiskLimit { refusal: MandateRefusal },
-    MissingVenueProtection { intent_id: String },
-    VenueError { message: String },
-    LedgerError { message: String },
+    Manual {
+        reason: String,
+    },
+    ProgramError {
+        message: String,
+    },
+    MandateError {
+        message: String,
+    },
+    RiskLimit {
+        refusal: MandateRefusal,
+    },
+    MissingVenueProtection {
+        intent_id: String,
+    },
+    UnknownCancelOutcome {
+        intent_id: String,
+        venue_order_id: String,
+        message: String,
+    },
+    VenueError {
+        message: String,
+    },
+    LedgerError {
+        message: String,
+    },
 }
 
 impl StrategyHaltReason {
@@ -222,6 +295,13 @@ impl StrategyHaltReason {
             Self::MissingVenueProtection { intent_id } => {
                 format!("leveraged risk increase {intent_id} had no venue-side stop loss")
             }
+            Self::UnknownCancelOutcome {
+                intent_id,
+                venue_order_id,
+                message,
+            } => format!(
+                "cancel {intent_id} of venue order {venue_order_id} has an unknown outcome: {message}"
+            ),
             Self::VenueError { message } => format!("venue operation failed: {message}"),
             Self::LedgerError { message } => format!("ledger operation failed: {message}"),
         }
@@ -262,6 +342,12 @@ pub enum StrategyLifecycleEvent {
         strategy_id: String,
         intent_id: String,
         venue_order_id: String,
+    },
+    CancelResolved {
+        strategy_id: String,
+        intent_id: String,
+        venue_order_id: String,
+        outcome: CancelOutcome,
     },
     BacktestApproved {
         strategy_id: String,
@@ -347,6 +433,8 @@ impl WakeupSink for MemoryWakeupSink {
 pub struct TickReport {
     pub intent_count: usize,
     pub submitted_count: usize,
+    pub cancel_count: usize,
+    pub cancelled_count: usize,
 }
 
 pub struct StrategyEngine<Program, Executor>
@@ -485,6 +573,15 @@ where
                 return Err(anyhow!(reason.summary()));
             }
         };
+        for cancel in &step.cancels {
+            if let Err(error) = cancel.validate() {
+                let reason = StrategyHaltReason::ProgramError {
+                    message: format!("invalid cancel intent: {error:#}"),
+                };
+                self.halt_inner(tick.occurred_at_ms, reason.clone());
+                return Err(anyhow!(reason.summary()));
+            }
+        }
         for intent in &step.intents {
             if let Err(error) = intent.validate() {
                 let reason = StrategyHaltReason::ProgramError {
@@ -493,6 +590,14 @@ where
                 self.halt_inner(tick.occurred_at_ms, reason.clone());
                 return Err(anyhow!(reason.summary()));
             }
+        }
+
+        // Cancels run before order intents: they only reduce risk, so freeing
+        // resting exposure must never wait behind a new admitted order.
+        let mut cancelled_count = 0;
+        for cancel in &step.cancels {
+            self.execute_cancel(cancel, tick.occurred_at_ms).await?;
+            cancelled_count += 1;
         }
 
         let mut submitted_count = 0;
@@ -531,7 +636,63 @@ where
         Ok(TickReport {
             intent_count: step.intents.len(),
             submitted_count,
+            cancel_count: step.cancels.len(),
+            cancelled_count,
         })
+    }
+
+    /// A cancel is always admissible: it reduces risk, so it bypasses the
+    /// mandate gate. The single-attempt law still applies — an ambiguous
+    /// outcome halts and wakes rather than retrying.
+    async fn execute_cancel(&mut self, cancel: &CancelIntent, now_ms: i64) -> Result<()> {
+        let cancel_entry = LedgerEntryDraft {
+            event_id: format!("strategy-cancel:{}", cancel.intent_id),
+            occurred_at_ms: now_ms,
+            strategy_id: self.program.strategy_id().to_string(),
+            kind: LedgerEntryKind::Cancel,
+            postings: Vec::new(),
+            metadata: json!({
+                "intent_id": cancel.intent_id,
+                "venue_order_id": cancel.venue_order_id,
+            }),
+        };
+        if let Err(error) = self.append_ledger(cancel_entry) {
+            return self.fail(
+                now_ms,
+                StrategyHaltReason::LedgerError {
+                    message: format!("could not record cancel request: {error:#}"),
+                },
+            );
+        }
+        let outcome = match self.executor.cancel(&cancel.venue_order_id).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return self.fail(
+                    now_ms,
+                    StrategyHaltReason::VenueError {
+                        message: format!("single-attempt cancel failed: {error:#}"),
+                    },
+                );
+            }
+        };
+        if let CancelOutcome::Ambiguous { message } = &outcome {
+            return self.fail(
+                now_ms,
+                StrategyHaltReason::UnknownCancelOutcome {
+                    intent_id: cancel.intent_id.clone(),
+                    venue_order_id: cancel.venue_order_id.clone(),
+                    message: message.clone(),
+                },
+            );
+        }
+        self.lifecycle
+            .publish(StrategyLifecycleEvent::CancelResolved {
+                strategy_id: self.program.strategy_id().to_string(),
+                intent_id: cancel.intent_id.clone(),
+                venue_order_id: cancel.venue_order_id.clone(),
+                outcome,
+            });
+        Ok(())
     }
 
     async fn execute_intent(
@@ -581,8 +742,8 @@ where
             );
         }
 
-        let (order_count_last_hour, daily_realized_loss_sats) =
-            match self.ledger_risk_totals(now_ms) {
+        let (order_count_last_hour, daily_realized_loss) =
+            match self.ledger_risk_totals(now_ms, &preview.collateral_asset) {
                 Ok(totals) => totals,
                 Err(error) => {
                     return self.fail(
@@ -594,12 +755,14 @@ where
                 }
             };
         let instruction = TradingInstruction {
+            venue: preview.venue.clone(),
             network: preview.network,
             strategy_id: self.program.strategy_id().to_string(),
-            venue_balance_after_sats: preview.venue_balance_after_sats,
+            collateral_asset: preview.collateral_asset.clone(),
+            venue_balance_after: preview.venue_balance_after,
             position_notional_usd: preview.position_notional_after_usd,
             leverage: preview.leverage,
-            daily_realized_loss_sats,
+            daily_realized_loss,
             orders_last_hour: order_count_last_hour,
             liquidation_buffer_bps: preview.liquidation_buffer_bps,
         };
@@ -681,12 +844,12 @@ where
                     },
                 );
             }
-            if matches!(entry.kind, LedgerEntryKind::Order) {
+            if matches!(entry.kind, LedgerEntryKind::Order | LedgerEntryKind::Cancel) {
                 return self.fail(
                     now_ms,
                     StrategyHaltReason::LedgerError {
                         message: format!(
-                            "venue ledger event {} duplicated the engine-owned order event",
+                            "venue ledger event {} duplicated an engine-owned order or cancel event",
                             entry.event_id
                         ),
                     },
@@ -710,7 +873,7 @@ where
         Ok(execution)
     }
 
-    fn ledger_risk_totals(&self, now_ms: i64) -> Result<(u32, u64)> {
+    fn ledger_risk_totals(&self, now_ms: i64, collateral_asset: &AssetId) -> Result<(u32, u64)> {
         let strategy_id = self.program.strategy_id().to_string();
         let hourly_entries = self.ledger.entries(&LedgerQuery {
             from_ms: Some(now_ms.saturating_sub(ONE_HOUR_MS).max(0)),
@@ -727,16 +890,18 @@ where
             to_ms: Some(now_ms),
             strategy_id: Some(strategy_id),
         })?;
-        let daily_realized_loss_sats = if report.total_profit_sats < 0 {
-            report
-                .total_profit_sats
+        let collateral_profit = report
+            .asset_totals(collateral_asset)
+            .map_or(0, |totals| totals.profit);
+        let daily_realized_loss = if collateral_profit < 0 {
+            collateral_profit
                 .checked_neg()
                 .and_then(|loss| u64::try_from(loss).ok())
                 .unwrap_or(u64::MAX)
         } else {
             0
         };
-        Ok((order_count, daily_realized_loss_sats))
+        Ok((order_count, daily_realized_loss))
     }
 
     fn append_ledger(&self, draft: LedgerEntryDraft) -> Result<()> {
@@ -917,6 +1082,7 @@ mod tests {
     #[derive(Clone, Debug, PartialEq)]
     struct TestFeatures {
         should_trade: bool,
+        cancel_venue_order: Option<String>,
     }
 
     struct TestProgram;
@@ -980,6 +1146,15 @@ mod tests {
                 .ticks
                 .checked_add(1)
                 .context("test state overflowed")?;
+            let cancels = tick
+                .features
+                .cancel_venue_order
+                .iter()
+                .map(|venue_order_id| CancelIntent {
+                    intent_id: format!("cancel-{}", tick.occurred_at_ms),
+                    venue_order_id: venue_order_id.clone(),
+                })
+                .collect();
             let intents = if tick.features.should_trade {
                 vec![OrderIntent {
                     intent_id: format!("intent-{}", tick.occurred_at_ms),
@@ -1003,6 +1178,7 @@ mod tests {
             };
             Ok(StrategyStep {
                 next_state,
+                cancels,
                 intents,
             })
         }
@@ -1027,6 +1203,8 @@ mod tests {
     struct TestExecutor {
         calls: Arc<AtomicUsize>,
         fail: bool,
+        cancel_outcome: CancelOutcome,
+        operations: Arc<Mutex<Vec<String>>>,
     }
 
     impl TestExecutor {
@@ -1034,18 +1212,33 @@ mod tests {
             Self {
                 calls: Arc::new(AtomicUsize::new(0)),
                 fail: false,
+                cancel_outcome: CancelOutcome::Cancelled,
+                operations: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn ambiguous_failure() -> Self {
             Self {
-                calls: Arc::new(AtomicUsize::new(0)),
                 fail: true,
+                ..Self::successful()
+            }
+        }
+
+        fn ambiguous_cancel() -> Self {
+            Self {
+                cancel_outcome: CancelOutcome::Ambiguous {
+                    message: "cancel request timed out".into(),
+                },
+                ..Self::successful()
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn operations(&self) -> Vec<String> {
+            self.operations.lock().clone()
         }
     }
 
@@ -1055,7 +1248,8 @@ mod tests {
             Ok(VenueRiskSnapshot {
                 network: TradingNetwork::Signet,
                 venue: "test_venue".into(),
-                venue_balance_after_sats: 10_000,
+                collateral_asset: AssetId::sats(),
+                venue_balance_after: 10_000,
                 position_notional_before_usd: 0,
                 position_notional_after_usd: 100,
                 leverage: 2,
@@ -1063,8 +1257,18 @@ mod tests {
             })
         }
 
+        async fn cancel(&self, venue_order_id: &str) -> Result<CancelOutcome> {
+            self.operations
+                .lock()
+                .push(format!("cancel:{venue_order_id}"));
+            Ok(self.cancel_outcome.clone())
+        }
+
         async fn execute_once(&self, intent: &OrderIntent) -> Result<VenueExecution> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.operations
+                .lock()
+                .push(format!("execute:{}", intent.intent_id));
             if self.fail {
                 bail!("ambiguous venue failure");
             }
@@ -1088,42 +1292,24 @@ mod tests {
                         "fill",
                         LedgerEntryKind::Fill,
                         vec![
-                            LedgerPosting {
-                                account: venue.clone(),
-                                amount_sats: 10,
-                            },
-                            LedgerPosting {
-                                account: LedgerAccount::TradingProfit,
-                                amount_sats: -10,
-                            },
+                            LedgerPosting::sats(venue.clone(), 10),
+                            LedgerPosting::sats(LedgerAccount::TradingProfit, -10),
                         ],
                     ),
                     entry(
                         "fee",
                         LedgerEntryKind::Fee,
                         vec![
-                            LedgerPosting {
-                                account: venue.clone(),
-                                amount_sats: -2,
-                            },
-                            LedgerPosting {
-                                account: LedgerAccount::FeeExpense,
-                                amount_sats: 2,
-                            },
+                            LedgerPosting::sats(venue.clone(), -2),
+                            LedgerPosting::sats(LedgerAccount::FeeExpense, 2),
                         ],
                     ),
                     entry(
                         "funding",
                         LedgerEntryKind::FundingSettlement,
                         vec![
-                            LedgerPosting {
-                                account: venue,
-                                amount_sats: 1,
-                            },
-                            LedgerPosting {
-                                account: LedgerAccount::FundingIncome,
-                                amount_sats: -1,
-                            },
+                            LedgerPosting::sats(venue, 1),
+                            LedgerPosting::sats(LedgerAccount::FundingIncome, -1),
                         ],
                     ),
                 ],
@@ -1133,6 +1319,16 @@ mod tests {
 
     struct TestMandateAuthority {
         max_orders_per_hour: u32,
+        authorize_calls: Arc<AtomicUsize>,
+    }
+
+    impl TestMandateAuthority {
+        fn new(max_orders_per_hour: u32) -> Self {
+            Self {
+                max_orders_per_hour,
+                authorize_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
     }
 
     struct TestBacktestGate {
@@ -1163,6 +1359,7 @@ mod tests {
             instruction: &TradingInstruction,
             _now_ms: i64,
         ) -> Result<MandateDecision> {
+            self.authorize_calls.fetch_add(1, Ordering::SeqCst);
             if instruction.orders_last_hour >= self.max_orders_per_hour {
                 Ok(MandateDecision::Refused {
                     reason: MandateRefusal::HourlyOrderLimit {
@@ -1180,7 +1377,20 @@ mod tests {
     fn tick(at_ms: i64) -> StrategyTick<TestFeatures> {
         StrategyTick {
             occurred_at_ms: at_ms,
-            features: TestFeatures { should_trade: true },
+            features: TestFeatures {
+                should_trade: true,
+                cancel_venue_order: None,
+            },
+        }
+    }
+
+    fn cancel_tick(at_ms: i64, should_trade: bool) -> StrategyTick<TestFeatures> {
+        StrategyTick {
+            occurred_at_ms: at_ms,
+            features: TestFeatures {
+                should_trade,
+                cancel_venue_order: Some("resting-1".into()),
+            },
         }
     }
 
@@ -1191,13 +1401,27 @@ mod tests {
         lifecycle: MemoryLifecycleSink,
         wakeups: MemoryWakeupSink,
     ) -> StrategyEngine<TestProgram, TestExecutor> {
+        engine_with_mandate(
+            TestMandateAuthority::new(max_orders_per_hour),
+            executor,
+            ledger,
+            lifecycle,
+            wakeups,
+        )
+    }
+
+    fn engine_with_mandate(
+        mandate: TestMandateAuthority,
+        executor: TestExecutor,
+        ledger: LedgerStore,
+        lifecycle: MemoryLifecycleSink,
+        wakeups: MemoryWakeupSink,
+    ) -> StrategyEngine<TestProgram, TestExecutor> {
         StrategyEngine::new(
             TestProgram,
             executor,
             TradingNetwork::Signet,
-            TestMandateAuthority {
-                max_orders_per_hour,
-            },
+            mandate,
             TestBacktestGate { passing: true },
             ledger,
             Arc::new(lifecycle),
@@ -1228,9 +1452,7 @@ mod tests {
             TestProgram,
             executor.clone(),
             TradingNetwork::Signet,
-            TestMandateAuthority {
-                max_orders_per_hour: 2,
-            },
+            TestMandateAuthority::new(2),
             TestBacktestGate { passing: false },
             LedgerStore::in_memory().expect("ledger"),
             Arc::new(MemoryLifecycleSink::default()),
@@ -1356,6 +1578,161 @@ mod tests {
                 vec![LedgerEntryKind::Order]
             );
             assert_eq!(wakeups.wakeups().len(), 1);
+        });
+    }
+
+    #[test]
+    fn cancels_bypass_the_mandate_and_run_before_orders() {
+        block_on(async {
+            let executor = TestExecutor::successful();
+            let ledger = LedgerStore::in_memory().expect("ledger");
+            let mandate = TestMandateAuthority::new(2);
+            let authorize_calls = mandate.authorize_calls.clone();
+            let lifecycle = MemoryLifecycleSink::default();
+            let mut engine = engine_with_mandate(
+                mandate,
+                executor.clone(),
+                ledger.clone(),
+                lifecycle.clone(),
+                MemoryWakeupSink::default(),
+            );
+            engine
+                .start(TestConfig { protected: true }, 1)
+                .expect("start");
+            let report = engine
+                .handle_tick(cancel_tick(100, true))
+                .await
+                .expect("tick");
+            assert_eq!(report.cancel_count, 1);
+            assert_eq!(report.cancelled_count, 1);
+            assert_eq!(report.submitted_count, 1);
+            assert_eq!(
+                executor.operations(),
+                vec![
+                    "cancel:resting-1".to_string(),
+                    "execute:intent-100".to_string()
+                ]
+            );
+            assert_eq!(authorize_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                ledger
+                    .entries(&LedgerQuery::default())
+                    .expect("entries")
+                    .iter()
+                    .map(|entry| entry.kind.clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    LedgerEntryKind::Cancel,
+                    LedgerEntryKind::Order,
+                    LedgerEntryKind::Fill,
+                    LedgerEntryKind::Fee,
+                    LedgerEntryKind::FundingSettlement,
+                ]
+            );
+            assert!(lifecycle.events().iter().any(|event| matches!(
+                event,
+                StrategyLifecycleEvent::CancelResolved {
+                    outcome: CancelOutcome::Cancelled,
+                    ..
+                }
+            )));
+        });
+    }
+
+    #[test]
+    fn a_cancel_is_admitted_even_when_the_mandate_refuses_every_order() {
+        block_on(async {
+            let executor = TestExecutor::successful();
+            let mandate = TestMandateAuthority::new(0);
+            let authorize_calls = mandate.authorize_calls.clone();
+            let mut engine = engine_with_mandate(
+                mandate,
+                executor.clone(),
+                LedgerStore::in_memory().expect("ledger"),
+                MemoryLifecycleSink::default(),
+                MemoryWakeupSink::default(),
+            );
+            engine
+                .start(TestConfig { protected: true }, 1)
+                .expect("start");
+            engine
+                .handle_tick(cancel_tick(100, false))
+                .await
+                .expect("cancel-only tick");
+            assert_eq!(executor.operations(), vec!["cancel:resting-1".to_string()]);
+            assert_eq!(authorize_calls.load(Ordering::SeqCst), 0);
+            assert!(matches!(engine.status(), StrategyStatus::Running { .. }));
+        });
+    }
+
+    #[test]
+    fn ambiguous_cancel_outcome_halts_and_wakes_without_retry() {
+        block_on(async {
+            let executor = TestExecutor::ambiguous_cancel();
+            let ledger = LedgerStore::in_memory().expect("ledger");
+            let wakeups = MemoryWakeupSink::default();
+            let mut engine = engine(
+                2,
+                executor.clone(),
+                ledger.clone(),
+                MemoryLifecycleSink::default(),
+                wakeups.clone(),
+            );
+            engine
+                .start(TestConfig { protected: true }, 1)
+                .expect("start");
+            let error = engine
+                .handle_tick(cancel_tick(100, false))
+                .await
+                .expect_err("ambiguous cancel");
+            assert!(error.to_string().contains("unknown outcome"));
+            assert_eq!(executor.operations(), vec!["cancel:resting-1".to_string()]);
+            assert!(matches!(
+                engine.status(),
+                StrategyStatus::Halted {
+                    reason: StrategyHaltReason::UnknownCancelOutcome { .. },
+                    ..
+                }
+            ));
+            assert_eq!(
+                ledger
+                    .entries(&LedgerQuery::default())
+                    .expect("entries")
+                    .iter()
+                    .map(|entry| entry.kind.clone())
+                    .collect::<Vec<_>>(),
+                vec![LedgerEntryKind::Cancel]
+            );
+            assert_eq!(wakeups.wakeups().len(), 1);
+        });
+    }
+
+    #[test]
+    fn taker_only_executors_refuse_the_order_lifecycle_by_default() {
+        struct TakerOnlyExecutor;
+
+        #[async_trait]
+        impl VenueExecutor for TakerOnlyExecutor {
+            async fn preview(&self, _intent: &OrderIntent) -> Result<VenueRiskSnapshot> {
+                bail!("unused")
+            }
+
+            async fn execute_once(&self, _intent: &OrderIntent) -> Result<VenueExecution> {
+                bail!("unused")
+            }
+        }
+
+        block_on(async {
+            let error = TakerOnlyExecutor
+                .cancel("resting-1")
+                .await
+                .expect_err("default cancel");
+            assert!(error.to_string().contains("does not support cancelling"));
+            let error = TakerOnlyExecutor
+                .open_orders()
+                .await
+                .expect_err("default open orders");
+            assert!(error.to_string().contains("does not track open orders"));
         });
     }
 

@@ -512,6 +512,7 @@ fn enter_long(
         &next_state,
     )?;
     Ok(StrategyStep {
+        cancels: Vec::new(),
         next_state,
         intents: vec![intent],
     })
@@ -582,6 +583,7 @@ fn exit_long(
         &next_state,
     )?;
     Ok(StrategyStep {
+        cancels: Vec::new(),
         next_state,
         intents: vec![intent],
     })
@@ -654,6 +656,7 @@ fn step_without_order(
     action: ThresholdSwingAction,
 ) -> StrategyStep<ThresholdSwingState> {
     StrategyStep {
+        cancels: Vec::new(),
         next_state: state(
             config,
             sequence,
@@ -736,6 +739,7 @@ fn state_step(
     action: ThresholdSwingAction,
 ) -> StrategyStep<ThresholdSwingState> {
     StrategyStep {
+        cancels: Vec::new(),
         next_state: state(
             config,
             sequence,

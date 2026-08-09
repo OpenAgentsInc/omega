@@ -211,11 +211,18 @@ fn validate_commit_sha(commit_sha: &str, violations: &mut Vec<String>) {
     }
 }
 
+fn active_soak_mandate(mandate: &MandateSnapshot) -> Option<&trading_mandate::TradingMandate> {
+    mandate
+        .mandates
+        .iter()
+        .find(|active| active.venue == trading_mandate::LEGACY_VENUE)
+}
+
 fn validate_mandate(evidence: &SignetSoakEvidence, violations: &mut Vec<String>) {
     if evidence.mandate.revision == 0 {
         violations.push("the soak has no approved mandate revision".to_string());
     }
-    let Some(mandate) = evidence.mandate.mandate.as_ref() else {
+    let Some(mandate) = active_soak_mandate(&evidence.mandate) else {
         violations.push("the soak has no active mandate".to_string());
         return;
     };
@@ -368,7 +375,7 @@ fn validate_strategies(evidence: &SignetSoakEvidence, violations: &mut Vec<Strin
             ));
         }
     }
-    if let Some(mandate) = evidence.mandate.mandate.as_ref() {
+    if let Some(mandate) = active_soak_mandate(&evidence.mandate) {
         for strategy_id in &mandate.allowed_strategies {
             if !observed.contains(strategy_id.as_str()) {
                 violations.push(format!(
@@ -534,19 +541,21 @@ mod tests {
             commit_sha: COMMIT.to_string(),
             mandate: MandateSnapshot {
                 revision: 3,
-                mandate: Some(TradingMandate {
+                mandates: vec![TradingMandate {
+                    venue: trading_mandate::LEGACY_VENUE.into(),
                     network: TradingNetwork::Signet,
+                    collateral_asset: trading_mandate::AssetId::sats(),
                     objective: "Keep signet strategy risk bounded".into(),
-                    max_venue_balance_sats: 100_000,
+                    max_venue_balance: 100_000,
                     max_position_usd: 100,
                     max_leverage: 2,
-                    daily_loss_stop_sats: 500,
+                    daily_loss_stop: 500,
                     max_orders_per_hour: 4,
                     min_liquidation_buffer_bps: 2_000,
                     allowed_strategies: BTreeSet::from(["rebalance_to_target".into()]),
                     review_cadence: ReviewCadence::Interval { seconds: 60 },
                     expires_at_ms: 200_000,
-                }),
+                }],
             },
             human_messages_during_window: 0,
             budget: SoakBudget {
@@ -586,8 +595,9 @@ mod tests {
                 at_ms: 90_000,
                 strategy_id: "rebalance_to_target".into(),
                 refusal: MandateRefusal::DailyLossStop {
-                    limit_sats: 500,
-                    loss_sats: 501,
+                    asset: trading_mandate::AssetId::sats(),
+                    limit: 500,
+                    loss: 501,
                 },
                 strategy_halted: true,
                 wakeup: WakeupSource::StrategyHalt {
@@ -650,8 +660,8 @@ mod tests {
         let mut evidence = passing_evidence();
         evidence
             .mandate
-            .mandate
-            .as_mut()
+            .mandates
+            .first_mut()
             .expect("mandate")
             .allowed_strategies
             .insert("funding_carry".into());
@@ -712,12 +722,14 @@ mod tests {
 
         let mandate_store = trading_mandate::MandateStore::in_memory().expect("open mandate");
         let mandate = TradingMandate {
+            venue: trading_mandate::LEGACY_VENUE.into(),
             network: TradingNetwork::Signet,
+            collateral_asset: trading_mandate::AssetId::sats(),
             objective: "Prove bounded zero-nudge Signet operation".into(),
-            max_venue_balance_sats: opening_balance_unsigned.saturating_add(100_000),
+            max_venue_balance: opening_balance_unsigned.saturating_add(100_000),
             max_position_usd: 50,
             max_leverage: 1,
-            daily_loss_stop_sats: 1_000,
+            daily_loss_stop: 1_000,
             max_orders_per_hour: 2,
             min_liquidation_buffer_bps: 2_000,
             allowed_strategies: BTreeSet::from(["rebalance_to_target".into()]),
@@ -760,16 +772,13 @@ mod tests {
                 strategy_id: "system".into(),
                 kind: LedgerEntryKind::BalanceAdjustment,
                 postings: vec![
-                    LedgerPosting {
-                        account: LedgerAccount::VenueBalance {
+                    LedgerPosting::sats(
+                        LedgerAccount::VenueBalance {
                             venue: "lnmarkets".into(),
                         },
-                        amount_sats: opening_balance,
-                    },
-                    LedgerPosting {
-                        account: LedgerAccount::BalanceAdjustment,
-                        amount_sats: -opening_balance,
-                    },
+                        opening_balance,
+                    ),
+                    LedgerPosting::sats(LedgerAccount::BalanceAdjustment, -opening_balance),
                 ],
                 metadata: serde_json::json!({"network": "signet", "purpose": "soak baseline"}),
             })
@@ -802,12 +811,14 @@ mod tests {
         let refusal = match mandate_store
             .authorize(
                 &TradingInstruction {
+                    venue: trading_mandate::LEGACY_VENUE.into(),
                     network: TradingNetwork::Signet,
                     strategy_id: "rebalance_to_target".into(),
-                    venue_balance_after_sats: opening_balance_unsigned,
+                    collateral_asset: trading_mandate::AssetId::sats(),
+                    venue_balance_after: opening_balance_unsigned,
                     position_notional_usd: 51,
                     leverage: 1,
-                    daily_realized_loss_sats: 0,
+                    daily_realized_loss: 0,
                     orders_last_hour: 0,
                     liquidation_buffer_bps: 10_000,
                 },

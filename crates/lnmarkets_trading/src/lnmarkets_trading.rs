@@ -26,12 +26,12 @@ pub const REGISTRATION: TradingRegistration = TradingRegistration;
 
 pub use strategy_engine::{
     BACKTEST_SCHEMA, BacktestApproval, BacktestCostModel, BacktestExecutionModel, BacktestGate,
-    BacktestOutcome, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick, LifecycleSink,
-    MandateAuthority, MemoryLifecycleSink, MemoryWakeupSink, OrderIntent, SimulatedSettlement,
-    SimulatedTrade, StrategyCommand, StrategyEngine, StrategyHaltReason, StrategyLifecycleEvent,
-    StrategyProgram, StrategyServiceHandle, StrategyStatus, StrategyStep, StrategyTick,
-    VenueExecution, VenueExecutor, VenueRiskSnapshot, WakeupSink, background_service,
-    parameter_digest, run_backtest,
+    BacktestOutcome, BacktestPolicy, BacktestReport, BacktestStore, BacktestTick, CancelIntent,
+    CancelOutcome, LifecycleSink, MandateAuthority, MemoryLifecycleSink, MemoryWakeupSink,
+    OpenOrder, OrderIntent, SimulatedSettlement, SimulatedTrade, StrategyCommand, StrategyEngine,
+    StrategyHaltReason, StrategyLifecycleEvent, StrategyProgram, StrategyServiceHandle,
+    StrategyStatus, StrategyStep, StrategyTick, VenueExecution, VenueExecutor, VenueRiskSnapshot,
+    WakeupSink, background_service, parameter_digest, run_backtest,
 };
 
 pub type LnMarketsStrategyTick = StrategyTick<lnmarkets_data::FeatureSnapshot>;

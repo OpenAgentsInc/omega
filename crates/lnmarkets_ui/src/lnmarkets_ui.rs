@@ -14,8 +14,8 @@ use lnmarkets_client::{
     StoredCredentials,
 };
 use trading_mandate::{
-    MandateChangeClass, MandateSnapshot, MandateStore, ReviewCadence, TradingMandate,
-    TradingNetwork,
+    AssetId, LEGACY_VENUE, MandateChangeClass, MandateSnapshot, MandateStore, ReviewCadence,
+    TradingMandate, TradingNetwork,
 };
 use ui::{Divider, prelude::*};
 use util::ResultExt as _;
@@ -213,7 +213,14 @@ impl LnMarketsSettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(mandate) = snapshot.mandate else {
+        let revision = snapshot.revision;
+        // This page edits the LN Markets mandate; other venues' mandates are
+        // out of its scope.
+        let Some(mandate) = snapshot
+            .mandates
+            .into_iter()
+            .find(|mandate| mandate.venue == LEGACY_VENUE)
+        else {
             self.mandate_status = MandateStatus::Empty;
             self.mandate_active_revision = None;
             cx.notify();
@@ -224,7 +231,7 @@ impl LnMarketsSettingsPage {
         set_editor_text(&self.mandate_objective, &mandate.objective, window, cx);
         set_editor_text(
             &self.mandate_max_venue_balance,
-            &mandate.max_venue_balance_sats.to_string(),
+            &mandate.max_venue_balance.to_string(),
             window,
             cx,
         );
@@ -242,7 +249,7 @@ impl LnMarketsSettingsPage {
         );
         set_editor_text(
             &self.mandate_daily_loss_stop,
-            &mandate.daily_loss_stop_sats.to_string(),
+            &mandate.daily_loss_stop.to_string(),
             window,
             cx,
         );
@@ -271,10 +278,8 @@ impl LnMarketsSettingsPage {
             window,
             cx,
         );
-        self.mandate_status = MandateStatus::Saved {
-            revision: snapshot.revision,
-        };
-        self.mandate_active_revision = Some(snapshot.revision);
+        self.mandate_status = MandateStatus::Saved { revision };
+        self.mandate_active_revision = Some(revision);
         cx.notify();
     }
 
@@ -300,20 +305,18 @@ impl LnMarketsSettingsPage {
             },
         };
         let mandate = TradingMandate {
+            venue: LEGACY_VENUE.to_owned(),
             network: self.mandate_network,
+            collateral_asset: AssetId::sats(),
             objective,
-            max_venue_balance_sats: parse_editor(
+            max_venue_balance: parse_editor(
                 &self.mandate_max_venue_balance,
                 "maximum venue balance",
                 cx,
             )?,
             max_position_usd: parse_editor(&self.mandate_max_position, "maximum position", cx)?,
             max_leverage: parse_editor(&self.mandate_max_leverage, "maximum leverage", cx)?,
-            daily_loss_stop_sats: parse_editor(
-                &self.mandate_daily_loss_stop,
-                "daily loss stop",
-                cx,
-            )?,
+            daily_loss_stop: parse_editor(&self.mandate_daily_loss_stop, "daily loss stop", cx)?,
             max_orders_per_hour: parse_editor(
                 &self.mandate_max_orders_per_hour,
                 "maximum orders per hour",
@@ -429,7 +432,8 @@ impl LnMarketsSettingsPage {
             cx.notify();
             return;
         };
-        match unix_time_ms().and_then(|now_ms| store.revoke(now_ms)) {
+        let network = self.mandate_network;
+        match unix_time_ms().and_then(|now_ms| store.revoke(LEGACY_VENUE, network, now_ms)) {
             Ok(snapshot) => self.apply_mandate_snapshot(snapshot, window, cx),
             Err(error) => {
                 self.mandate_status = MandateStatus::Error(error.to_string().into());
@@ -1001,13 +1005,15 @@ fn mandate_approval_detail(mandate: &TradingMandate) -> String {
         ReviewCadence::FundingSettlement => "each funding settlement".to_owned(),
         ReviewCadence::Interval { seconds } => format!("every {seconds} seconds"),
     };
+    let asset = mandate.collateral_asset.as_str();
     format!(
-        "Network: {network}\nObjective: {}\nMaximum venue balance: {} sats\nMaximum position: {} USD notional\nMaximum leverage: {}x\nDaily loss stop: {} sats\nMaximum orders: {} per hour\nMinimum liquidation buffer: {} bps\nAllowed strategies: {}\nReview: {cadence}\nExpires at: {} Unix ms",
+        "Venue: {}\nNetwork: {network}\nObjective: {}\nMaximum venue balance: {} {asset}\nMaximum position: {} USD notional\nMaximum leverage: {}x\nDaily loss stop: {} {asset}\nMaximum orders: {} per hour\nMinimum liquidation buffer: {} bps\nAllowed strategies: {}\nReview: {cadence}\nExpires at: {} Unix ms",
+        mandate.venue,
         mandate.objective,
-        mandate.max_venue_balance_sats,
+        mandate.max_venue_balance,
         mandate.max_position_usd,
         mandate.max_leverage,
-        mandate.daily_loss_stop_sats,
+        mandate.daily_loss_stop,
         mandate.max_orders_per_hour,
         mandate.min_liquidation_buffer_bps,
         mandate
