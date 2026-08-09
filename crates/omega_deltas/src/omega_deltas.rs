@@ -213,6 +213,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0222",
     "OMEGA-DELTA-0233",
     "OMEGA-DELTA-0234",
+    "OMEGA-DELTA-0241",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -19035,6 +19036,9 @@ mod tests {
             "bash",
             "delegate",
             "edit",
+            "lnmarkets_account",
+            "lnmarkets_market_data",
+            "lnmarkets_swap",
             "market_execute_swap",
             "market_network_status",
             "market_provision_cloud",
@@ -19049,7 +19053,8 @@ mod tests {
         assert_eq!(
             actual, expected,
             "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
-             the six coding tools plus the five built-in market tools."
+             the six coding tools plus the five built-in market tools and the \
+             three LN Markets tools."
         );
         assert!(
             !actual.contains("search_web"),
