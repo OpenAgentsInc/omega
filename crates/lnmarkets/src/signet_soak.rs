@@ -512,7 +512,8 @@ mod tests {
         LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerQuery, LedgerStore,
     };
     use trading_mandate::{
-        MandateDecision, ReviewCadence, TradingInstruction, TradingMandate, TradingNetwork,
+        MandateDecision, MandateStore, ReviewCadence, TradingInstruction, TradingMandate,
+        TradingNetwork,
     };
 
     use super::*;
@@ -724,8 +725,7 @@ mod tests {
             expires_at_ms: ended_at_ms + 60 * 60 * 1_000,
         };
         let proposal = mandate_store.propose(mandate).expect("prepare mandate");
-        let mandate = mandate_store
-            .apply_ui_approved(proposal, started_at_ms)
+        let mandate = MandateStore::apply_ui_approved(&mandate_store, proposal, started_at_ms)
             .expect("apply the operator-authorized test mandate");
 
         let program = RebalanceToTargetProgram;
@@ -835,7 +835,7 @@ mod tests {
         );
 
         let evidence = SignetSoakEvidence {
-            window: window.clone(),
+            window,
             commit_sha,
             mandate,
             human_messages_during_window: 0,
