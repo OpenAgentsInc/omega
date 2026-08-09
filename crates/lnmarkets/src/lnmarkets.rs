@@ -453,6 +453,21 @@ pub fn record_signet_soak_review_turn(session_id: &str, turn: SoakReviewTurn, cx
     trading_runtime(cx).is_ok_and(|runtime| runtime.record_soak_review_turn(session_id, turn))
 }
 
+pub fn record_portfolio_review_evidence(
+    session_id: &str,
+    record: review_accounting::ReviewCostRecord,
+    cx: &App,
+) -> bool {
+    let result = match trading_runtime(cx) {
+        Ok(runtime) => runtime.record_review_cost(session_id, record),
+        Err(error) => Err(anyhow::Error::msg(error)),
+    };
+    result.unwrap_or_else(|error| {
+        log::error!("could not append review-turn cost evidence: {error:#}");
+        false
+    })
+}
+
 pub fn operator_console_source(cx: &App) -> Result<Arc<dyn OperatorConsoleSource>, String> {
     let plugin = cx
         .try_global::<LnMarketsGlobal>()
@@ -572,6 +587,7 @@ impl OperatorConsoleSource for PluginOperatorConsoleSource {
             review_cadence,
             pending_wakeups: runtime.pending_review_wakeup_count(),
             review_history,
+            review_costs: Some(review.review_costs),
             runtime_error: None,
         }
     }

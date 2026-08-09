@@ -1,4 +1,5 @@
 use lnmarkets_data::{FeatureSnapshot, FundingSign};
+use review_accounting::ReviewCostSummary;
 use serde::Serialize;
 use trading_ledger::{LedgerEntry, LedgerEntryKind, ProfitReport};
 use trading_mandate::{LEGACY_VENUE, MandateSnapshot};
@@ -60,6 +61,8 @@ pub struct PortfolioReview {
     pub strategies: Vec<StrategyRuntimeSnapshot>,
     pub backtests: Vec<BacktestReport>,
     pub opportunities: Vec<Opportunity>,
+    pub review_costs: ReviewCostSummary,
+    pub review_cost_summary_line: String,
 }
 
 impl PortfolioReview {
@@ -73,6 +76,7 @@ impl PortfolioReview {
         mandate: MandateSnapshot,
         strategies: Vec<StrategyRuntimeSnapshot>,
         backtests: Vec<BacktestReport>,
+        review_costs: ReviewCostSummary,
     ) -> Self {
         let limit_headroom = lnmarkets_mandate(&mandate).map(|active| {
             let by_strategy = active
@@ -115,6 +119,7 @@ impl PortfolioReview {
             }
         });
         let opportunities = opportunity_inventory(features.as_ref(), &mandate);
+        let review_cost_summary_line = review_cost_summary_line(&review_costs);
         Self {
             schema: PORTFOLIO_REVIEW_SCHEMA,
             generated_at_ms,
@@ -127,15 +132,39 @@ impl PortfolioReview {
             strategies,
             backtests,
             opportunities,
+            review_costs,
+            review_cost_summary_line,
         }
     }
 
     pub fn instruction(&self) -> Result<String, serde_json::Error> {
         let context = serde_json::to_string(self)?;
         Ok(format!(
-            "Run one bounded LN Markets portfolio review. The local context below already contains the feature and ledger reads; do not call remote market or account tools.\n\n{context}\n\nRank every opportunity against the supplied features, costs, risks, active strategy states, and limit headroom. The strategy engine places orders; never place a raw order or swap in this turn. You may call lnmarkets_strategy at most once to start, adjust, or halt a supported strategy, and only within the active mandate. The mandate cannot be widened from this turn. Then write one reasoning note of at most 120 words and end the turn. Include a daily report with ledger profit, fees paid, funding collected, worst drawdown, and remaining limit headroom. If data or authority is missing, say so and make no change."
+            "Run one bounded LN Markets portfolio review. The local context below already contains the feature and ledger reads; do not call remote market or account tools.\n\n{context}\n\nRank every opportunity against the supplied features, costs, risks, active strategy states, and limit headroom. The strategy engine places orders; never place a raw order or swap in this turn. You may call lnmarkets_strategy at most once to start, adjust, or halt a supported strategy, and only within the active mandate. The mandate cannot be widened from this turn. Then write one reasoning note of at most 120 words and end the turn. Include a daily report with ledger profit, fees paid, funding collected, worst drawdown, remaining limit headroom, and the supplied 24-hour review supervision cost summary. If data or authority is missing, say so and make no change."
         ))
     }
+}
+
+fn review_cost_summary_line(summary: &ReviewCostSummary) -> String {
+    let average_review_tokens = summary
+        .cost_per_review
+        .as_ref()
+        .map_or(0, |cost| cost.total_tokens);
+    let average_intervention_tokens = summary
+        .cost_per_intervention
+        .as_ref()
+        .map_or(0, |cost| cost.total_tokens);
+    let false_wakeup_rate = summary.false_wakeup_rate_bps.map_or_else(
+        || "n/a".to_string(),
+        |rate| format!("{}.{:02}%", rate / 100, rate % 100),
+    );
+    format!(
+        "Review supervision (24h): {} reviews, {} interventions, {} tokens/review, {} tokens/intervention, {false_wakeup_rate} false event wakeups",
+        summary.review_count,
+        summary.intervention_count,
+        average_review_tokens,
+        average_intervention_tokens,
+    )
 }
 
 fn realized_loss(profit_sats: i64) -> u64 {
@@ -387,6 +416,7 @@ mod tests {
             mandate(),
             Vec::new(),
             Vec::new(),
+            ReviewCostSummary::default(),
         );
         let headroom = review.limit_headroom.as_ref().expect("limit headroom");
         let funding = headroom
@@ -397,6 +427,11 @@ mod tests {
         assert_eq!(funding.daily_loss_headroom_sats, 375);
         assert_eq!(funding.order_headroom, 3);
         assert_eq!(review.opportunities.len(), 6);
+        assert!(
+            review
+                .review_cost_summary_line
+                .starts_with("Review supervision (24h):")
+        );
         assert_eq!(
             review.opportunities[0].availability,
             OpportunityAvailability::Available
@@ -415,12 +450,14 @@ mod tests {
             mandate(),
             Vec::new(),
             Vec::new(),
+            ReviewCostSummary::default(),
         );
         let instruction = review.instruction().expect("serialize review");
         assert!(instruction.contains(PORTFOLIO_REVIEW_SCHEMA));
         assert!(instruction.contains("at most once"));
         assert!(instruction.contains("never place a raw order or swap"));
         assert!(instruction.contains("at most 120 words"));
+        assert!(instruction.contains("review supervision cost summary"));
         assert!(!instruction.contains("lnmarkets_market_data"));
     }
 }

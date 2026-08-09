@@ -15,6 +15,7 @@ path = "src/plugin_api.rs"
 agent_wakeup.workspace = true
 gpui.workspace = true
 parking_lot.workspace = true
+review_accounting.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

@@ -16,6 +16,7 @@ use lnmarkets_trading::{
 };
 use parking_lot::Mutex;
 use plugin_api::VenueCapabilityGuard;
+use review_accounting::{ReviewAccountingStore, ReviewCostRecord, ReviewCostSummary};
 use serde::Serialize;
 use serde_json::Value;
 use trading_ledger::{LedgerQuery, LedgerStore, ProfitReport};
@@ -74,6 +75,7 @@ pub struct TradingRuntime {
     lifecycle: MemoryLifecycleSink,
     wakeups: MemoryWakeupSink,
     venue_capability_guard: VenueCapabilityGuard,
+    review_accounting: ReviewAccountingStore,
     review_history: Mutex<VecDeque<ReviewTurnHistory>>,
     soak_review_turns: Mutex<VecDeque<SoakReviewTurn>>,
     review_session_id: Mutex<Option<String>>,
@@ -92,6 +94,8 @@ impl TradingRuntime {
             lifecycle: MemoryLifecycleSink::default(),
             wakeups: MemoryWakeupSink::default(),
             venue_capability_guard,
+            review_accounting: ReviewAccountingStore::open_default()
+                .context("could not open review-turn accounting")?,
             review_history: Mutex::new(VecDeque::new()),
             soak_review_turns: Mutex::new(VecDeque::new()),
             review_session_id: Mutex::new(None),
@@ -406,6 +410,24 @@ impl TradingRuntime {
         true
     }
 
+    pub fn record_review_cost(&self, session_id: &str, record: ReviewCostRecord) -> Result<bool> {
+        if !self.is_review_session(session_id) {
+            return Ok(false);
+        }
+        self.review_accounting.append(record)?;
+        Ok(true)
+    }
+
+    pub fn review_cost_summary(
+        &self,
+        now_ms: i64,
+        venue: Option<&str>,
+        strategy: Option<&str>,
+    ) -> Result<ReviewCostSummary> {
+        self.review_accounting
+            .daily_summary(now_ms, venue, strategy)
+    }
+
     pub fn soak_review_turns(&self) -> Vec<SoakReviewTurn> {
         self.soak_review_turns.lock().iter().cloned().collect()
     }
@@ -441,6 +463,7 @@ impl TradingRuntime {
             self.mandate.snapshot()?,
             self.strategy_snapshots(),
             self.backtests.reports(None, 20)?,
+            self.review_cost_summary(now_ms, Some(LNMARKETS_VENUE), None)?,
         ))
     }
 
@@ -982,6 +1005,7 @@ mod tests {
                 VenueActionClass::StrategyExecution,
                 i64::MAX,
             ),
+            review_accounting: ReviewAccountingStore::in_memory().expect("review accounting"),
             review_history: Mutex::new(VecDeque::new()),
             soak_review_turns: Mutex::new(VecDeque::new()),
             review_session_id: Mutex::new(None),

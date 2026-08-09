@@ -10357,3 +10357,25 @@ reduce risk.
 - **Enforced by:** `plugin_api`, `strategy_engine`, `lnmarkets`, and
   `lnmarkets_ui` unit tests and
   `venue_capabilities_are_probed_typed_and_fail_closed` in `omega_deltas`.
+
+### OMEGA-DELTA-0262 — Every review turn has append-only supervision costs
+
+Every completed plugin review turn carries venue-neutral measured evidence:
+its model identifier, input/output/cache token counters, wall-clock duration,
+tool calls, trigger, and start/completion timestamps. The venue driver adds
+the semantic disposition — parameter change, intent, halt response, or no
+change — plus the venues and strategies reviewed. The full record is appended
+once to a strict SQLite log beside thread state; a repeated turn ID is refused
+instead of updated or retried.
+
+The log has queryable daily, venue, and strategy projections. They report
+cost per review, total supervision cost per intervention, model splits, and
+the rate of event-triggered reviews that produced no change. LN Markets adds
+the 24-hour summary to its bounded daily-review context and local operator
+panel. These measurements are observational only: no cadence, model, mandate,
+or strategy policy changes in response to them.
+
+- **Enforced by:** `review_accounting`, `agent`, `lnmarkets`, and
+  `lnmarkets_ui` unit tests and
+  `review_turn_costs_are_append_only_queryable_and_visible` in
+  `omega_deltas`.

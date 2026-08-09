@@ -9344,6 +9344,7 @@ dependencies = [
  "paths",
  "plugin_api",
  "reqwest_client",
+ "review_accounting",
  "schemars 1.0.4",
  "serde",
  "serde_json",
@@ -9452,6 +9453,7 @@ dependencies = [
  "lnmarkets_data",
  "log",
  "plugin_api",
+ "review_accounting",
  "settings",
  "theme",
  "theme_settings",
@@ -13233,6 +13235,7 @@ dependencies = [
  "agent_wakeup",
  "gpui",
  "parking_lot",
+ "review_accounting",
  "serde",
  "thiserror 2.0.17",
 ]
@@ -14696,6 +14699,20 @@ dependencies = [
  "tiny-skia",
  "usvg",
  "zune-jpeg",
+]
+
+[[package]]
+name = "review_accounting"
+version = "0.1.0"
+dependencies = [
+ "agent_wakeup",
+ "anyhow",
+ "parking_lot",
+ "paths",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -74,6 +74,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
+use std::time::Instant;
 use util::ResultExt;
 use util::path_list::PathList;
 use util::rel_path::RelPath;
@@ -1055,11 +1056,20 @@ impl NativeAgent {
                 let review_source = wakeup.source.clone();
                 let review_at_ms = i64::try_from(now_ms).unwrap_or(i64::MAX);
                 let connection = NativeAgentConnection(agent);
-                let tokens_before_turn = if cadence_driver.is_some() {
-                    session_total_tokens(&connection, &session_id, cx)
+                let (token_usage_before_turn, model_id) = if cadence_driver.is_some() {
+                    session_review_baseline(&connection, &session_id, cx).unwrap_or_else(|| {
+                        (
+                            language_model::TokenUsage::default(),
+                            "unresolved".to_string(),
+                        )
+                    })
                 } else {
-                    0
+                    (
+                        language_model::TokenUsage::default(),
+                        "unresolved".to_string(),
+                    )
                 };
+                let review_started = Instant::now();
                 let turn = cx.update(|cx| connection.publish_wakeup(wakeup, cx));
                 match turn.await {
                     Ok(_) => {
@@ -1085,8 +1095,15 @@ impl NativeAgent {
                                 &connection,
                                 &session_id,
                                 review_at_ms,
+                                current_unix_ms()
+                                    .ok()
+                                    .and_then(|timestamp| i64::try_from(timestamp).ok())
+                                    .unwrap_or(review_at_ms),
+                                u64::try_from(review_started.elapsed().as_millis())
+                                    .unwrap_or(i64::MAX as u64),
+                                model_id,
                                 review_source.clone(),
-                                tokens_before_turn,
+                                token_usage_before_turn,
                                 driver.evidence_tool_names(),
                                 cx,
                             )
@@ -1101,7 +1118,7 @@ impl NativeAgent {
                                 });
                                 if !recorded {
                                     log::error!(
-                                        "completed plugin review evidence could not be recorded"
+                                        "finished plugin review evidence could not be recorded"
                                     );
                                 }
                             }
@@ -1123,6 +1140,37 @@ impl NativeAgent {
                     }
                     Err(error) => {
                         if let Some((driver, _)) = cadence_driver.as_ref() {
+                            let evidence = collect_review_turn_evidence(
+                                &connection,
+                                &session_id,
+                                review_at_ms,
+                                current_unix_ms()
+                                    .ok()
+                                    .and_then(|timestamp| i64::try_from(timestamp).ok())
+                                    .unwrap_or(review_at_ms),
+                                u64::try_from(review_started.elapsed().as_millis())
+                                    .unwrap_or(i64::MAX as u64),
+                                model_id,
+                                review_source.clone(),
+                                token_usage_before_turn,
+                                driver.evidence_tool_names(),
+                                cx,
+                            )
+                            .await;
+                            if let Some(evidence) = evidence {
+                                let recorded = cx.update(|cx| {
+                                    driver.record_review_evidence(
+                                        &session_id_text,
+                                        evidence,
+                                        cx,
+                                    )
+                                });
+                                if !recorded {
+                                    log::error!(
+                                        "finished plugin review evidence could not be recorded"
+                                    );
+                                }
+                            }
                             let recorded = cx.update(|cx| {
                                 driver.record_review_turn(
                                     &session_id_text,
@@ -2387,11 +2435,11 @@ impl NativeAgent {
     }
 }
 
-fn session_total_tokens(
+fn session_review_baseline(
     connection: &NativeAgentConnection,
     session_id: &acp::SessionId,
     cx: &AsyncApp,
-) -> u64 {
+) -> Option<(language_model::TokenUsage, String)> {
     connection
         .0
         .read_with(cx, |agent, _cx| {
@@ -2400,8 +2448,15 @@ fn session_total_tokens(
                 .get(session_id)
                 .map(|session| session.thread.clone())
         })
-        .map(|thread| thread.read_with(cx, |thread, _cx| thread.cumulative_token_usage()))
-        .map_or(0, |usage| usage.total_tokens())
+        .map(|thread| {
+            thread.read_with(cx, |thread, _cx| {
+                let model_id = thread
+                    .model()
+                    .map(|model| format!("{}/{}", model.provider_id().0, model.id().0))
+                    .unwrap_or_else(|| "unresolved".to_string());
+                (thread.cumulative_token_usage(), model_id)
+            })
+        })
 }
 
 /// Measure the venue-neutral evidence for one completed review turn: whether
@@ -2411,8 +2466,11 @@ async fn collect_review_turn_evidence(
     connection: &NativeAgentConnection,
     session_id: &acp::SessionId,
     at_ms: i64,
+    completed_at_ms: i64,
+    wall_clock_ms: u64,
+    model_id: String,
     source: WakeupSource,
-    tokens_before_turn: u64,
+    token_usage_before_turn: language_model::TokenUsage,
     tracked_tool_names: &[&str],
     cx: &mut AsyncApp,
 ) -> Option<plugin_api::ReviewTurnEvidence> {
@@ -2422,12 +2480,26 @@ async fn collect_review_turn_evidence(
             .get(session_id)
             .map(|session| session.thread.clone())
     })?;
-    let tokens_after_turn = thread
-        .read_with(cx, |thread, _cx| thread.cumulative_token_usage())
-        .total_tokens();
+    let token_usage_after_turn =
+        thread.read_with(cx, |thread, _cx| thread.cumulative_token_usage());
+    let token_usage = plugin_api::ReviewTokenUsage {
+        input_tokens: token_usage_after_turn
+            .input_tokens
+            .saturating_sub(token_usage_before_turn.input_tokens),
+        output_tokens: token_usage_after_turn
+            .output_tokens
+            .saturating_sub(token_usage_before_turn.output_tokens),
+        cache_creation_input_tokens: token_usage_after_turn
+            .cache_creation_input_tokens
+            .saturating_sub(token_usage_before_turn.cache_creation_input_tokens),
+        cache_read_input_tokens: token_usage_after_turn
+            .cache_read_input_tokens
+            .saturating_sub(token_usage_before_turn.cache_read_input_tokens),
+    };
     let db_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
     let mut reasoning_note_present = false;
     let mut tracked_tool_calls = 0_u32;
+    let mut tool_calls = Vec::new();
     for message in db_thread.messages.iter().rev() {
         if message.role() == language_model::Role::User {
             break;
@@ -2439,10 +2511,15 @@ async fn collect_review_turn_evidence(
                     | language_model::MessageContent::Thinking { text, .. } => {
                         reasoning_note_present |= !text.trim().is_empty();
                     }
-                    language_model::MessageContent::ToolUse(tool_use)
-                        if tracked_tool_names.contains(&tool_use.name.as_ref()) =>
-                    {
-                        tracked_tool_calls = tracked_tool_calls.saturating_add(1);
+                    language_model::MessageContent::ToolUse(tool_use) => {
+                        if tracked_tool_names.contains(&tool_use.name.as_ref()) {
+                            tracked_tool_calls = tracked_tool_calls.saturating_add(1);
+                        }
+                        tool_calls.push(plugin_api::ReviewToolCall {
+                            name: tool_use.name.to_string(),
+                            input: serde_json::to_value(&tool_use.input)
+                                .unwrap_or(serde_json::Value::Null),
+                        });
                     }
                     _ => {}
                 }
@@ -2451,10 +2528,15 @@ async fn collect_review_turn_evidence(
     }
     Some(plugin_api::ReviewTurnEvidence {
         at_ms,
+        completed_at_ms,
+        wall_clock_ms,
+        model_id,
+        token_usage: token_usage.clone(),
+        tool_calls,
         source,
         reasoning_note_present,
         tracked_tool_calls,
-        tokens_used: tokens_after_turn.saturating_sub(tokens_before_turn),
+        tokens_used: token_usage.total(),
     })
 }
 

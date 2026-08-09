@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use agent_wakeup::WakeupSource;
+pub use review_accounting::{ReviewTokenUsage, ReviewToolCall};
 
 /// A network protocol a plugin host declaration covers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -501,6 +502,11 @@ pub enum ReviewTurnOutcome {
 #[derive(Clone, Debug)]
 pub struct ReviewTurnEvidence {
     pub at_ms: i64,
+    pub completed_at_ms: i64,
+    pub wall_clock_ms: u64,
+    pub model_id: String,
+    pub token_usage: ReviewTokenUsage,
+    pub tool_calls: Vec<ReviewToolCall>,
     pub source: WakeupSource,
     pub reasoning_note_present: bool,
     /// How many calls to the driver's [`SessionReviewDriver::evidence_tool_names`]

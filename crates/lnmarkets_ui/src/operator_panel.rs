@@ -10,6 +10,7 @@ use gpui::{
 };
 use lnmarkets_data::{CollectorHealth, CollectorStatus};
 use plugin_api::{VenueActionStatus, VenueCapabilityReport, VenueCapabilityVerificationStatus};
+use review_accounting::ReviewCostSummary;
 use trading_ledger::ProfitReport;
 use trading_mandate::{MandateSnapshot, ReviewCadence};
 use ui::{Divider, Indicator, prelude::*};
@@ -71,6 +72,7 @@ pub struct OperatorConsoleSnapshot {
     pub review_cadence: Option<ReviewCadence>,
     pub pending_wakeups: usize,
     pub review_history: Vec<OperatorReviewTurn>,
+    pub review_costs: Option<ReviewCostSummary>,
     pub runtime_error: Option<String>,
 }
 
@@ -87,6 +89,7 @@ impl OperatorConsoleSnapshot {
             review_cadence: None,
             pending_wakeups: 0,
             review_history: Vec::new(),
+            review_costs: None,
             runtime_error: Some(error.into()),
         }
     }
@@ -417,6 +420,13 @@ impl LnMarketsOperatorPanel {
                     ))
                     .size(LabelSize::Small),
                 )
+                .when_some(self.snapshot.review_costs.as_ref(), |this, costs| {
+                    this.child(
+                        Label::new(review_cost_summary(costs))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                })
                 .children(report.strategies.iter().map(|strategy| {
                     h_flex()
                         .justify_between()
@@ -609,6 +619,28 @@ impl LnMarketsOperatorPanel {
                 .into_any_element(),
         )
     }
+}
+
+fn review_cost_summary(summary: &ReviewCostSummary) -> String {
+    let average_review_tokens = summary
+        .cost_per_review
+        .as_ref()
+        .map_or(0, |cost| cost.total_tokens);
+    let average_intervention_tokens = summary
+        .cost_per_intervention
+        .as_ref()
+        .map_or(0, |cost| cost.total_tokens);
+    let false_wakeup_rate = summary.false_wakeup_rate_bps.map_or_else(
+        || "n/a".to_string(),
+        |rate| format!("{}.{:02}%", rate / 100, rate % 100),
+    );
+    format!(
+        "24h cost · {} reviews · {} interventions · {} tokens/review · {} tokens/intervention · {false_wakeup_rate} false event wakeups",
+        summary.review_count,
+        summary.intervention_count,
+        average_review_tokens,
+        average_intervention_tokens,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -891,6 +923,21 @@ mod tests {
                     trigger: "scheduled review".into(),
                     outcome: "completed".into(),
                 }],
+                review_costs: Some(ReviewCostSummary {
+                    review_count: 2,
+                    intervention_count: 1,
+                    total_tokens: 300,
+                    cost_per_review: Some(review_accounting::ReviewUnitCost {
+                        total_tokens: 150,
+                        ..Default::default()
+                    }),
+                    cost_per_intervention: Some(review_accounting::ReviewUnitCost {
+                        total_tokens: 300,
+                        ..Default::default()
+                    }),
+                    false_wakeup_rate_bps: Some(5_000),
+                    ..Default::default()
+                }),
                 runtime_error: None,
             },
             narrow_count: AtomicUsize::new(0),

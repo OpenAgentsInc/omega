@@ -232,6 +232,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0259",
     "OMEGA-DELTA-0260",
     "OMEGA-DELTA-0261",
+    "OMEGA-DELTA-0262",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30488,6 +30489,79 @@ mod tests {
                 && operator.contains("Capability probe is stale")
                 && operator.contains("Probed {}"),
             "OMEGA-DELTA-0261: operator capability evidence disappeared"
+        );
+    }
+
+    /// Review-turn supervision costs remain measured, append-only, queryable,
+    /// and visible without becoming an automated policy input.
+    #[test]
+    fn review_turn_costs_are_append_only_queryable_and_visible() {
+        let accounting = without_comments(&read_repository_file(
+            "crates/review_accounting/src/review_accounting.rs",
+        ));
+        for required in [
+            "pub struct ReviewCostRecord",
+            "pub enum ReviewDisposition",
+            "pub struct ReviewAccountingStore",
+            "CREATE TABLE IF NOT EXISTS review_cost_entries",
+            "turn_id TEXT NOT NULL UNIQUE",
+            "pub fn append(",
+            "pub fn daily_summary(",
+            "pub cost_per_review",
+            "pub cost_per_intervention",
+            "pub false_wakeup_rate_bps",
+            "records_are_append_only_and_duplicate_turns_fail",
+            "daily_venue_strategy_costs_and_false_wakeups_are_queryable",
+        ] {
+            assert!(
+                accounting.contains(required),
+                "OMEGA-DELTA-0262: review accounting lost `{required}`"
+            );
+        }
+
+        let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
+        for required in [
+            "session_review_baseline",
+            "collect_review_turn_evidence",
+            "wall_clock_ms",
+            "model_id",
+            "token_usage",
+            "tool_calls",
+        ] {
+            assert!(
+                agent.contains(required),
+                "OMEGA-DELTA-0262: agent measurement lost `{required}`"
+            );
+        }
+
+        let driver = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/review_driver.rs",
+        ));
+        for required in [
+            "ReviewInterventionKind::ParameterChange",
+            "ReviewInterventionKind::Intent",
+            "ReviewInterventionKind::HaltResponse",
+            "ReviewDisposition::NoChange",
+            "record_portfolio_review_evidence",
+        ] {
+            assert!(
+                driver.contains(required),
+                "OMEGA-DELTA-0262: venue classification lost `{required}`"
+            );
+        }
+
+        let review = without_comments(&read_repository_file("crates/lnmarkets/src/review_turn.rs"));
+        let operator = without_comments(&read_repository_file(
+            "crates/lnmarkets_ui/src/operator_panel.rs",
+        ));
+        assert!(
+            review.contains("review_cost_summary_line")
+                && review.contains("Review supervision (24h):"),
+            "OMEGA-DELTA-0262: daily review cost summary disappeared"
+        );
+        assert!(
+            operator.contains("review_cost_summary") && operator.contains("false event wakeups"),
+            "OMEGA-DELTA-0262: operator review cost summary disappeared"
         );
     }
 }
