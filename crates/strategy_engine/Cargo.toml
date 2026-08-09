@@ -1,0 +1,25 @@
+[package]
+name = "strategy_engine"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Venue-neutral bounded strategy runtime for Omega"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/strategy_engine.rs"
+doctest = false
+
+[dependencies]
+agent_wakeup.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+trading_ledger.workspace = true
+trading_mandate.workspace = true

@@ -36,6 +36,8 @@ pub struct LnMarketsSettingsPage {
     mandate_max_position: Entity<Editor>,
     mandate_max_leverage: Entity<Editor>,
     mandate_daily_loss_stop: Entity<Editor>,
+    mandate_max_orders_per_hour: Entity<Editor>,
+    mandate_min_liquidation_buffer: Entity<Editor>,
     mandate_allowed_strategies: Entity<Editor>,
     mandate_review_cadence: ReviewCadence,
     mandate_review_interval: Entity<Editor>,
@@ -104,6 +106,18 @@ impl LnMarketsSettingsPage {
             mandate_max_position: new_text_input("500", "Maximum USD notional", window, cx),
             mandate_max_leverage: new_text_input("3", "Maximum leverage", window, cx),
             mandate_daily_loss_stop: new_text_input("5000", "Daily loss stop in sats", window, cx),
+            mandate_max_orders_per_hour: new_text_input(
+                "12",
+                "Maximum orders per hour",
+                window,
+                cx,
+            ),
+            mandate_min_liquidation_buffer: new_text_input(
+                "1500",
+                "Minimum liquidation buffer in basis points",
+                window,
+                cx,
+            ),
             mandate_allowed_strategies: new_text_input(
                 "rebalance_to_target",
                 "Comma-separated strategy IDs",
@@ -290,6 +304,16 @@ impl LnMarketsSettingsPage {
             daily_loss_stop_sats: parse_editor(
                 &self.mandate_daily_loss_stop,
                 "daily loss stop",
+                cx,
+            )?,
+            max_orders_per_hour: parse_editor(
+                &self.mandate_max_orders_per_hour,
+                "maximum orders per hour",
+                cx,
+            )?,
+            min_liquidation_buffer_bps: parse_editor(
+                &self.mandate_min_liquidation_buffer,
+                "minimum liquidation buffer",
                 cx,
             )?,
             allowed_strategies,
@@ -763,6 +787,16 @@ impl Render for LnMarketsSettingsPage {
                 cx,
             ))
             .child(render_field(
+                "Maximum orders per hour",
+                &self.mandate_max_orders_per_hour,
+                cx,
+            ))
+            .child(render_field(
+                "Minimum liquidation buffer (basis points)",
+                &self.mandate_min_liquidation_buffer,
+                cx,
+            ))
+            .child(render_field(
                 "Allowed strategies (comma-separated)",
                 &self.mandate_allowed_strategies,
                 cx,
@@ -960,12 +994,14 @@ fn mandate_approval_detail(mandate: &TradingMandate) -> String {
         ReviewCadence::Interval { seconds } => format!("every {seconds} seconds"),
     };
     format!(
-        "Network: {network}\nObjective: {}\nMaximum venue balance: {} sats\nMaximum position: {} USD notional\nMaximum leverage: {}x\nDaily loss stop: {} sats\nAllowed strategies: {}\nReview: {cadence}\nExpires at: {} Unix ms",
+        "Network: {network}\nObjective: {}\nMaximum venue balance: {} sats\nMaximum position: {} USD notional\nMaximum leverage: {}x\nDaily loss stop: {} sats\nMaximum orders: {} per hour\nMinimum liquidation buffer: {} bps\nAllowed strategies: {}\nReview: {cadence}\nExpires at: {} Unix ms",
         mandate.objective,
         mandate.max_venue_balance_sats,
         mandate.max_position_usd,
         mandate.max_leverage,
         mandate.daily_loss_stop_sats,
+        mandate.max_orders_per_hour,
+        mandate.min_liquidation_buffer_bps,
         mandate
             .allowed_strategies
             .iter()

@@ -217,6 +217,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0244",
     "OMEGA-DELTA-0245",
     "OMEGA-DELTA-0246",
+    "OMEGA-DELTA-0247",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29402,6 +29403,73 @@ mod tests {
             assert!(
                 defaults.contains(required),
                 "OMEGA-DELTA-0246: shipped wakeup settings lost `{required}`"
+            );
+        }
+    }
+
+    /// Strategy programs stay model-free while the engine enforces the active
+    /// mandate, records execution, and converts failures into typed wakeups.
+    #[test]
+    fn strategy_execution_is_deterministic_bounded_and_single_attempt() {
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "pub trait StrategyProgram",
+            "fn on_tick(",
+            "pub trait VenueExecutor",
+            "pub trait MandateAuthority",
+            "impl MandateAuthority for MandateStore",
+            "async fn execute_once",
+            "pub struct StrategyEngine",
+            "self.mandate.authorize(&instruction, now_ms)",
+            "StrategyHaltReason::RiskLimit",
+            "StrategyHaltReason::MissingVenueProtection",
+            "WakeupSource::StrategyHalt",
+            "LedgerEntryKind::Order",
+            "pub fn background_service",
+            "ambiguous_mutation_failure_is_not_retried_and_halts",
+            "hard_limit_halts_and_emits_typed_agent_wakeup",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0247: the bounded strategy engine lost `{required}`"
+            );
+        }
+
+        let engine_manifest = read_repository_file("crates/strategy_engine/Cargo.toml");
+        assert!(
+            !engine_manifest.contains("lnmarkets"),
+            "OMEGA-DELTA-0247: the platform strategy engine gained a venue dependency"
+        );
+
+        let mandate = without_comments(&read_repository_file(
+            "crates/trading_mandate/src/trading_mandate.rs",
+        ));
+        for required in [
+            "pub max_orders_per_hour: u32",
+            "pub min_liquidation_buffer_bps: u32",
+            "MandateRefusal::HourlyOrderLimit",
+            "MandateRefusal::LiquidationBufferFloor",
+            "legacy_mandate_json_defaults_new_limits_to_fail_closed_values",
+        ] {
+            assert!(
+                mandate.contains(required),
+                "OMEGA-DELTA-0247: mandate hard-limit enforcement lost `{required}`"
+            );
+        }
+
+        let lnmarkets = without_comments(&read_repository_file(
+            "crates/lnmarkets_trading/src/lnmarkets_trading.rs",
+        ));
+        for required in [
+            "pub type LnMarketsStrategyTick",
+            "pub trait LnMarketsStrategy",
+            "Features = lnmarkets_data::FeatureSnapshot",
+        ] {
+            assert!(
+                lnmarkets.contains(required),
+                "OMEGA-DELTA-0247: the LN Markets strategy seam lost `{required}`"
             );
         }
     }

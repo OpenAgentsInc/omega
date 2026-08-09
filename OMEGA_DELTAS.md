@@ -10019,3 +10019,24 @@ entry point.
 
 - **Enforced by:** `agent_wakeup` unit tests and
   `native_agent_wakeups_are_labeled_typed_and_bounded` in `omega_deltas`.
+
+### OMEGA-DELTA-0247 — Strategies execute deterministically within the mandate
+
+Omega has one venue-neutral strategy engine. Strategy programs are pure,
+typed functions from configuration, prior state, and a feature tick to next
+state and order intents. The model remains outside this loop. A background
+service processes start, adjust, tick, and halt commands in order and publishes
+one typed lifecycle stream for the future agent tool card.
+
+Before one single-attempt venue mutation, the engine validates the intent,
+previews its resulting risk, requires a venue-side stop for leveraged risk
+increases, derives recent order count and daily loss from the platform ledger,
+and asks the active mandate to enforce venue balance, position, leverage, loss,
+order-frequency, and liquidation-buffer limits. Any program, mandate, venue,
+protection, or ledger failure halts the strategy and publishes a typed agent
+wakeup. Every admitted order and each returned fill, fee, and funding event is
+written to the venue-neutral ledger with strategy attribution.
+
+- **Enforced by:** `strategy_engine` and `trading_mandate` unit tests and
+  `strategy_execution_is_deterministic_bounded_and_single_attempt` in
+  `omega_deltas`.

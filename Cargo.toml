@@ -199,6 +199,7 @@ members = [
     "crates/sqlez",
     "crates/sqlez_macros",
     "crates/streaming_diff",
+    "crates/strategy_engine",
     "crates/sum_tree",
     "crates/system_specs",
     "crates/syntax_theme",
@@ -267,6 +268,7 @@ edition = "2024"
 
 [workspace.dependencies]
 agent_wakeup = { path = "crates/agent_wakeup" }
+strategy_engine = { path = "crates/strategy_engine" }
 
 #
 # Workspace member crates

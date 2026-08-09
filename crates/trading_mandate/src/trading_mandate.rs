@@ -47,6 +47,12 @@ pub struct TradingMandate {
     pub max_position_usd: u64,
     pub max_leverage: u8,
     pub daily_loss_stop_sats: u64,
+    // Old mandates receive no hourly order authority until a person reviews them.
+    #[serde(default)]
+    pub max_orders_per_hour: u32,
+    // Old mandates require maximum distance from liquidation until reviewed.
+    #[serde(default = "legacy_liquidation_buffer_bps")]
+    pub min_liquidation_buffer_bps: u32,
     pub allowed_strategies: BTreeSet<String>,
     pub review_cadence: ReviewCadence,
     pub expires_at_ms: i64,
@@ -72,6 +78,9 @@ impl TradingMandate {
         }
         if self.daily_loss_stop_sats == 0 {
             bail!("mandate daily loss stop must be positive");
+        }
+        if self.min_liquidation_buffer_bps > 10_000 {
+            bail!("mandate liquidation buffer must not exceed 10000 basis points");
         }
         if self.allowed_strategies.is_empty() {
             bail!("mandate must allow at least one strategy");
@@ -160,6 +169,8 @@ pub struct TradingInstruction {
     pub position_notional_usd: u64,
     pub leverage: u8,
     pub daily_realized_loss_sats: u64,
+    pub orders_last_hour: u32,
+    pub liquidation_buffer_bps: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -194,6 +205,14 @@ pub enum MandateRefusal {
     DailyLossStop {
         limit_sats: u64,
         loss_sats: u64,
+    },
+    HourlyOrderLimit {
+        limit: u32,
+        orders_last_hour: u32,
+    },
+    LiquidationBufferFloor {
+        minimum_bps: u32,
+        current_bps: u32,
     },
 }
 
@@ -438,6 +457,21 @@ impl MandateStore {
                 loss_sats: instruction.daily_realized_loss_sats,
             }));
         }
+        if instruction.orders_last_hour >= mandate.max_orders_per_hour {
+            return Ok(refused(MandateRefusal::HourlyOrderLimit {
+                limit: mandate.max_orders_per_hour,
+                orders_last_hour: instruction.orders_last_hour,
+            }));
+        }
+        if instruction.position_notional_usd > 0
+            && instruction.leverage > 1
+            && instruction.liquidation_buffer_bps < mandate.min_liquidation_buffer_bps
+        {
+            return Ok(refused(MandateRefusal::LiquidationBufferFloor {
+                minimum_bps: mandate.min_liquidation_buffer_bps,
+                current_bps: instruction.liquidation_buffer_bps,
+            }));
+        }
         Ok(MandateDecision::Authorized {
             revision: snapshot.revision,
         })
@@ -514,6 +548,8 @@ fn classify_change(
         || candidate.max_position_usd > current.max_position_usd
         || candidate.max_leverage > current.max_leverage
         || candidate.daily_loss_stop_sats > current.daily_loss_stop_sats
+        || candidate.max_orders_per_hour > current.max_orders_per_hour
+        || candidate.min_liquidation_buffer_bps < current.min_liquidation_buffer_bps
         || !candidate
             .allowed_strategies
             .is_subset(&current.allowed_strategies)
@@ -524,6 +560,10 @@ fn classify_change(
     } else {
         MandateChangeClass::Restriction
     }
+}
+
+const fn legacy_liquidation_buffer_bps() -> u32 {
+    10_000
 }
 
 fn proposal_digest(base_revision: u64, candidate: &TradingMandate) -> Result<String> {
@@ -710,6 +750,8 @@ mod tests {
             max_position_usd: 500,
             max_leverage: 3,
             daily_loss_stop_sats: 5_000,
+            max_orders_per_hour: 12,
+            min_liquidation_buffer_bps: 1_500,
             allowed_strategies: strategies(&["rebalance_to_target"]),
             review_cadence: ReviewCadence::FundingSettlement,
             expires_at_ms: 10_000,
@@ -732,7 +774,28 @@ mod tests {
             position_notional_usd: 400,
             leverage: 2,
             daily_realized_loss_sats: 1_000,
+            orders_last_hour: 2,
+            liquidation_buffer_bps: 2_500,
         }
+    }
+
+    #[test]
+    fn legacy_mandate_json_defaults_new_limits_to_fail_closed_values() {
+        let value = serde_json::json!({
+            "network": "signet",
+            "objective": "Legacy mandate",
+            "max_venue_balance_sats": 100_000,
+            "max_position_usd": 500,
+            "max_leverage": 3,
+            "daily_loss_stop_sats": 5_000,
+            "allowed_strategies": ["rebalance_to_target"],
+            "review_cadence": { "type": "funding_settlement" },
+            "expires_at_ms": 10_000
+        });
+        let decoded: TradingMandate = serde_json::from_value(value).expect("legacy mandate");
+
+        assert_eq!(decoded.max_orders_per_hour, 0);
+        assert_eq!(decoded.min_liquidation_buffer_bps, 10_000);
     }
 
     #[test]
@@ -763,6 +826,12 @@ mod tests {
         let mut loss = initial.clone();
         loss.daily_loss_stop_sats += 1;
         candidates.push(loss);
+        let mut order_count = initial.clone();
+        order_count.max_orders_per_hour += 1;
+        candidates.push(order_count);
+        let mut liquidation_buffer = initial.clone();
+        liquidation_buffer.min_liquidation_buffer_bps -= 1;
+        candidates.push(liquidation_buffer);
         let mut strategies = initial.clone();
         strategies.allowed_strategies.insert("funding_carry".into());
         candidates.push(strategies);
@@ -883,6 +952,26 @@ mod tests {
                 MandateRefusal::DailyLossStop {
                     limit_sats: 5_000,
                     loss_sats: 5_000,
+                },
+            ),
+            (
+                TradingInstruction {
+                    orders_last_hour: 12,
+                    ..instruction()
+                },
+                MandateRefusal::HourlyOrderLimit {
+                    limit: 12,
+                    orders_last_hour: 12,
+                },
+            ),
+            (
+                TradingInstruction {
+                    liquidation_buffer_bps: 1_499,
+                    ..instruction()
+                },
+                MandateRefusal::LiquidationBufferFloor {
+                    minimum_bps: 1_500,
+                    current_bps: 1_499,
                 },
             ),
         ];
