@@ -345,10 +345,11 @@ fn parse_asset(value: &Value) -> Option<SwapAsset> {
     }
 }
 
-fn parse_swap_network(value: &Value) -> Option<SwapNetwork> {
-    match value.as_str()? {
-        "demo" => Some(SwapNetwork::Demo),
-        "regtest" => Some(SwapNetwork::Regtest),
+fn parse_swap_network(value: Option<&Value>) -> Option<SwapNetwork> {
+    match value.and_then(Value::as_str) {
+        None => Some(SwapNetwork::Demo),
+        Some("demo") => Some(SwapNetwork::Demo),
+        Some("regtest") => Some(SwapNetwork::Regtest),
         _ => None,
     }
 }
@@ -375,7 +376,7 @@ fn parse_swap_card(payload: &Value) -> Option<SwapCard> {
             .to_string(),
         fee_bps.unwrap_or_default(),
     )
-    .network(parse_swap_network(payload.get("network")?)?)
+    .network(parse_swap_network(payload.get("network"))?)
     .quote_kind(
         if is_quote && payload.get("kind").and_then(Value::as_str) == Some("indicative") {
             SwapQuoteKind::Indicative
@@ -562,15 +563,14 @@ mod tests {
     }
 
     #[test]
-    fn swap_payloads_require_a_supported_network() {
+    fn swap_payloads_render_legacy_demo_and_reject_mainnet() {
         let quote = serde_json::json!({
             "schema": "omega.market-demo.quote.v1",
-            "kind": "indicative",
-            "quote_id": "regtest-route-1",
-            "from": "LN", "to": "BTC", "amount_sats": 100000,
-            "provider": "provider-a", "fee_bps": 22,
+            "quote_id": "demo-quote-1",
+            "from": "LN", "to": "BTC", "amount_sats": 50000,
+            "provider": "provider-b", "fee_bps": 22,
         });
-        assert!(parse_swap_card(&quote).is_none());
+        assert!(parse_swap_card(&quote).is_some());
 
         let mut regtest_quote = quote.clone();
         regtest_quote["network"] = Value::String("regtest".to_string());

@@ -106,6 +106,14 @@ impl MarketNetwork {
     }
 }
 
+fn migrate_legacy_network(input: &mut Value, network: MarketNetwork) {
+    if let Some(input) = input.as_object_mut() {
+        input
+            .entry("network".to_string())
+            .or_insert_with(|| Value::String(network.as_str().to_string()));
+    }
+}
+
 #[derive(Clone)]
 struct SwapStatusRecord {
     id: String,
@@ -188,6 +196,10 @@ impl AgentTool for MarketNetworkStatusTool {
         acp::ToolKind::Fetch
     }
 
+    fn migrate_input_for_replay(input: &mut Value) {
+        migrate_legacy_network(input, MarketNetwork::Regtest);
+    }
+
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
         match input {
             Ok(input) => format!("Check {} swap network", input.network.as_str()).into(),
@@ -244,6 +256,10 @@ impl AgentTool for MarketSwapQuoteTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
+    }
+
+    fn migrate_input_for_replay(input: &mut Value) {
+        migrate_legacy_network(input, MarketNetwork::Demo);
     }
 
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
@@ -338,6 +354,10 @@ impl AgentTool for MarketExecuteSwapTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Execute
+    }
+
+    fn migrate_input_for_replay(input: &mut Value) {
+        migrate_legacy_network(input, MarketNetwork::Demo);
     }
 
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
@@ -459,6 +479,10 @@ impl AgentTool for MarketSwapStatusTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
+    }
+
+    fn migrate_input_for_replay(input: &mut Value) {
+        migrate_legacy_network(input, MarketNetwork::Demo);
     }
 
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
@@ -1478,6 +1502,125 @@ mod tests {
     use super::*;
     use futures::StreamExt as _;
     use gpui::TestAppContext;
+
+    #[test]
+    fn new_market_inputs_still_require_an_explicit_network() {
+        assert!(
+            serde_json::from_value::<MarketNetworkStatusInput>(json!({})).is_err(),
+            "network status must require an explicit network"
+        );
+        assert!(
+            serde_json::from_value::<MarketSwapQuoteInput>(json!({
+                "from": "LN",
+                "to": "BTC",
+                "amount_sats": 50_000
+            }))
+            .is_err(),
+            "quotes must not silently select demo"
+        );
+        assert!(
+            serde_json::from_value::<MarketExecuteSwapInput>(json!({
+                "from": "LN",
+                "to": "BTC",
+                "amount_sats": 50_000
+            }))
+            .is_err(),
+            "direct execution must not silently select demo"
+        );
+        assert!(
+            serde_json::from_value::<MarketExecuteSwapInput>(json!({
+                "quote_id": "demo-quote-1"
+            }))
+            .is_err(),
+            "quoted execution must not silently select demo"
+        );
+        assert!(
+            serde_json::from_value::<MarketSwapStatusInput>(json!({
+                "swap_id": "demo-swap-1"
+            }))
+            .is_err(),
+            "status reads must not silently select demo"
+        );
+    }
+
+    #[test]
+    fn legacy_market_inputs_migrate_to_their_historical_network_for_replay() {
+        let mut network_status = json!({});
+        <MarketNetworkStatusTool as AgentTool>::migrate_input_for_replay(&mut network_status);
+        let network_status: MarketNetworkStatusInput =
+            serde_json::from_value(network_status).expect("legacy network status input");
+        assert_eq!(network_status.network, MarketNetwork::Regtest);
+
+        let mut quote = json!({
+            "from": "LN",
+            "to": "BTC",
+            "amount_sats": 50_000
+        });
+        <MarketSwapQuoteTool as AgentTool>::migrate_input_for_replay(&mut quote);
+        let quote: MarketSwapQuoteInput =
+            serde_json::from_value(quote).expect("legacy quote input");
+        assert_eq!(quote.network, MarketNetwork::Demo);
+
+        let mut direct_execution = json!({
+            "from": "LN",
+            "to": "BTC",
+            "amount_sats": 50_000
+        });
+        <MarketExecuteSwapTool as AgentTool>::migrate_input_for_replay(&mut direct_execution);
+        let direct_execution: MarketExecuteSwapInput =
+            serde_json::from_value(direct_execution).expect("legacy direct execution input");
+        assert!(matches!(
+            direct_execution,
+            MarketExecuteSwapInput::Direct {
+                network: MarketNetwork::Demo,
+                ..
+            }
+        ));
+
+        let mut quoted_execution = json!({ "quote_id": "demo-quote-1" });
+        <MarketExecuteSwapTool as AgentTool>::migrate_input_for_replay(&mut quoted_execution);
+        let quoted_execution: MarketExecuteSwapInput =
+            serde_json::from_value(quoted_execution).expect("legacy quoted execution input");
+        assert!(matches!(
+            quoted_execution,
+            MarketExecuteSwapInput::Quoted {
+                network: MarketNetwork::Demo,
+                ..
+            }
+        ));
+
+        let mut status = json!({ "swap_id": "demo-swap-1" });
+        <MarketSwapStatusTool as AgentTool>::migrate_input_for_replay(&mut status);
+        let status: MarketSwapStatusInput =
+            serde_json::from_value(status).expect("legacy status input");
+        assert_eq!(status.network, MarketNetwork::Demo);
+    }
+
+    #[gpui::test]
+    fn erased_tool_replay_accepts_a_legacy_market_input(cx: &mut App) {
+        let tool = MarketSwapStatusTool {
+            state: Arc::new(Mutex::new(MarketDemoState::default())),
+        }
+        .erase();
+        let (event_stream, _events) = ToolCallEventStream::test();
+
+        let result = tool.replay(
+            json!({ "swap_id": "demo-swap-1" }),
+            json!({
+                "schema": "omega.market-demo.swap.v1",
+                "swap_id": "demo-swap-1",
+                "network": "demo",
+                "stage": "settled"
+            }),
+            event_stream,
+            cx,
+        );
+
+        assert!(
+            result.is_ok(),
+            "legacy persisted market input should replay"
+        );
+    }
 
     #[test]
     fn demo_swap_flow_uses_shared_state() {
