@@ -83,8 +83,36 @@ pub(crate) fn market_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElem
         "omega.market-demo.cloud-provision.v1" => {
             Some(parse_cloud_provision_card(&payload)?.into_any_element())
         }
+        "omega.market-demo.warning.v1" => parse_market_warning(&payload, cx),
         _ => None,
     }
+}
+
+fn parse_market_warning(payload: &Value, cx: &App) -> Option<AnyElement> {
+    let warning = payload.get("warning")?.as_str()?.to_string();
+    let network = payload.get("network")?.as_str()?;
+    Some(
+        v_flex()
+            .w(px(420.))
+            .my_1p5()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().editor_background)
+            .child(
+                Label::new(format!("{} blocked", network.to_uppercase()))
+                    .size(LabelSize::Small)
+                    .color(Color::Warning),
+            )
+            .child(
+                Label::new(warning)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element(),
+    )
 }
 
 pub(crate) fn market_quote_id(tool_call: &ToolCall, cx: &App) -> Option<String> {
@@ -335,20 +363,27 @@ fn parse_swap_card(payload: &Value) -> Option<SwapCard> {
     } else {
         parse_swap_stage(payload)?
     };
-    Some(
-        SwapCard::new(
-            parse_asset(payload.get("from")?)?,
-            parse_asset(payload.get("to")?)?,
-            payload.get("amount_sats")?.as_u64()?,
-            payload
-                .get("provider")
-                .and_then(Value::as_str)
-                .unwrap_or("provider")
-                .to_string(),
-            payload.get("fee_bps").and_then(Value::as_u64).unwrap_or(0) as u32,
-        )
-        .stage(stage),
+    let fee_bps = payload
+        .get("fee_bps")
+        .and_then(Value::as_u64)
+        .and_then(|fee_bps| u32::try_from(fee_bps).ok());
+    let card = SwapCard::new(
+        parse_asset(payload.get("from")?)?,
+        parse_asset(payload.get("to")?)?,
+        payload.get("amount_sats")?.as_u64()?,
+        payload
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("provider")
+            .to_string(),
+        fee_bps.unwrap_or_default(),
     )
+    .stage(stage);
+    Some(if fee_bps.is_some() {
+        card
+    } else {
+        card.without_fee()
+    })
 }
 
 fn parse_swap_stage(payload: &Value) -> Option<SwapStage> {

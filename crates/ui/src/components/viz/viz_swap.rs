@@ -123,7 +123,7 @@ pub struct SwapCard {
     to: SwapAsset,
     amount_sats: u64,
     provider: SharedString,
-    fee_bps: u32,
+    fee_bps: Option<u32>,
     stage: SwapStage,
     palette: Option<VizPalette>,
 }
@@ -141,7 +141,7 @@ impl SwapCard {
             to,
             amount_sats,
             provider: provider.into(),
-            fee_bps,
+            fee_bps: Some(fee_bps),
             stage: SwapStage::Quote,
             palette: None,
         }
@@ -149,6 +149,11 @@ impl SwapCard {
 
     pub fn stage(mut self, stage: SwapStage) -> Self {
         self.stage = stage;
+        self
+    }
+
+    pub fn without_fee(mut self) -> Self {
+        self.fee_bps = None;
         self
     }
 
@@ -220,6 +225,11 @@ impl RenderOnce for SwapCard {
             status_icon.into_any_element()
         };
 
+        let provider_caption = self
+            .fee_bps
+            .map(|fee_bps| format!("{} · {fee_bps} bps", self.provider))
+            .unwrap_or_else(|| self.provider.to_string());
+
         v_flex()
             .w(px(420.))
             .my_1p5()
@@ -275,7 +285,7 @@ impl RenderOnce for SwapCard {
                     .pb_2()
                     .justify_between()
                     .child(
-                        Label::new(format!("{} · {} bps", self.provider, self.fee_bps))
+                        Label::new(provider_caption)
                             .size(LabelSize::XSmall)
                             .color(Color::Muted)
                             .buffer_font(cx),

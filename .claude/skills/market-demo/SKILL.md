@@ -1,6 +1,6 @@
 ---
 name: market-demo
-description: Answer questions about the swap network, run demo asset swaps (LN, BTC, L-BTC), and mock-provision a paid provider node with a cloud relay using Omega's market tools. Answer tool availability questions directly without a tool call or delegation. Use when the person asks what the network looks like, wants provider or fee information, asks to swap sats between rails, or asks to create provider infrastructure. Network status reads the live public regtest network (read-only); swaps and provisioning are demo fixtures.
+description: Answer questions about the swap network, run demo or regtest asset swaps, and mock-provision a paid provider node with a cloud relay using Omega's market tools. Answer tool availability questions directly without a tool call or delegation. Use when the person asks what the network looks like, wants provider or fee information, asks to swap sats between rails, or asks to create provider infrastructure. Every swap tool requires demo, regtest, or mainnet. Mainnet is blocked.
 ---
 
 # Swap market
@@ -17,28 +17,35 @@ and let the cards render.
 
 Omega Agent receives these as built-in tools. The optional `market-demo` MCP
 server exposes the same contract to external clients.
-`market_network_status` reads the LIVE public regtest network (read-only:
-manifest, relay health, provider profiles and offerings). The swap tools are
-demo fixtures — live quoting requires the verified requester engine and is
-not wired yet. Present it that way: network facts are live coordination
-data whose provider claims stay unverified; swaps are a demo, said once per
-conversation.
+Every swap tool call must specify one `network` value:
+
+- `demo` returns deterministic representative fixtures. It moves no funds.
+- `regtest` uses live shared providers and valueless Bitcoin regtest funds.
+  The requester verifies both settlement rails. The public service currently
+  supports only `LN → BTC` and `BTC → LN` from 10,000 through 1,000,000 sats.
+- `mainnet` is blocked. The tools return a warning and send no mainnet request.
+
+Use the network the person names. If they do not name one, use `demo` and say
+that the result is a fixture. Do not silently treat `regtest` as `demo`.
 
 ## Tools
 
-- `market_network_status` — LIVE: relay health, providers with real fees,
-  trust tiers (`pinned` from the signed manifest vs `discovered`), and 24h
-  aggregates (unknown until receipt aggregation deploys — report unknown,
-  never zero).
-- `market_swap_quote` — returns a firm quote for a quote-only request between
-  `LN`, `BTC`, and `L-BTC` (1,000–10,000,000 sats). Returns a `quote_id`.
+- `market_network_status` — requires `network`. Demo returns a representative
+  fixture. Regtest reads live relay health, provider offerings, and trust
+  tiers from the public regtest network. Mainnet returns a blocked warning.
+- `market_swap_quote` — requires `network`. Demo returns a firm fixture quote
+  for `LN`, `BTC`, or `L-BTC` from 1,000 through 10,000,000 sats. Regtest
+  returns an indicative live route for the two supported directions. The
+  signed provider quotes are obtained during execution.
 - `market_execute_swap` — creates and runs an authorized swap directly from
-  `from`, `to`, and `amount_sats`, or runs a prior `quote_id`. The person's
-  swap request is authorization. Streams one card through
+  `network`, `from`, `to`, and `amount_sats`, or runs a prior `quote_id` with
+  its matching `network`. The person's swap request is authorization. Demo
+  streams one fixture card through
   `quote → contract → funding → executing → settled` and returns after
-  settlement.
-- `market_swap_status` — reads the latest projected state for a `swap_id`.
-  Reads never advance the swap.
+  settlement. Regtest returns only after requester-verified Bitcoin and
+  Lightning evidence exists.
+- `market_swap_status` — requires `network` and reads the latest recorded state
+  for a `swap_id`. Reads never advance the swap.
 - `market_provision_cloud` — mock-checks a paid account, then streams one card
   through `payment → relay → provider → connected`. It creates no payment or
   infrastructure. The default region is `us-central1`.
@@ -46,17 +53,17 @@ conversation.
 ## The flow
 
 1. **Network question** ("what does the network look like?"): call
-   `market_network_status` once and summarize — how many relays and providers
+   `market_network_status` once with the chosen network and summarize — how many relays and providers
    are ready, which are pinned vs discovered (say "unpinned" for discovered),
    fees in bps, and the 24h aggregates. If a stat is missing, say it is
    unknown; never present a missing stat as zero.
 2. **Swap request** ("swap 50,000 sats from Lightning to BTC"): treat the
    request itself as authorization. Call `market_execute_swap` directly with
-   `from`, `to`, and `amount_sats`. Do not call `market_swap_quote` first and
-   do not ask for another approval.
+   `network`, `from`, `to`, and `amount_sats`. Do not call
+   `market_swap_quote` first and do not ask for another approval.
 3. **Quote-only request**: call `market_swap_quote` and stop. If the person
    later asks to execute that quote, call `market_execute_swap` with its
-   `quote_id`.
+   `network` and `quote_id`.
 4. Let `market_execute_swap` stream its lifecycle. Do not drive progress by
    repeatedly calling `market_swap_status`; use that tool only to inspect an
    existing swap after execution.
@@ -69,7 +76,10 @@ conversation.
 
 ## Honesty rules
 
-- Never claim real funds moved; this is a fixture.
+- For demo, never claim funds moved; it is a fixture.
+- For regtest, call the funds valueless regtest funds. Do not call them demo
+  fixtures or mainnet funds.
+- For mainnet, preserve the blocked warning. Do not retry on another network.
 - Never claim a mock cloud provision charged the person or created resources.
 - Never invent stages, fees, or providers beyond what the tools return.
 - If a tool errors (unknown quote or swap id), say so and restart from a

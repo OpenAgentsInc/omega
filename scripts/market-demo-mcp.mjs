@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 // A dependency-free MCP stdio server for the swap market.
 //
-// `market_network_status` reads the LIVE public regtest network: it fetches
+// `market_network_status` can return a fixture or read the live public regtest network: it fetches
 // the deployment's launch manifest for the pinned set, probes each relay's
 // NIP-11, authenticates with an ephemeral key over NIP-42 (BIP-340 signing
 // implemented below), and folds the kind-39600/39601 market heads it reads.
 // Read-only; the ephemeral identity signs nothing but the auth event.
 //
-// The swap tools remain DEMO: real quoting and execution require the
-// verified requester engine (omega#244), and quotes are never faked from
-// live data. Wired via `.omega/settings.json` `context_servers.market-demo`;
+// Demo swaps remain deterministic fixtures. Regtest execution requires
+// Omega's native Nostr-signed API path. Wired via `.omega/settings.json` `context_servers.market-demo`;
 // taught to agents by the `market-demo` skill; disable either to turn the
 // surface off.
 //
@@ -32,6 +31,8 @@ const LIVE_DISCLOSURE =
   "claims are unverified until a requester verifies locally.";
 const DEMO_DISCLOSURE =
   "DEMO DATA: deterministic fixture, not the live network; no real funds move.";
+const MAINNET_WARNING =
+  "Mainnet swap tools are blocked. No mainnet request was sent and no funds moved.";
 
 // ---------------------------------------------------------------------------
 // Minimal secp256k1 + BIP-340 Schnorr, enough to sign one NIP-42 auth event
@@ -398,11 +399,11 @@ async function liveNetworkStatus() {
 }
 
 // ---------------------------------------------------------------------------
-// Demo swap flow (unchanged): quotes are never faked from live data, so the
-// swap lane stays a deterministic fixture until the requester engine lands.
+// Demo swap flow.
 // ---------------------------------------------------------------------------
 
 const ASSETS = ["LN", "BTC", "L-BTC"];
+const NETWORKS = ["demo", "regtest", "mainnet"];
 const SWAP_STAGES = ["contract", "funding", "executing", "settled"];
 const VERIFICATION = {
   contract: "exit package persisted before any funding",
@@ -420,57 +421,59 @@ const TOOLS = [
   {
     name: "market_network_status",
     description:
-      "Snapshot of the LIVE public regtest swap network: relay health, " +
-      "provider profiles and offerings with fees, and trust tiers from the " +
-      "deployment's signed manifest. Read-only. " +
-      LIVE_DISCLOSURE,
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      "Read a representative demo network or the LIVE public regtest network. " +
+      "Mainnet is blocked.",
+    inputSchema: {
+      type: "object",
+      properties: { network: { type: "string", enum: NETWORKS } },
+      required: ["network"],
+      additionalProperties: false,
+    },
   },
   {
     name: "market_swap_quote",
     description:
-      "Request the best firm quote for a swap between LN, BTC, and L-BTC. " +
-      "Returns a quote id to pass to market_execute_swap after the person " +
-      "approves. " +
-      DEMO_DISCLOSURE +
-      " Live quoting requires the verified requester engine and is not " +
-      "wired yet.",
+      "Request a demo fixture quote or an indicative live regtest route. " +
+      "Mainnet is blocked.",
     inputSchema: {
       type: "object",
       properties: {
+        network: { type: "string", enum: NETWORKS },
         from: { type: "string", enum: ASSETS },
         to: { type: "string", enum: ASSETS },
         amount_sats: { type: "integer", minimum: 1000, maximum: 10000000 },
       },
-      required: ["from", "to", "amount_sats"],
+      required: ["network", "from", "to", "amount_sats"],
       additionalProperties: false,
     },
   },
   {
     name: "market_execute_swap",
     description:
-      "EFFECTFUL IN THE REAL FLOW — require explicit user approval before " +
-      "calling. Executes a quoted swap and returns a swap id; poll " +
-      "market_swap_status until the stage is settled. " +
-      DEMO_DISCLOSURE,
+      "Execute a demo fixture quote. Regtest execution uses Omega's native " +
+      "Nostr-signed API path. Mainnet is blocked.",
     inputSchema: {
       type: "object",
-      properties: { quote_id: { type: "string" } },
-      required: ["quote_id"],
+      properties: {
+        network: { type: "string", enum: NETWORKS },
+        quote_id: { type: "string" },
+      },
+      required: ["network", "quote_id"],
       additionalProperties: false,
     },
   },
   {
     name: "market_swap_status",
     description:
-      "Current stage of a swap (contract → funding → executing → settled) " +
-      "with its verification caption and stage timeline. Advances one stage " +
-      "per poll in this demo. " +
-      DEMO_DISCLOSURE,
+      "Read a recorded demo swap. Regtest state is recorded by Omega's native " +
+      "tool. Mainnet is blocked.",
     inputSchema: {
       type: "object",
-      properties: { swap_id: { type: "string" } },
-      required: ["swap_id"],
+      properties: {
+        network: { type: "string", enum: NETWORKS },
+        swap_id: { type: "string" },
+      },
+      required: ["network", "swap_id"],
       additionalProperties: false,
     },
   },
@@ -487,10 +490,45 @@ function toolResult(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
+function mainnetWarning(operation) {
+  return toolResult({
+    schema: "omega.market-demo.warning.v1",
+    network: "mainnet",
+    operation,
+    blocked: true,
+    warning: MAINNET_WARNING,
+  });
+}
+
+function demoNetworkStatus() {
+  return {
+    schema: "omega.market-demo.network-status.v1",
+    network: "demo",
+    source: "fixture",
+    disclosure: DEMO_DISCLOSURE,
+    name: "representative demo network",
+    manifest: {
+      service_state: "ready",
+      bazaar_revision: "demo-fixture",
+      immortal_revision: "demo-fixture",
+    },
+    relays: [
+      { label: "relay-a", url: "wss://relay-a.demo.invalid", state: "ready", trust: "fixture" },
+      { label: "relay-b", url: "wss://relay-b.demo.invalid", state: "ready", trust: "fixture" },
+    ],
+    providers: [
+      { label: "provider-b", pubkey: "demo-provider-b", state: "ready", trust: "fixture", relays: ["relay-a", "relay-b"], fee_bps: 22, active_offerings: 6 },
+      { label: "provider-c", pubkey: "demo-provider-c", state: "ready", trust: "fixture", relays: ["relay-a", "relay-b"], fee_bps: 34, active_offerings: 6 },
+    ],
+    stats: {},
+  };
+}
+
 function swapView(swap) {
   const stage = SWAP_STAGES[swap.stageIndex];
   return {
     schema: "omega.market-demo.swap.v1",
+    network: "demo",
     disclosure: DEMO_DISCLOSURE,
     swap_id: swap.id,
     from: swap.from,
@@ -508,44 +546,78 @@ function swapView(swap) {
 async function callTool(name, args) {
   switch (name) {
     case "market_network_status":
+      if (args.network === "mainnet") return mainnetWarning(name);
+      if (args.network === "demo") return toolResult(demoNetworkStatus());
+      if (args.network !== "regtest") return toolError("network must be demo, regtest, or mainnet");
       try {
-        return toolResult(await liveNetworkStatus());
+        const status = await liveNetworkStatus();
+        status.network = "regtest";
+        return toolResult(status);
       } catch (error) {
         return toolError(`live network read failed: ${error.message ?? error}`);
       }
     case "market_swap_quote": {
-      const { from, to, amount_sats } = args;
+      const { network, from, to, amount_sats } = args;
+      if (network === "mainnet") return mainnetWarning(name);
+      if (!NETWORKS.includes(network)) return toolError("network must be demo, regtest, or mainnet");
       if (!ASSETS.includes(from) || !ASSETS.includes(to) || from === to) {
         return toolError("from and to must be distinct assets among LN, BTC, L-BTC");
       }
-      if (!Number.isInteger(amount_sats) || amount_sats < 1000 || amount_sats > 10000000) {
-        return toolError("amount_sats must be an integer between 1,000 and 10,000,000");
+      const minimum = network === "regtest" ? 10000 : 1000;
+      const maximum = network === "regtest" ? 1000000 : 10000000;
+      if (!Number.isInteger(amount_sats) || amount_sats < minimum || amount_sats > maximum) {
+        return toolError(
+          `amount_sats must be an integer between ${minimum.toLocaleString()} and ${maximum.toLocaleString()}`,
+        );
+      }
+      if (network === "regtest" && (from === "L-BTC" || to === "L-BTC")) {
+        return toolError("the public regtest service does not support Liquid Bitcoin yet");
+      }
+      let provider = "provider-b";
+      let feeBps = 22;
+      if (network === "regtest") {
+        const status = await liveNetworkStatus();
+        const ready = status.providers
+          .filter((candidate) => candidate.state === "ready" && Number.isInteger(candidate.fee_bps))
+          .sort((left, right) => left.fee_bps - right.fee_bps)[0];
+        if (!ready) return toolError("the live regtest network has no ready swap provider");
+        provider = ready.label;
+        feeBps = ready.fee_bps;
       }
       quoteCounter += 1;
-      const id = `demo-quote-${quoteCounter}`;
-      const feeSats = Math.ceil((amount_sats * 22) / 10000);
+      const id = `${network}-quote-${quoteCounter}`;
+      const feeSats = Math.ceil((amount_sats * feeBps) / 10000);
       const quote = {
         schema: "omega.market-demo.quote.v1",
-        disclosure: DEMO_DISCLOSURE,
+        network,
+        disclosure: network === "demo" ? DEMO_DISCLOSURE : LIVE_DISCLOSURE,
         quote_id: id,
         from,
         to,
         amount_sats,
-        provider: "provider-b",
-        fee_bps: 22,
+        provider,
+        fee_bps: feeBps,
         fee_sats: feeSats,
         miner_fee_budget_sats: 300,
         output_sats: amount_sats - feeSats - 300,
-        kind: "firm",
-        expires_in_seconds: 120,
+        kind: network === "demo" ? "firm" : "indicative",
+        expires_in_seconds: network === "demo" ? 120 : 30,
       };
       quotes.set(id, quote);
       return toolResult(quote);
     }
     case "market_execute_swap": {
+      if (args.network === "mainnet") return mainnetWarning(name);
+      if (args.network === "regtest") {
+        return toolError("regtest execution requires Omega's native Nostr-signed market tool");
+      }
+      if (args.network !== "demo") return toolError("network must be demo, regtest, or mainnet");
       const quote = quotes.get(args.quote_id);
       if (!quote) {
         return toolError(`unknown quote_id ${args.quote_id}; request a fresh quote first`);
+      }
+      if (quote.network !== args.network) {
+        return toolError(`quote_id ${args.quote_id} belongs to network ${quote.network}`);
       }
       swapCounter += 1;
       const swap = {
@@ -559,6 +631,11 @@ async function callTool(name, args) {
       return toolResult(swapView(swap));
     }
     case "market_swap_status": {
+      if (args.network === "mainnet") return mainnetWarning(name);
+      if (args.network === "regtest") {
+        return toolError("regtest status is recorded by Omega's native market tool");
+      }
+      if (args.network !== "demo") return toolError("network must be demo, regtest, or mainnet");
       const swap = swaps.get(args.swap_id);
       if (!swap) {
         return toolError(`unknown swap_id ${args.swap_id}`);

@@ -5,18 +5,22 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1 as acp;
 use futures::AsyncReadExt as _;
 use gpui::{App, AppContext as _, Task};
-use http_client::{AsyncBody, HttpClientWithUrl};
+use http_client::{AsyncBody, HttpClient as _, HttpClientWithUrl, Method, Request};
 use language_model::LanguageModelToolResultContent;
+use language_models::AllLanguageModelSettings;
 use omega_effectd::PublicRelayEvent;
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use settings::Settings as _;
 use ui::SharedString;
 
 use crate::{AgentTool, ToolCallEventStream, ToolInput};
 
 const MANIFEST_URL: &str = "https://bazaar.openagents.com/bazaar-public-regtest.json";
+const PRODUCTION_MARKET_API_URL: &str = "https://api.openagents.com/v1/market/regtest/swaps";
+const DEVELOPMENT_MARKET_API_URL: &str = "http://127.0.0.1:8080/v1/market/regtest/swaps";
 const FALLBACK_RELAYS: &[&str] = &[
     "wss://relay-a.34-41-78-122.nip.io",
     "wss://relay-b.34-41-78-122.sslip.io",
@@ -24,6 +28,9 @@ const FALLBACK_RELAYS: &[&str] = &[
 const LIVE_DISCLOSURE: &str = "LIVE public regtest coordination data, read-only; relay and provider claims are unverified until a requester verifies locally.";
 const DEMO_DISCLOSURE: &str =
     "DEMO DATA: deterministic fixture, not the live network; no real funds move.";
+const REGTEST_DISCLOSURE: &str = "REGTEST: live providers and valueless regtest funds; the requester verifies both settlement rails.";
+const MAINNET_WARNING: &str =
+    "Mainnet swap tools are blocked. No mainnet request was sent and no funds moved.";
 const CLOUD_PROVISION_DISCLOSURE: &str =
     "MOCK CLOUD PROVISIONING: no payment is charged and no infrastructure is created.";
 const SWAP_STAGES: &[&str] = &["contract", "funding", "executing", "settled"];
@@ -60,10 +67,12 @@ struct MarketDemoState {
     provision_counter: u64,
     quotes: HashMap<String, Quote>,
     swaps: HashMap<String, Swap>,
+    regtest_swaps: HashMap<String, Value>,
 }
 
 #[derive(Clone)]
 struct Quote {
+    network: MarketNetwork,
     from: MarketAsset,
     to: MarketAsset,
     amount_sats: u64,
@@ -77,6 +86,24 @@ struct Swap {
     to: MarketAsset,
     amount_sats: u64,
     status_history: Vec<SwapStatusRecord>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketNetwork {
+    Demo,
+    Regtest,
+    Mainnet,
+}
+
+impl MarketNetwork {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Demo => "demo",
+            Self::Regtest => "regtest",
+            Self::Mainnet => "mainnet",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -139,8 +166,11 @@ pub struct MarketNetworkStatusTool {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-/// Read the live public regtest swap network, including relay health and provider offerings.
-pub struct MarketNetworkStatusInput {}
+/// Read a demo fixture or the live public regtest network. Mainnet is blocked.
+pub struct MarketNetworkStatusInput {
+    /// Network mode. Use demo for fixtures or regtest for live valueless infrastructure.
+    network: MarketNetwork,
+}
 
 impl MarketNetworkStatusTool {
     pub fn new(http_client: Arc<HttpClientWithUrl>) -> Self {
@@ -158,8 +188,11 @@ impl AgentTool for MarketNetworkStatusTool {
         acp::ToolKind::Fetch
     }
 
-    fn initial_title(&self, _input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
-        "Check swap network".into()
+    fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
+        match input {
+            Ok(input) => format!("Check {} swap network", input.network.as_str()).into(),
+            Err(_) => "Check swap network".into(),
+        }
     }
 
     fn run(
@@ -170,21 +203,28 @@ impl AgentTool for MarketNetworkStatusTool {
     ) -> Task<Result<Self::Output, Self::Output>> {
         let http_client = self.http_client.clone();
         cx.spawn(async move |cx| {
-            input
+            let input = input
                 .recv()
                 .await
                 .map_err(|error| MarketToolOutput::error(error.to_string()))?;
-            cx.background_spawn(async move { load_network_status(http_client).await })
-                .await
-                .map(MarketToolOutput::success)
-                .map_err(MarketToolOutput::error)
+            match input.network {
+                MarketNetwork::Demo => Ok(MarketToolOutput::success(demo_network_status())),
+                MarketNetwork::Mainnet => Ok(mainnet_warning("market_network_status")),
+                MarketNetwork::Regtest => cx
+                    .background_spawn(async move { load_network_status(http_client).await })
+                    .await
+                    .map(MarketToolOutput::success)
+                    .map_err(MarketToolOutput::error),
+            }
         })
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-/// Request a demo firm quote between LN, BTC, and L-BTC. No real funds move.
+/// Request a demo fixture quote or an indicative live regtest route. Mainnet is blocked.
 pub struct MarketSwapQuoteInput {
+    /// Network mode. Regtest supports LN to BTC and BTC to LN.
+    network: MarketNetwork,
     from: MarketAsset,
     to: MarketAsset,
     /// Swap amount in sats, from 1,000 through 10,000,000.
@@ -193,6 +233,7 @@ pub struct MarketSwapQuoteInput {
 
 pub struct MarketSwapQuoteTool {
     state: Arc<Mutex<MarketDemoState>>,
+    http_client: Arc<HttpClientWithUrl>,
 }
 
 impl AgentTool for MarketSwapQuoteTool {
@@ -214,7 +255,7 @@ impl AgentTool for MarketSwapQuoteTool {
                 input.to.as_str()
             )
             .into(),
-            Err(_) => "Quote demo swap".into(),
+            Err(_) => "Quote swap".into(),
         }
     }
 
@@ -224,24 +265,42 @@ impl AgentTool for MarketSwapQuoteTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        cx.spawn(async move |_cx| {
+        cx.spawn(async move |cx| {
             let input = input
                 .recv()
                 .await
                 .map_err(|error| MarketToolOutput::error(error.to_string()))?;
-            quote_swap(&self.state, input).map_err(MarketToolOutput::error)
+            match input.network {
+                MarketNetwork::Demo => {
+                    quote_swap(&self.state, input).map_err(MarketToolOutput::error)
+                }
+                MarketNetwork::Mainnet => Ok(mainnet_warning("market_swap_quote")),
+                MarketNetwork::Regtest => {
+                    let network = cx
+                        .background_spawn({
+                            let http_client = self.http_client.clone();
+                            async move { load_network_status(http_client).await }
+                        })
+                        .await
+                        .map_err(MarketToolOutput::error)?;
+                    quote_regtest_swap(&self.state, input, &network)
+                        .map_err(MarketToolOutput::error)
+                }
+            }
         })
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-/// Quote and execute an authorized demo swap, or execute a prior demo quote. No real funds move.
+/// Execute a demo fixture or a real regtest swap. Mainnet is blocked.
 pub enum MarketExecuteSwapInput {
     Quoted {
+        network: MarketNetwork,
         quote_id: String,
     },
     Direct {
+        network: MarketNetwork,
         from: MarketAsset,
         to: MarketAsset,
         /// Swap amount in sats, from 1,000 through 10,000,000.
@@ -249,8 +308,25 @@ pub enum MarketExecuteSwapInput {
     },
 }
 
+impl MarketExecuteSwapInput {
+    fn network(&self) -> MarketNetwork {
+        match self {
+            Self::Quoted { network, .. } | Self::Direct { network, .. } => *network,
+        }
+    }
+}
+
+struct ExecutionDetails {
+    network: MarketNetwork,
+    quote_id: Option<String>,
+    from: MarketAsset,
+    to: MarketAsset,
+    amount_sats: u64,
+}
+
 pub struct MarketExecuteSwapTool {
     state: Arc<Mutex<MarketDemoState>>,
+    http_client: Option<Arc<HttpClientWithUrl>>,
     stage_delay: Duration,
 }
 
@@ -266,21 +342,23 @@ impl AgentTool for MarketExecuteSwapTool {
 
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
         match input {
-            Ok(MarketExecuteSwapInput::Quoted { quote_id }) => {
-                format!("Execute demo swap for {quote_id}").into()
+            Ok(MarketExecuteSwapInput::Quoted { network, quote_id }) => {
+                format!("Execute {} swap for {quote_id}", network.as_str()).into()
             }
             Ok(MarketExecuteSwapInput::Direct {
+                network,
                 from,
                 to,
                 amount_sats,
             }) => format!(
-                "Swap {} sats {} → {}",
+                "{} swap {} sats {} → {}",
+                network.as_str(),
                 amount_sats,
                 from.as_str(),
                 to.as_str()
             )
             .into(),
-            Err(_) => "Execute demo swap".into(),
+            Err(_) => "Execute swap".into(),
         }
     }
 
@@ -295,6 +373,44 @@ impl AgentTool for MarketExecuteSwapTool {
                 .recv()
                 .await
                 .map_err(|error| MarketToolOutput::error(error.to_string()))?;
+            let network = input.network();
+            if network == MarketNetwork::Mainnet {
+                return Ok(mainnet_warning("market_execute_swap"));
+            }
+            if network == MarketNetwork::Regtest {
+                let details =
+                    execution_details(&self.state, input).map_err(MarketToolOutput::error)?;
+                let pending = regtest_pending_swap(&details);
+                emit_market_update(&event_stream, &pending);
+                let (transport_url, authentication_url) = cx.update(|cx| {
+                    let settings = &AllLanguageModelSettings::get_global(cx).openagents;
+                    let transport_url = if settings.use_development_api {
+                        DEVELOPMENT_MARKET_API_URL
+                    } else {
+                        PRODUCTION_MARKET_API_URL
+                    };
+                    (
+                        transport_url.to_string(),
+                        PRODUCTION_MARKET_API_URL.to_string(),
+                    )
+                });
+                let output = execute_regtest_swap(
+                    self.http_client.clone().ok_or_else(|| {
+                        MarketToolOutput::error("the regtest HTTP client is not configured")
+                    })?,
+                    &transport_url,
+                    &authentication_url,
+                    &details,
+                )
+                .await
+                .map_err(MarketToolOutput::error)?;
+                if event_stream.was_cancelled_by_user() {
+                    return Err(MarketToolOutput::error("regtest swap was canceled"));
+                }
+                store_regtest_swap(&self.state, &output).map_err(MarketToolOutput::error)?;
+                emit_market_update(&event_stream, &output);
+                return Ok(output);
+            }
             let (quote_id, quote_output) =
                 prepare_execution(&self.state, input).map_err(MarketToolOutput::error)?;
             if let Some(quote_output) = quote_output {
@@ -325,8 +441,9 @@ impl AgentTool for MarketExecuteSwapTool {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-/// Read the current stage of a demo swap without changing its lifecycle.
+/// Read a recorded demo or regtest swap. Mainnet is blocked.
 pub struct MarketSwapStatusInput {
+    network: MarketNetwork,
     swap_id: String,
 }
 
@@ -346,8 +463,8 @@ impl AgentTool for MarketSwapStatusTool {
 
     fn initial_title(&self, input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
         match input {
-            Ok(input) => format!("Check demo swap {}", input.swap_id).into(),
-            Err(_) => "Check demo swap".into(),
+            Ok(input) => format!("Check {} swap {}", input.network.as_str(), input.swap_id).into(),
+            Err(_) => "Check swap".into(),
         }
     }
 
@@ -362,7 +479,14 @@ impl AgentTool for MarketSwapStatusTool {
                 .recv()
                 .await
                 .map_err(|error| MarketToolOutput::error(error.to_string()))?;
-            swap_status(&self.state, input).map_err(MarketToolOutput::error)
+            match input.network {
+                MarketNetwork::Demo => {
+                    swap_status(&self.state, input).map_err(MarketToolOutput::error)
+                }
+                MarketNetwork::Regtest => regtest_swap_status(&self.state, &input.swap_id)
+                    .map_err(MarketToolOutput::error),
+                MarketNetwork::Mainnet => Ok(mainnet_warning("market_swap_status")),
+            }
         })
     }
 }
@@ -448,12 +572,14 @@ pub fn market_demo_tools(
 ) {
     let state = Arc::new(Mutex::new(MarketDemoState::default()));
     (
-        MarketNetworkStatusTool::new(http_client),
+        MarketNetworkStatusTool::new(http_client.clone()),
         MarketSwapQuoteTool {
             state: state.clone(),
+            http_client: http_client.clone(),
         },
         MarketExecuteSwapTool {
             state: state.clone(),
+            http_client: Some(http_client),
             stage_delay: SWAP_STAGE_DELAY,
         },
         MarketSwapStatusTool {
@@ -464,6 +590,308 @@ pub fn market_demo_tools(
             stage_delay: CLOUD_PROVISION_STAGE_DELAY,
         },
     )
+}
+
+fn mainnet_warning(operation: &str) -> MarketToolOutput {
+    MarketToolOutput::success(json!({
+        "schema": "omega.market-demo.warning.v1",
+        "network": "mainnet",
+        "operation": operation,
+        "blocked": true,
+        "warning": MAINNET_WARNING
+    }))
+}
+
+fn demo_network_status() -> Value {
+    json!({
+        "schema": "omega.market-demo.network-status.v1",
+        "network": "demo",
+        "source": "fixture",
+        "disclosure": DEMO_DISCLOSURE,
+        "name": "representative demo network",
+        "manifest": {
+            "service_state": "ready",
+            "bazaar_revision": "demo-fixture",
+            "immortal_revision": "demo-fixture"
+        },
+        "relays": [
+            {"label": "relay-a", "url": "wss://relay-a.demo.invalid", "state": "ready", "trust": "fixture"},
+            {"label": "relay-b", "url": "wss://relay-b.demo.invalid", "state": "ready", "trust": "fixture"}
+        ],
+        "providers": [
+            {"label": "provider-b", "pubkey": "demo-provider-b", "state": "ready", "trust": "fixture", "relays": ["relay-a", "relay-b"], "fee_bps": 22, "active_offerings": 6},
+            {"label": "provider-c", "pubkey": "demo-provider-c", "state": "ready", "trust": "fixture", "relays": ["relay-a", "relay-b"], "fee_bps": 34, "active_offerings": 6}
+        ],
+        "stats": {}
+    })
+}
+
+fn quote_regtest_swap(
+    state: &Mutex<MarketDemoState>,
+    input: MarketSwapQuoteInput,
+    network: &Value,
+) -> Result<MarketToolOutput, String> {
+    validate_regtest_direction(input.from, input.to, input.amount_sats)?;
+    let provider = network
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|provider| provider.get("state").and_then(Value::as_str) == Some("ready"))
+        .filter_map(|provider| {
+            Some((
+                provider.get("fee_bps")?.as_u64()?,
+                provider.get("label")?.as_str()?.to_string(),
+            ))
+        })
+        .min_by_key(|(fee_bps, _)| *fee_bps)
+        .ok_or_else(|| "the live regtest network has no ready swap provider".to_string())?;
+    let mut state = state.lock();
+    state.quote_counter = state.quote_counter.saturating_add(1);
+    let quote_id = format!("regtest-route-{}", state.quote_counter);
+    state.quotes.insert(
+        quote_id.clone(),
+        Quote {
+            network: MarketNetwork::Regtest,
+            from: input.from,
+            to: input.to,
+            amount_sats: input.amount_sats,
+        },
+    );
+    Ok(MarketToolOutput::success(json!({
+        "schema": "omega.market-demo.quote.v1",
+        "network": "regtest",
+        "disclosure": "REGTEST INDICATIVE ROUTE: provider availability and fee are live claims; execution obtains signed quotes and verifies both settlement rails.",
+        "quote_id": quote_id,
+        "from": input.from.as_str(),
+        "to": input.to.as_str(),
+        "amount_sats": input.amount_sats,
+        "provider": provider.1,
+        "fee_bps": provider.0,
+        "kind": "indicative",
+        "expires_in_seconds": 30
+    })))
+}
+
+fn validate_regtest_direction(
+    from: MarketAsset,
+    to: MarketAsset,
+    amount_sats: u64,
+) -> Result<(), String> {
+    if !(10_000..=1_000_000).contains(&amount_sats) {
+        return Err("regtest amount_sats must be between 10,000 and 1,000,000".into());
+    }
+    match (from, to) {
+        (MarketAsset::Lightning, MarketAsset::Bitcoin)
+        | (MarketAsset::Bitcoin, MarketAsset::Lightning) => Ok(()),
+        (MarketAsset::LiquidBitcoin, _) | (_, MarketAsset::LiquidBitcoin) => {
+            Err("the public regtest service does not support Liquid Bitcoin yet".into())
+        }
+        _ => Err("regtest supports LN to BTC and BTC to LN".into()),
+    }
+}
+
+fn execution_details(
+    state: &Mutex<MarketDemoState>,
+    input: MarketExecuteSwapInput,
+) -> Result<ExecutionDetails, String> {
+    match input {
+        MarketExecuteSwapInput::Quoted { network, quote_id } => {
+            let state = state.lock();
+            let quote = state.quotes.get(&quote_id).ok_or_else(|| {
+                format!("unknown quote_id {quote_id}; request a fresh quote first")
+            })?;
+            if quote.network != network {
+                return Err(format!(
+                    "quote_id {quote_id} belongs to network {}",
+                    quote.network.as_str()
+                ));
+            }
+            validate_regtest_direction(quote.from, quote.to, quote.amount_sats)?;
+            Ok(ExecutionDetails {
+                network,
+                quote_id: Some(quote_id),
+                from: quote.from,
+                to: quote.to,
+                amount_sats: quote.amount_sats,
+            })
+        }
+        MarketExecuteSwapInput::Direct {
+            network,
+            from,
+            to,
+            amount_sats,
+        } => {
+            validate_regtest_direction(from, to, amount_sats)?;
+            Ok(ExecutionDetails {
+                network,
+                quote_id: None,
+                from,
+                to,
+                amount_sats,
+            })
+        }
+    }
+}
+
+fn regtest_pending_swap(details: &ExecutionDetails) -> MarketToolOutput {
+    MarketToolOutput::success(json!({
+        "schema": "omega.market-demo.swap.v1",
+        "network": details.network.as_str(),
+        "disclosure": REGTEST_DISCLOSURE,
+        "swap_id": "regtest-swap-pending",
+        "quote_id": details.quote_id,
+        "from": details.from.as_str(),
+        "to": details.to.as_str(),
+        "amount_sats": details.amount_sats,
+        "provider": "selecting signed provider",
+        "fee_bps": null,
+        "stage": "contract",
+        "verification": "The API is obtaining signed regtest quotes.",
+        "status_history": [{
+            "status_id": "regtest-swap-pending-status-0",
+            "sequence": 0,
+            "previous": null,
+            "stage": "contract",
+            "authority": "requester_local"
+        }]
+    }))
+}
+
+async fn execute_regtest_swap(
+    http_client: Arc<HttpClientWithUrl>,
+    transport_url: &str,
+    authentication_url: &str,
+    details: &ExecutionDetails,
+) -> Result<MarketToolOutput, String> {
+    let body = serde_json::to_string(&json!({
+        "schema": "openagents.market.swap-execute.v1",
+        "network": "regtest",
+        "from": details.from.as_str(),
+        "to": details.to.as_str(),
+        "amount_sats": details.amount_sats
+    }))
+    .map_err(|error| format!("regtest request could not be encoded: {error}"))?;
+    let authorization =
+        omega_effectd::sign_nip98_request(authentication_url, "POST", Some(body.as_bytes()), None)
+            .await
+            .map_err(|error| format!("regtest request could not be signed: {error}"))?;
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(transport_url)
+        .header("authorization", authorization)
+        .header("content-type", "application/json")
+        .header("content-length", body.len().to_string())
+        .body(AsyncBody::from(body))
+        .map_err(|error| format!("regtest request could not be built: {error}"))?;
+    let mut response = http_client
+        .send(request)
+        .await
+        .map_err(|error| format!("regtest API request failed: {error}"))?;
+    let status = response.status();
+    let mut response_body = Vec::new();
+    response
+        .body_mut()
+        .take(2 * 1024 * 1024)
+        .read_to_end(&mut response_body)
+        .await
+        .map_err(|error| format!("regtest API response could not be read: {error}"))?;
+    let value: Value = serde_json::from_slice(&response_body)
+        .map_err(|error| format!("regtest API response was invalid JSON: {error}"))?;
+    if !status.is_success() {
+        let message = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("the regtest API refused the swap");
+        return Err(format!(
+            "regtest API returned HTTP {}: {message}",
+            status.as_u16()
+        ));
+    }
+    regtest_swap_view(value, details)
+}
+
+fn regtest_swap_view(value: Value, details: &ExecutionDetails) -> Result<MarketToolOutput, String> {
+    if value.get("schema").and_then(Value::as_str) != Some("openagents.market.regtest-swap.v1")
+        || value.get("network").and_then(Value::as_str) != Some("regtest")
+        || value.get("stage").and_then(Value::as_str) != Some("settled")
+    {
+        return Err("the regtest API returned an unknown swap result".into());
+    }
+    let swap_id = value
+        .get("swap_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the regtest result has no swap_id".to_string())?;
+    let provider = value
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the regtest result has no provider".to_string())?;
+    let status_history = SWAP_STAGES
+        .iter()
+        .enumerate()
+        .map(|(sequence, stage)| {
+            json!({
+                "status_id": format!("{swap_id}-status-{sequence}"),
+                "sequence": sequence,
+                "previous": sequence.checked_sub(1).map(|previous| format!("{swap_id}-status-{previous}")),
+                "stage": stage,
+                "authority": if matches!(sequence, 1 | 2) { "provider_claim" } else { "requester_local" }
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(MarketToolOutput::success(json!({
+        "schema": "omega.market-demo.swap.v1",
+        "network": "regtest",
+        "network_id": value.get("network_id"),
+        "disclosure": REGTEST_DISCLOSURE,
+        "swap_id": swap_id,
+        "quote_id": details.quote_id,
+        "request_id": value.get("request_id"),
+        "from": details.from.as_str(),
+        "to": details.to.as_str(),
+        "amount_sats": details.amount_sats,
+        "provider": provider,
+        "fee_bps": null,
+        "stage": "settled",
+        "verification": value.get("verification"),
+        "status_history": status_history,
+        "projection": {
+            "last_valid_status": format!("{swap_id}-status-3"),
+            "status_gaps": [],
+            "status_forks": [],
+            "local_effects_verified": true
+        },
+        "rail_evidence": value.get("rail_evidence"),
+        "quote_provider_pubkeys": value.get("quote_provider_pubkeys"),
+        "unselected_released": value.get("unselected_released")
+    })))
+}
+
+fn store_regtest_swap(
+    state: &Mutex<MarketDemoState>,
+    output: &MarketToolOutput,
+) -> Result<(), String> {
+    let swap_id = output
+        .0
+        .get("swap_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the regtest output has no swap_id".to_string())?
+        .to_string();
+    state.lock().regtest_swaps.insert(swap_id, output.0.clone());
+    Ok(())
+}
+
+fn regtest_swap_status(
+    state: &Mutex<MarketDemoState>,
+    swap_id: &str,
+) -> Result<MarketToolOutput, String> {
+    state
+        .lock()
+        .regtest_swaps
+        .get(swap_id)
+        .cloned()
+        .map(MarketToolOutput::success)
+        .ok_or_else(|| format!("unknown regtest swap_id {swap_id}"))
 }
 
 async fn load_network_status(http_client: Arc<HttpClientWithUrl>) -> Result<Value, String> {
@@ -632,6 +1060,7 @@ async fn load_network_status(http_client: Arc<HttpClientWithUrl>) -> Result<Valu
 
     Ok(json!({
         "schema": "omega.market-demo.network-status.v1",
+        "network": "regtest",
         "source": "live",
         "disclosure": LIVE_DISCLOSURE,
         "name": "public regtest",
@@ -650,6 +1079,9 @@ fn quote_swap(
     state: &Mutex<MarketDemoState>,
     input: MarketSwapQuoteInput,
 ) -> Result<MarketToolOutput, String> {
+    if input.network != MarketNetwork::Demo {
+        return Err("the demo quote function requires network demo".into());
+    }
     if input.from == input.to {
         return Err("from and to must be different assets".into());
     }
@@ -662,6 +1094,7 @@ fn quote_swap(
     state.quotes.insert(
         quote_id.clone(),
         Quote {
+            network: input.network,
             from: input.from,
             to: input.to,
             amount_sats: input.amount_sats,
@@ -671,6 +1104,7 @@ fn quote_swap(
     let miner_fee_budget_sats = 300;
     Ok(MarketToolOutput::success(json!({
         "schema": "omega.market-demo.quote.v1",
+        "network": "demo",
         "disclosure": DEMO_DISCLOSURE,
         "quote_id": quote_id,
         "from": input.from.as_str(),
@@ -691,15 +1125,25 @@ fn prepare_execution(
     input: MarketExecuteSwapInput,
 ) -> Result<(String, Option<MarketToolOutput>), String> {
     match input {
-        MarketExecuteSwapInput::Quoted { quote_id } => Ok((quote_id, None)),
+        MarketExecuteSwapInput::Quoted { network, quote_id } => {
+            if network != MarketNetwork::Demo {
+                return Err("the demo execution function requires network demo".into());
+            }
+            Ok((quote_id, None))
+        }
         MarketExecuteSwapInput::Direct {
+            network,
             from,
             to,
             amount_sats,
         } => {
+            if network != MarketNetwork::Demo {
+                return Err("the demo execution function requires network demo".into());
+            }
             let quote = quote_swap(
                 state,
                 MarketSwapQuoteInput {
+                    network,
                     from,
                     to,
                     amount_sats,
@@ -726,6 +1170,9 @@ fn execute_swap(
         .get(quote_id)
         .cloned()
         .ok_or_else(|| format!("unknown quote_id {quote_id}; request a fresh quote first"))?;
+    if quote.network != MarketNetwork::Demo {
+        return Err(format!("quote_id {quote_id} is not a demo quote"));
+    }
     state.swap_counter = state.swap_counter.saturating_add(1);
     let swap = Swap {
         id: format!("demo-swap-{}", state.swap_counter),
@@ -749,6 +1196,9 @@ fn swap_status(
     state: &Mutex<MarketDemoState>,
     input: MarketSwapStatusInput,
 ) -> Result<MarketToolOutput, String> {
+    if input.network != MarketNetwork::Demo {
+        return Err("the demo status function requires network demo".into());
+    }
     let state = state.lock();
     let swap = state
         .swaps
@@ -841,6 +1291,7 @@ fn swap_view(swap: &Swap) -> Result<Value, String> {
         .collect::<Vec<_>>();
     Ok(json!({
         "schema": "omega.market-demo.swap.v1",
+        "network": "demo",
         "disclosure": DEMO_DISCLOSURE,
         "swap_id": swap.id,
         "quote_id": swap.quote_id,
@@ -1034,6 +1485,7 @@ mod tests {
         let quote = quote_swap(
             &state,
             MarketSwapQuoteInput {
+                network: MarketNetwork::Demo,
                 from: MarketAsset::Lightning,
                 to: MarketAsset::Bitcoin,
                 amount_sats: 50_000,
@@ -1049,6 +1501,7 @@ mod tests {
         let status = swap_status(
             &state,
             MarketSwapStatusInput {
+                network: MarketNetwork::Demo,
                 swap_id: swap_id.clone(),
             },
         )
@@ -1062,7 +1515,14 @@ mod tests {
         let status = advance_swap(&state, swap_id.clone()).expect("advance");
         assert_eq!(status.0["stage"], "settled");
 
-        let settled = swap_status(&state, MarketSwapStatusInput { swap_id }).expect("status");
+        let settled = swap_status(
+            &state,
+            MarketSwapStatusInput {
+                network: MarketNetwork::Demo,
+                swap_id,
+            },
+        )
+        .expect("status");
         assert_eq!(settled.0["stage"], "settled");
         assert_eq!(
             settled.0["status_history"].as_array().map(Vec::len),
@@ -1079,6 +1539,7 @@ mod tests {
         let state = Arc::new(Mutex::new(MarketDemoState::default()));
         let tool = Arc::new(MarketExecuteSwapTool {
             state,
+            http_client: None,
             stage_delay: Duration::ZERO,
         });
         let (event_stream, mut events) = ToolCallEventStream::test();
@@ -1087,6 +1548,7 @@ mod tests {
             .update(|cx| {
                 tool.run(
                     ToolInput::resolved(MarketExecuteSwapInput::Direct {
+                        network: MarketNetwork::Demo,
                         from: MarketAsset::Lightning,
                         to: MarketAsset::Bitcoin,
                         amount_sats: 50_000,
@@ -1195,11 +1657,51 @@ mod tests {
         let result = quote_swap(
             &state,
             MarketSwapQuoteInput {
+                network: MarketNetwork::Demo,
                 from: MarketAsset::Bitcoin,
                 to: MarketAsset::Bitcoin,
                 amount_sats: 999,
             },
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn demo_network_status_is_a_labeled_fixture() {
+        let status = demo_network_status();
+        assert_eq!(status["network"], "demo");
+        assert_eq!(status["source"], "fixture");
+        assert_eq!(status["providers"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn mainnet_warning_is_blocked_without_state() {
+        let state = MarketDemoState::default();
+        let warning = mainnet_warning("market_execute_swap");
+        assert_eq!(warning.0["network"], "mainnet");
+        assert_eq!(warning.0["blocked"], true);
+        assert!(state.quotes.is_empty());
+        assert!(state.swaps.is_empty());
+        assert!(state.regtest_swaps.is_empty());
+    }
+
+    #[test]
+    fn regtest_has_a_closed_direction_and_amount_contract() {
+        assert!(
+            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::Bitcoin, 10_000,)
+                .is_ok()
+        );
+        assert!(
+            validate_regtest_direction(MarketAsset::Bitcoin, MarketAsset::Lightning, 1_000_000,)
+                .is_ok()
+        );
+        assert!(
+            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::LiquidBitcoin, 10_000,)
+                .is_err()
+        );
+        assert!(
+            validate_regtest_direction(MarketAsset::Lightning, MarketAsset::Bitcoin, 9_999,)
+                .is_err()
+        );
     }
 }
