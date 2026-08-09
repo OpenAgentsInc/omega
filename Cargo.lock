@@ -9339,6 +9339,7 @@ dependencies = [
  "paths",
  "serde",
  "serde_json",
+ "tempfile",
  "trading_ledger",
  "trading_mandate",
  "zed-reqwest",

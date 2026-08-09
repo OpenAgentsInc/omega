@@ -1047,6 +1047,8 @@ impl NativeAgent {
                 #[cfg(feature = "lnmarkets")]
                 let is_portfolio_review = portfolio_cadence.is_some();
                 let connection = NativeAgentConnection(agent);
+                #[cfg(feature = "lnmarkets")]
+                let tokens_before_turn = session_total_tokens(&connection, &session_id, cx);
                 let turn = cx.update(|cx| connection.publish_wakeup(wakeup, cx));
                 match turn.await {
                     Ok(_) => {
@@ -1068,6 +1070,29 @@ impl NativeAgent {
                         }
                         #[cfg(feature = "lnmarkets")]
                         if is_portfolio_review {
+                            let evidence = collect_signet_soak_review_turn(
+                                &connection,
+                                &session_id,
+                                review_at_ms,
+                                review_source.clone(),
+                                tokens_before_turn,
+                                cx,
+                            )
+                            .await;
+                            if let Some(evidence) = evidence {
+                                let recorded = cx.update(|cx| {
+                                    lnmarkets::record_signet_soak_review_turn(
+                                        &session_id_text,
+                                        evidence,
+                                        cx,
+                                    )
+                                });
+                                if !recorded {
+                                    log::error!(
+                                        "completed LN Markets review evidence could not be added to the signet soak"
+                                    );
+                                }
+                            }
                             let recorded = cx.update(|cx| {
                                 lnmarkets::record_portfolio_review_turn(
                                     &session_id_text,
@@ -2349,6 +2374,76 @@ impl NativeAgent {
             .await
         })
     }
+}
+
+#[cfg(feature = "lnmarkets")]
+fn session_total_tokens(
+    connection: &NativeAgentConnection,
+    session_id: &acp::SessionId,
+    cx: &AsyncApp,
+) -> u64 {
+    connection
+        .0
+        .read_with(cx, |agent, _cx| {
+            agent
+                .sessions
+                .get(session_id)
+                .map(|session| session.thread.clone())
+        })
+        .map(|thread| thread.read_with(cx, |thread, _cx| thread.cumulative_token_usage()))
+        .map_or(0, |usage| usage.total_tokens())
+}
+
+#[cfg(feature = "lnmarkets")]
+async fn collect_signet_soak_review_turn(
+    connection: &NativeAgentConnection,
+    session_id: &acp::SessionId,
+    at_ms: i64,
+    source: WakeupSource,
+    tokens_before_turn: u64,
+    cx: &mut AsyncApp,
+) -> Option<lnmarkets::SoakReviewTurn> {
+    let thread = connection.0.read_with(cx, |agent, _cx| {
+        agent
+            .sessions
+            .get(session_id)
+            .map(|session| session.thread.clone())
+    })?;
+    let tokens_after_turn = thread
+        .read_with(cx, |thread, _cx| thread.cumulative_token_usage())
+        .total_tokens();
+    let db_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+    let mut reasoning_note_present = false;
+    let mut strategy_card_updates = 0_u32;
+    for message in db_thread.messages.iter().rev() {
+        if message.role() == language_model::Role::User {
+            break;
+        }
+        for request in message.to_request() {
+            for content in request.content {
+                match content {
+                    language_model::MessageContent::Text(text)
+                    | language_model::MessageContent::Thinking { text, .. } => {
+                        reasoning_note_present |= !text.trim().is_empty();
+                    }
+                    language_model::MessageContent::ToolUse(tool_use)
+                        if tool_use.name.as_ref() == "lnmarkets_strategy" =>
+                    {
+                        strategy_card_updates = strategy_card_updates.saturating_add(1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(lnmarkets::SoakReviewTurn {
+        at_ms,
+        transcript_label: source.transcript_label(),
+        source,
+        reasoning_note_present,
+        strategy_card_updates,
+        tokens_used: tokens_after_turn.saturating_sub(tokens_before_turn),
+    })
 }
 
 /// Wrapper struct that implements the AgentConnection trait

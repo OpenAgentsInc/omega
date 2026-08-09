@@ -10169,3 +10169,23 @@ is loaded only with the LN Markets plugin feature.
 - **Enforced by:** `lnmarkets_ui`, `lnmarkets`, and `lnmarkets_data` unit and
   GPUI paint tests and `lnmarkets_operator_panel_is_local_complete_and_tested`
   in `omega_deltas`.
+
+### OMEGA-DELTA-0254 — Signet soak receipts prove bounded zero-nudge operation
+
+The LN Markets acceptance recorder issues a passing receipt only when its
+evidence names an approved signet mandate and one commit, covers a measured
+window with no human messages, and shows every mandated strategy running.
+Scheduled reviews must carry their typed transcript labels, reasoning-note
+presence, strategy-card updates, and measured token use within both per-turn
+and rolling-hour budgets.
+
+The same receipt records deliberately injected mandate-limit refusals. Each
+injection must halt its strategy and produce the matching typed strategy-halt
+wakeup. Its ledger summary covers the exact window, and balance samples at
+both boundaries and throughout the window must match the venue exactly.
+Receipts reject unknown fields and invalid evidence, contain no credentials,
+and use create-new storage so a prior acceptance record cannot be replaced.
+
+- **Enforced by:** `lnmarkets` unit tests and
+  `lnmarkets_signet_soak_receipts_fail_closed_over_complete_evidence` in
+  `omega_deltas`.

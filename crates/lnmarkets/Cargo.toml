@@ -31,3 +31,6 @@ serde_json.workspace = true
 trading_mandate.workspace = true
 trading_ledger.workspace = true
 zed_credentials_provider.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

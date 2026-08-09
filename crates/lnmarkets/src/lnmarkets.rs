@@ -7,6 +7,7 @@ use lnmarkets_data::{Collector, CollectorConfig, CollectorHandle, MarketDataStor
 use parking_lot::Mutex;
 
 mod review_turn;
+mod signet_soak;
 mod trading_runtime;
 
 pub use agent_wakeup::WakeupSource;
@@ -15,6 +16,11 @@ pub use lnmarkets_ui::{
     OperatorStrategySnapshot,
 };
 pub use review_turn::{PORTFOLIO_REVIEW_SCHEMA, PORTFOLIO_REVIEW_TOKEN_BUDGET, PortfolioReview};
+pub use signet_soak::{
+    SIGNET_SOAK_SCHEMA, SignetSoakEvidence, SignetSoakReceipt, SignetSoakRefusal, SignetSoakStatus,
+    SoakBudget, SoakLimitBreach, SoakReconciliationSample, SoakReviewTurn, SoakStrategyObservation,
+    SoakWindow,
+};
 pub use trading_runtime::{
     ReviewTurnHistory, ReviewTurnOutcome, StrategyRuntimeSnapshot, TradingRuntime,
 };
@@ -216,6 +222,10 @@ pub fn record_portfolio_review_turn(
 ) -> bool {
     trading_runtime(cx)
         .is_ok_and(|runtime| runtime.record_review_turn(session_id, at_ms, source, outcome))
+}
+
+pub fn record_signet_soak_review_turn(session_id: &str, turn: SoakReviewTurn, cx: &App) -> bool {
+    trading_runtime(cx).is_ok_and(|runtime| runtime.record_soak_review_turn(session_id, turn))
 }
 
 pub fn operator_console_source(cx: &App) -> Result<Arc<dyn OperatorConsoleSource>, String> {

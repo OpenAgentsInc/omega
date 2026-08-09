@@ -224,6 +224,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0251",
     "OMEGA-DELTA-0252",
     "OMEGA-DELTA-0253",
+    "OMEGA-DELTA-0254",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29883,6 +29884,80 @@ mod tests {
             assert!(
                 startup.contains(required),
                 "OMEGA-DELTA-0253: feature-gated operator startup lost `{required}`"
+            );
+        }
+    }
+
+    /// A signet soak receipt is issued only from bounded, zero-nudge evidence
+    /// that covers the exact window and reconciles every recorded balance.
+    #[test]
+    fn lnmarkets_signet_soak_receipts_fail_closed_over_complete_evidence() {
+        let soak = without_comments(&read_repository_file("crates/lnmarkets/src/signet_soak.rs"));
+        for required in [
+            "openagents.omega.lnmarkets-signet-soak.v1",
+            "pub struct SignetSoakEvidence",
+            "pub struct SignetSoakReceipt",
+            "pub struct SoakReviewTurn",
+            "pub struct SoakLimitBreach",
+            "pub struct SoakReconciliationSample",
+            "human_messages_during_window != 0",
+            "the soak recorded no labeled scheduled review turn",
+            "mandated strategy `{strategy_id}` did not run during the soak",
+            "did not emit its typed strategy-halt wakeup",
+            "the ledger summary does not cover the exact soak window",
+            "ledger_balance_sats != sample.venue_balance_sats",
+            "options.write(true).create_new(true)",
+            "unknown_receipt_fields_fail_closed",
+        ] {
+            assert!(
+                soak.contains(required),
+                "OMEGA-DELTA-0254: signet soak receipt lost `{required}`"
+            );
+        }
+
+        let facade = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
+        for required in [
+            "pub use signet_soak::{",
+            "SIGNET_SOAK_SCHEMA",
+            "SignetSoakEvidence",
+            "SignetSoakReceipt",
+            "SignetSoakRefusal",
+            "record_signet_soak_review_turn(",
+        ] {
+            assert!(
+                facade.contains(required),
+                "OMEGA-DELTA-0254: signet soak facade lost `{required}`"
+            );
+        }
+
+        let runtime = without_comments(&read_repository_file(
+            "crates/lnmarkets/src/trading_runtime.rs",
+        ));
+        for required in [
+            "soak_review_turns: Mutex<VecDeque<SoakReviewTurn>>",
+            "pub fn record_soak_review_turn(",
+            "pub fn soak_review_turns(",
+            "pub fn signet_soak_ledger_summary(",
+            "pub fn signet_soak_limit_breaches(",
+            "StrategyHaltReason::RiskLimit { refusal }",
+        ] {
+            assert!(
+                runtime.contains(required),
+                "OMEGA-DELTA-0254: signet soak runtime evidence lost `{required}`"
+            );
+        }
+
+        let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
+        for required in [
+            "collect_signet_soak_review_turn(",
+            "thread.cumulative_token_usage()",
+            "reasoning_note_present",
+            "lnmarkets_strategy",
+            "record_signet_soak_review_turn(",
+        ] {
+            assert!(
+                agent.contains(required),
+                "OMEGA-DELTA-0254: autonomous review measurement lost `{required}`"
             );
         }
     }

@@ -7,8 +7,8 @@ use lnmarkets_data::FeatureSnapshot;
 use lnmarkets_trading::{
     BacktestStore, FundingCarryConfig, FundingCarryExecutor, FundingCarryFeatures,
     FundingCarryProgram, MemoryLifecycleSink, MemoryWakeupSink, RebalanceToTargetConfig,
-    RebalanceToTargetProgram, StrategyCommand, StrategyEngine, StrategyLifecycleEvent,
-    StrategyServiceHandle, SyntheticUsdExecutor, background_service,
+    RebalanceToTargetProgram, StrategyCommand, StrategyEngine, StrategyHaltReason,
+    StrategyLifecycleEvent, StrategyServiceHandle, SyntheticUsdExecutor, background_service,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -19,6 +19,7 @@ use trading_mandate::{
 };
 
 use crate::review_turn::{PortfolioReview, hourly_start};
+use crate::{SoakLimitBreach, SoakReviewTurn, SoakWindow};
 
 const REBALANCE_STRATEGY_ID: &str = "rebalance_to_target";
 const FUNDING_STRATEGY_ID: &str = "funding_carry";
@@ -59,6 +60,7 @@ pub struct TradingRuntime {
     lifecycle: MemoryLifecycleSink,
     wakeups: MemoryWakeupSink,
     review_history: Mutex<VecDeque<ReviewTurnHistory>>,
+    soak_review_turns: Mutex<VecDeque<SoakReviewTurn>>,
     review_session_id: Mutex<Option<String>>,
     rebalance: Mutex<Option<RebalanceHandle>>,
     funding: Mutex<Option<FundingHandle>>,
@@ -73,6 +75,7 @@ impl TradingRuntime {
             lifecycle: MemoryLifecycleSink::default(),
             wakeups: MemoryWakeupSink::default(),
             review_history: Mutex::new(VecDeque::new()),
+            soak_review_turns: Mutex::new(VecDeque::new()),
             review_session_id: Mutex::new(None),
             rebalance: Mutex::new(None),
             funding: Mutex::new(None),
@@ -85,6 +88,60 @@ impl TradingRuntime {
 
     pub fn ledger_entries(&self, query: &LedgerQuery) -> Result<Vec<trading_ledger::LedgerEntry>> {
         self.ledger.entries(query)
+    }
+
+    pub fn venue_balance(&self, venue: &str) -> Result<i64> {
+        self.ledger.venue_balance(venue)
+    }
+
+    pub fn signet_soak_ledger_summary(&self, window: &SoakWindow) -> Result<ProfitReport> {
+        self.ledger.profit_report(&LedgerQuery {
+            from_ms: Some(window.started_at_ms),
+            to_ms: Some(window.ended_at_ms),
+            strategy_id: None,
+        })
+    }
+
+    pub fn signet_soak_limit_breaches(&self, window: &SoakWindow) -> Vec<SoakLimitBreach> {
+        self.lifecycle
+            .events()
+            .into_iter()
+            .filter_map(|event| {
+                let StrategyLifecycleEvent::Halted {
+                    strategy_id,
+                    at_ms,
+                    reason: StrategyHaltReason::RiskLimit { refusal },
+                } = event
+                else {
+                    return None;
+                };
+                if at_ms < window.started_at_ms || at_ms > window.ended_at_ms {
+                    return None;
+                }
+                let wakeup =
+                    self.wakeups
+                        .wakeups()
+                        .into_iter()
+                        .find_map(|(source, _instruction)| match &source {
+                            agent_wakeup::WakeupSource::StrategyHalt { strategy, .. }
+                                if strategy == &strategy_id =>
+                            {
+                                Some(source)
+                            }
+                            _ => None,
+                        });
+                Some(SoakLimitBreach {
+                    at_ms,
+                    strategy_id,
+                    refusal,
+                    strategy_halted: true,
+                    wakeup: wakeup.unwrap_or_else(|| agent_wakeup::WakeupSource::External {
+                        event_type: "missing_strategy_halt_wakeup".to_string(),
+                        summary: "the risk halt had no matching typed wakeup".to_string(),
+                    }),
+                })
+            })
+            .collect()
     }
 
     pub fn mandate_snapshot(&self) -> Result<MandateSnapshot> {
@@ -184,6 +241,22 @@ impl TradingRuntime {
 
     pub fn review_turn_history(&self) -> Vec<ReviewTurnHistory> {
         self.review_history.lock().iter().rev().cloned().collect()
+    }
+
+    pub fn record_soak_review_turn(&self, session_id: &str, turn: SoakReviewTurn) -> bool {
+        if !self.is_review_session(session_id) {
+            return false;
+        }
+        let mut turns = self.soak_review_turns.lock();
+        if turns.len() == 1_000 {
+            turns.pop_front();
+        }
+        turns.push_back(turn);
+        true
+    }
+
+    pub fn soak_review_turns(&self) -> Vec<SoakReviewTurn> {
+        self.soak_review_turns.lock().iter().cloned().collect()
     }
 
     pub fn pending_review_wakeup_count(&self) -> usize {
