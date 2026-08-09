@@ -17835,6 +17835,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "trading_ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "paths",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "trash"
 version = "5.2.5"
 source = "git+https://github.com/zed-industries/trash-rs?rev=41c6c800d884a89351f3b8856d12894cccee261d#41c6c800d884a89351f3b8856d12894cccee261d"

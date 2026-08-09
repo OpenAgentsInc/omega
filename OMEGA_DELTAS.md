@@ -9962,3 +9962,21 @@ accessors preserve the values needed by account cards.
   `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in
   `omega_deltas`; the feature-off checks in `script/omega-checks`; and the
   endpoint declarations in `app_identity`.
+
+### OMEGA-DELTA-0244 — Trading profit has one venue-neutral ledger
+
+The platform owns a durable sats ledger independently of any venue plugin.
+Every financial event has balanced postings and a strategy attribution.
+Entries are sequenced, hash-chained, and protected from updates and deletes by
+SQLite triggers. Reads and writes verify the complete chain and stop on a gap
+or altered record.
+
+Venue balance snapshots check the ledger without changing it. A mismatch
+appends an attributed reconciliation alert with no postings, so observed venue
+state cannot silently rewrite profit. The read API reports profit, fees,
+funding, and worst drawdown per strategy and period. The default database lives
+beside the thread store and survives application restarts.
+
+- **Enforced by:** `trading_ledger` unit tests and
+  `trading_ledger_is_venue_neutral_append_only_and_reconciled` in
+  `omega_deltas`.

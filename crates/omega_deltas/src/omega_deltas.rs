@@ -214,6 +214,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0233",
     "OMEGA-DELTA-0234",
     "OMEGA-DELTA-0241",
+    "OMEGA-DELTA-0244",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29171,5 +29172,59 @@ mod tests {
                 "OMEGA-DELTA-0243: the LN Markets feature API lost `{required}`"
             );
         }
+    }
+
+    /// Trading profit is owned by a venue-neutral append-only ledger whose
+    /// sequence and hash-chain checks fail closed before every read or write.
+    #[test]
+    fn trading_ledger_is_venue_neutral_append_only_and_reconciled() {
+        let manifest = read_repository_file("Cargo.toml");
+        for required in [
+            "\"crates/trading_ledger\"",
+            "trading_ledger = { path = \"crates/trading_ledger\" }",
+        ] {
+            assert!(
+                manifest.contains(required),
+                "OMEGA-DELTA-0244: the platform ledger registration lost `{required}`"
+            );
+        }
+
+        let ledger = without_comments(&read_repository_file(
+            "crates/trading_ledger/src/trading_ledger.rs",
+        ));
+        for required in [
+            "pub enum LedgerEntryKind",
+            "Order",
+            "Fill",
+            "Fee",
+            "FundingSettlement",
+            "Deposit",
+            "Withdrawal",
+            "BalanceAdjustment",
+            "pub strategy_id: String",
+            "trading_ledger_entries_no_update",
+            "trading_ledger_entries_no_delete",
+            "trading ledger sequence gap",
+            "hash_entry",
+            "pub fn reconcile",
+            "ReconciliationMismatch",
+            "pub fn profit_report",
+            "profit_sats",
+            "fees_paid_sats",
+            "funding_collected_sats",
+            "worst_drawdown_sats",
+            "paths::data_dir().join(\"threads\").join(\"trading-ledger.db\")",
+            "sequence_gaps_fail_closed_for_reads_and_writes",
+            "reconciliation_mismatch_appends_an_alert_without_correcting_balance",
+        ] {
+            assert!(
+                ledger.contains(required),
+                "OMEGA-DELTA-0244: the venue-neutral ledger lost `{required}`"
+            );
+        }
+        assert!(
+            !ledger.contains("lnmarkets_client"),
+            "OMEGA-DELTA-0244: the platform ledger gained a venue dependency"
+        );
     }
 }
