@@ -14,6 +14,9 @@ path = "src/plugin_api.rs"
 [dependencies]
 agent_wakeup.workspace = true
 gpui.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

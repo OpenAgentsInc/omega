@@ -9451,6 +9451,7 @@ dependencies = [
  "lnmarkets_client",
  "lnmarkets_data",
  "log",
+ "plugin_api",
  "settings",
  "theme",
  "theme_settings",
@@ -13231,6 +13232,9 @@ version = "0.1.0"
 dependencies = [
  "agent_wakeup",
  "gpui",
+ "parking_lot",
+ "serde",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -16416,6 +16420,7 @@ dependencies = [
  "log",
  "parking_lot",
  "paths",
+ "plugin_api",
  "rusqlite",
  "serde",
  "serde_json",

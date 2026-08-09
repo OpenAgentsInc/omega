@@ -8,6 +8,9 @@ use credentials_provider::CredentialsProvider;
 use gpui::{App, AsyncApp, Task};
 use http_client::HttpClient;
 use language_model::LanguageModelToolResultContent;
+use plugin_api::{
+    VenueActionClass, VenueCapabilityError, VenueCapabilityGuard, VenueCapabilityStore,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,6 +35,14 @@ impl LnMarketsToolOutput {
 
     fn error(message: impl Into<String>) -> Self {
         Self(json!({ "error": message.into() }))
+    }
+
+    fn capability_refusal(error: VenueCapabilityError) -> Self {
+        Self(json!({
+            "error": error.to_string(),
+            "error_type": "venue_capability_refusal",
+            "refusal": error,
+        }))
     }
 }
 
@@ -602,9 +613,12 @@ pub enum LnMarketsSwapAsset {
 
 pub struct LnMarketsSwapTool {
     client: ToolClient,
+    capability_guard: VenueCapabilityGuard,
 }
 
-pub struct LnMarketsFeaturesTool;
+pub struct LnMarketsFeaturesTool {
+    capability_guard: VenueCapabilityGuard,
+}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LnMarketsFeaturesInput {}
@@ -639,6 +653,8 @@ impl AgentTool for LnMarketsFeaturesTool {
                 LnMarketsToolOutput::error("LN Markets feature collection has not started")
             })?;
             let health = collector.health();
+            let checked_at_ms = unix_timestamp_ms().unwrap_or(i64::MAX);
+            let capability_report = self.capability_guard.report(checked_at_ms);
             let features = collector
                 .features()
                 .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
@@ -653,6 +669,7 @@ impl AgentTool for LnMarketsFeaturesTool {
                 "schema": "omega.lnmarkets.features.v1",
                 "status": status,
                 "collector": health,
+                "venue_capabilities": capability_report,
                 "features": features,
             })))
         })
@@ -804,6 +821,7 @@ impl AgentTool for LnMarketsMandateTool {
 pub struct LnMarketsStrategyTool {
     client: ToolClient,
     session_id: String,
+    capability_guard: VenueCapabilityGuard,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -959,6 +977,16 @@ impl AgentTool for LnMarketsStrategyTool {
                 .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
             let runtime = runtime.map_err(LnMarketsToolOutput::error)?;
             let (action, strategy) = strategy_action_labels(&input);
+            let checked_at_ms = unix_timestamp_ms().unwrap_or(i64::MAX);
+            let capability_report = self.capability_guard.report(checked_at_ms);
+            if matches!(
+                &input,
+                LnMarketsStrategyInput::Start { .. } | LnMarketsStrategyInput::Adjust { .. }
+            ) {
+                self.capability_guard
+                    .require_effectful(checked_at_ms)
+                    .map_err(LnMarketsToolOutput::capability_refusal)?;
+            }
             emit_lnmarkets_strategy_update(
                 &event_stream,
                 &json!({
@@ -967,6 +995,7 @@ impl AgentTool for LnMarketsStrategyTool {
                     "phase": "in_progress",
                     "action": action,
                     "strategy": strategy,
+                    "venue_capabilities": capability_report,
                     "strategies": runtime.strategy_snapshots(),
                 }),
             );
@@ -1167,6 +1196,7 @@ impl AgentTool for LnMarketsStrategyTool {
                         "action": action,
                         "strategy": strategy,
                         "error": error.to_string(),
+                        "venue_capabilities": capability_report,
                         "strategies": runtime.strategy_snapshots(),
                     }),
                 );
@@ -1180,6 +1210,7 @@ impl AgentTool for LnMarketsStrategyTool {
                 "phase": "completed",
                 "action": action,
                 "strategy": strategy,
+                "venue_capabilities": capability_report,
                 "strategies": strategies,
             }));
             emit_lnmarkets_strategy_update(&event_stream, &output.0);
@@ -1306,6 +1337,10 @@ impl AgentTool for LnMarketsSwapTool {
                 .await
                 .map_err(|error| LnMarketsToolOutput::error(error.to_string()))?;
             let requested_network = Network::from(input.network);
+            let checked_at_ms = unix_timestamp_ms().unwrap_or(i64::MAX);
+            self.capability_guard
+                .require_effectful(checked_at_ms)
+                .map_err(LnMarketsToolOutput::capability_refusal)?;
             let (client, configured_network) = self
                 .client
                 .authenticated(cx)
@@ -1357,11 +1392,13 @@ pub fn agent_tools_registration() -> agent::PluginAgentTools {
             LnMarketsStrategyTool::NAME,
             LnMarketsMandateTool::NAME,
         ],
-        build: std::rc::Rc::new(|context, _cx| {
+        build: std::rc::Rc::new(|context, cx| {
+            let venue_capabilities = crate::venue_capability_store(cx).unwrap_or_default();
             let (account, market_data, swap, features, ledger, strategy, mandate) = lnmarkets_tools(
                 context.http_client.clone(),
                 context.credentials_provider.clone(),
                 context.session_id.clone(),
+                venue_capabilities,
             );
             vec![
                 account.erase(),
@@ -1380,6 +1417,7 @@ pub fn lnmarkets_tools(
     http_client: Arc<dyn HttpClient>,
     credentials_provider: Arc<dyn CredentialsProvider>,
     session_id: String,
+    venue_capabilities: VenueCapabilityStore,
 ) -> (
     LnMarketsAccountTool,
     LnMarketsMarketDataTool,
@@ -1407,8 +1445,19 @@ pub fn lnmarkets_tools(
                 http_client: http_client.clone(),
                 credentials_provider: credentials_provider.clone(),
             },
+            capability_guard: venue_capabilities.guard(
+                crate::MANIFEST.id,
+                VenueActionClass::AssetSwap,
+                crate::CAPABILITY_MAX_AGE_MS,
+            ),
         },
-        LnMarketsFeaturesTool,
+        LnMarketsFeaturesTool {
+            capability_guard: venue_capabilities.guard(
+                crate::MANIFEST.id,
+                VenueActionClass::StrategyExecution,
+                crate::CAPABILITY_MAX_AGE_MS,
+            ),
+        },
         LnMarketsLedgerTool,
         LnMarketsStrategyTool {
             client: ToolClient {
@@ -1416,6 +1465,11 @@ pub fn lnmarkets_tools(
                 credentials_provider,
             },
             session_id,
+            capability_guard: venue_capabilities.guard(
+                crate::MANIFEST.id,
+                VenueActionClass::StrategyExecution,
+                crate::CAPABILITY_MAX_AGE_MS,
+            ),
         },
         LnMarketsMandateTool,
     )

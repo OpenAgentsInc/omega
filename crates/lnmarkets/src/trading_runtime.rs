@@ -15,6 +15,7 @@ use lnmarkets_trading::{
     funding_carry_features, run_backtest,
 };
 use parking_lot::Mutex;
+use plugin_api::VenueCapabilityGuard;
 use serde::Serialize;
 use serde_json::Value;
 use trading_ledger::{LedgerQuery, LedgerStore, ProfitReport};
@@ -72,6 +73,7 @@ pub struct TradingRuntime {
     backtests: BacktestStore,
     lifecycle: MemoryLifecycleSink,
     wakeups: MemoryWakeupSink,
+    venue_capability_guard: VenueCapabilityGuard,
     review_history: Mutex<VecDeque<ReviewTurnHistory>>,
     soak_review_turns: Mutex<VecDeque<SoakReviewTurn>>,
     review_session_id: Mutex<Option<String>>,
@@ -82,13 +84,14 @@ pub struct TradingRuntime {
 }
 
 impl TradingRuntime {
-    pub fn open_default() -> Result<Self> {
+    pub fn open_default(venue_capability_guard: VenueCapabilityGuard) -> Result<Self> {
         Ok(Self {
             ledger: LedgerStore::open_default().context("could not open the trading ledger")?,
             mandate: MandateStore::open_default().context("could not open the trading mandate")?,
             backtests: BacktestStore::open_default().context("could not open backtest reports")?,
             lifecycle: MemoryLifecycleSink::default(),
             wakeups: MemoryWakeupSink::default(),
+            venue_capability_guard,
             review_history: Mutex::new(VecDeque::new()),
             soak_review_turns: Mutex::new(VecDeque::new()),
             review_session_id: Mutex::new(None),
@@ -448,6 +451,7 @@ impl TradingRuntime {
         at_ms: i64,
         cx: &AsyncApp,
     ) -> Result<()> {
+        self.require_strategy_capability(at_ms)?;
         require_signet(&client, config.network)?;
         self.require_strategy_mandate(
             REBALANCE_STRATEGY_ID,
@@ -463,6 +467,7 @@ impl TradingRuntime {
                     RebalanceToTargetProgram,
                     executor,
                     TradingNetwork::Signet,
+                    self.venue_capability_guard.clone(),
                     self.mandate.clone(),
                     self.backtests.clone(),
                     self.ledger.clone(),
@@ -485,6 +490,7 @@ impl TradingRuntime {
         config: RebalanceToTargetConfig,
         at_ms: i64,
     ) -> Result<()> {
+        self.require_strategy_capability(at_ms)?;
         if config.network != Network::Signet {
             bail!("automated LN Markets strategies are restricted to signet");
         }
@@ -520,6 +526,7 @@ impl TradingRuntime {
         at_ms: i64,
         cx: &AsyncApp,
     ) -> Result<()> {
+        self.require_strategy_capability(at_ms)?;
         require_signet(&client, config.network)?;
         self.require_strategy_mandate(
             FUNDING_STRATEGY_ID,
@@ -535,6 +542,7 @@ impl TradingRuntime {
                     FundingCarryProgram,
                     executor,
                     TradingNetwork::Signet,
+                    self.venue_capability_guard.clone(),
                     self.mandate.clone(),
                     self.backtests.clone(),
                     self.ledger.clone(),
@@ -556,6 +564,7 @@ impl TradingRuntime {
     }
 
     pub async fn adjust_funding(&self, config: FundingCarryConfig, at_ms: i64) -> Result<()> {
+        self.require_strategy_capability(at_ms)?;
         if config.network != Network::Signet {
             bail!("automated LN Markets strategies are restricted to signet");
         }
@@ -594,6 +603,7 @@ impl TradingRuntime {
         at_ms: i64,
         cx: &AsyncApp,
     ) -> Result<()> {
+        self.require_strategy_capability(at_ms)?;
         require_signet(&client, config.network)?;
         self.require_strategy_mandate(
             THRESHOLD_SWING_STRATEGY_ID,
@@ -609,6 +619,7 @@ impl TradingRuntime {
                     ThresholdSwingProgram,
                     executor,
                     TradingNetwork::Signet,
+                    self.venue_capability_guard.clone(),
                     self.mandate.clone(),
                     self.backtests.clone(),
                     self.ledger.clone(),
@@ -631,6 +642,7 @@ impl TradingRuntime {
         config: ThresholdSwingConfig,
         at_ms: i64,
     ) -> Result<()> {
+        self.require_strategy_capability(at_ms)?;
         if config.network != Network::Signet {
             bail!("automated LN Markets strategies are restricted to signet");
         }
@@ -732,6 +744,11 @@ impl TradingRuntime {
         } else {
             bail!("LN Markets strategy tick failed: {}", errors.join("; "))
         }
+    }
+
+    fn require_strategy_capability(&self, at_ms: i64) -> Result<()> {
+        self.venue_capability_guard.require_effectful(at_ms)?;
+        Ok(())
     }
 
     fn strategy_snapshot(&self, strategy_id: &str) -> StrategyRuntimeSnapshot {
@@ -910,6 +927,11 @@ mod tests {
         FUNDING_SETTLEMENT_TOPIC, MarketDataStore, ORACLE_INDEX_TOPIC, STREAM_BUCKETS_TOPIC,
     };
     use lnmarkets_trading::{BacktestGate as _, RebalanceCostMeasurement};
+    use plugin_api::{
+        ObservedVenueMode, ProbedVenueAssumption, VenueAccountMode, VenueActionCapability,
+        VenueActionClass, VenueActionStatus, VenueCapabilities, VenueCapabilityStore,
+        VenueMarginMode,
+    };
     use serde_json::json;
     use trading_mandate::{ReviewCadence, TradingMandate, TradingNetwork};
 
@@ -928,12 +950,38 @@ mod tests {
     }
 
     fn test_runtime(backtests: BacktestStore) -> TradingRuntime {
+        let venue_capability_store = VenueCapabilityStore::default();
+        venue_capability_store
+            .publish(VenueCapabilities {
+                venue_id: LNMARKETS_VENUE.to_string(),
+                account_mode: ProbedVenueAssumption::new(
+                    ObservedVenueMode::known(VenueAccountMode::SingleAccount, "single_account"),
+                    0,
+                ),
+                margin_mode: ProbedVenueAssumption::new(
+                    ObservedVenueMode::known(VenueMarginMode::VenueManaged, "venue_managed"),
+                    0,
+                ),
+                actions: vec![ProbedVenueAssumption::new(
+                    VenueActionCapability {
+                        action_class: VenueActionClass::StrategyExecution,
+                        status: VenueActionStatus::Supported,
+                    },
+                    0,
+                )],
+            })
+            .expect("venue capabilities");
         TradingRuntime {
             ledger: LedgerStore::in_memory().expect("ledger"),
             mandate: MandateStore::in_memory().expect("mandate"),
             backtests,
             lifecycle: MemoryLifecycleSink::default(),
             wakeups: MemoryWakeupSink::default(),
+            venue_capability_guard: venue_capability_store.guard(
+                LNMARKETS_VENUE,
+                VenueActionClass::StrategyExecution,
+                i64::MAX,
+            ),
             review_history: Mutex::new(VecDeque::new()),
             soak_review_turns: Mutex::new(VecDeque::new()),
             review_session_id: Mutex::new(None),

@@ -8,6 +8,7 @@ use futures::{
     channel::{mpsc, oneshot},
 };
 use parking_lot::Mutex;
+use plugin_api::{VenueCapabilityError, VenueCapabilityGuard};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use trading_ledger::{AssetId, LedgerEntryDraft, LedgerEntryKind, LedgerQuery, LedgerStore};
@@ -280,6 +281,9 @@ pub enum StrategyHaltReason {
     VenueError {
         message: String,
     },
+    VenueCapability {
+        refusal: VenueCapabilityError,
+    },
     LedgerError {
         message: String,
     },
@@ -303,6 +307,9 @@ impl StrategyHaltReason {
                 "cancel {intent_id} of venue order {venue_order_id} has an unknown outcome: {message}"
             ),
             Self::VenueError { message } => format!("venue operation failed: {message}"),
+            Self::VenueCapability { refusal } => {
+                format!("venue capability check refused execution: {refusal}")
+            }
             Self::LedgerError { message } => format!("ledger operation failed: {message}"),
         }
     }
@@ -450,6 +457,7 @@ where
     ledger: LedgerStore,
     lifecycle: Arc<dyn LifecycleSink>,
     wakeups: Arc<dyn WakeupSink>,
+    venue_capability_guard: VenueCapabilityGuard,
     status: StrategyStatus,
     config: Option<Program::Config>,
     state: Option<Program::State>,
@@ -464,6 +472,7 @@ where
         program: Program,
         executor: Executor,
         network: TradingNetwork,
+        venue_capability_guard: VenueCapabilityGuard,
         mandate: impl MandateAuthority,
         backtests: impl BacktestGate,
         ledger: LedgerStore,
@@ -479,10 +488,16 @@ where
             ledger,
             lifecycle,
             wakeups,
+            venue_capability_guard,
             status: StrategyStatus::Idle,
             config: None,
             state: None,
         }
+    }
+
+    pub fn with_venue_capability_guard(mut self, guard: VenueCapabilityGuard) -> Self {
+        self.venue_capability_guard = guard;
+        self
     }
 
     pub fn status(&self) -> &StrategyStatus {
@@ -498,6 +513,7 @@ where
         if matches!(self.status, StrategyStatus::Running { .. }) {
             bail!("strategy is already running");
         }
+        self.require_venue_capability(at_ms)?;
         self.program.validate_config(&config)?;
         let approval = self.require_backtest(&config)?;
         let state = self.program.initial_state(&config)?;
@@ -554,6 +570,7 @@ where
         if !matches!(self.status, StrategyStatus::Running { .. }) {
             bail!("strategy is not running");
         }
+        self.require_venue_capability(tick.occurred_at_ms)?;
         let config = self
             .config
             .as_ref()
@@ -925,6 +942,13 @@ where
         )
     }
 
+    fn require_venue_capability(&mut self, at_ms: i64) -> Result<()> {
+        if let Err(refusal) = self.venue_capability_guard.require_effectful(at_ms) {
+            return self.fail(at_ms, StrategyHaltReason::VenueCapability { refusal });
+        }
+        Ok(())
+    }
+
     fn fail<T>(&mut self, at_ms: i64, reason: StrategyHaltReason) -> Result<T> {
         let message = reason.summary();
         self.halt_inner(at_ms, reason);
@@ -1065,6 +1089,11 @@ mod tests {
 
     use super::*;
     use futures::executor::block_on;
+    use plugin_api::{
+        ObservedVenueMode, ProbedVenueAssumption, VenueAccountMode, VenueActionCapability,
+        VenueActionClass, VenueActionStatus, VenueCapabilities, VenueCapabilityStore,
+        VenueMarginMode,
+    };
     use serde_json::json;
     use trading_ledger::{LedgerAccount, LedgerPosting};
 
@@ -1421,12 +1450,38 @@ mod tests {
             TestProgram,
             executor,
             TradingNetwork::Signet,
+            test_capability_guard(),
             mandate,
             TestBacktestGate { passing: true },
             ledger,
             Arc::new(lifecycle),
             Arc::new(wakeups),
         )
+    }
+
+    fn test_capability_guard() -> VenueCapabilityGuard {
+        let store = VenueCapabilityStore::default();
+        store
+            .publish(VenueCapabilities {
+                venue_id: "test_venue".to_string(),
+                account_mode: ProbedVenueAssumption::new(
+                    ObservedVenueMode::known(VenueAccountMode::SingleAccount, "single"),
+                    0,
+                ),
+                margin_mode: ProbedVenueAssumption::new(
+                    ObservedVenueMode::known(VenueMarginMode::Cross, "cross"),
+                    0,
+                ),
+                actions: vec![ProbedVenueAssumption::new(
+                    VenueActionCapability {
+                        action_class: VenueActionClass::StrategyExecution,
+                        status: VenueActionStatus::Supported,
+                    },
+                    0,
+                )],
+            })
+            .expect("publish test capabilities");
+        store.guard("test_venue", VenueActionClass::StrategyExecution, i64::MAX)
     }
 
     #[test]
@@ -1452,6 +1507,7 @@ mod tests {
             TestProgram,
             executor.clone(),
             TradingNetwork::Signet,
+            test_capability_guard(),
             TestMandateAuthority::new(2),
             TestBacktestGate { passing: false },
             LedgerStore::in_memory().expect("ledger"),
@@ -1465,6 +1521,60 @@ mod tests {
         assert!(error.to_string().contains("no passing backtest"));
         assert!(matches!(engine.status(), StrategyStatus::Idle));
         assert_eq!(executor.calls(), 0);
+    }
+
+    #[test]
+    fn unknown_venue_capability_halts_and_wakes_before_start() {
+        let store = VenueCapabilityStore::default();
+        store
+            .publish(VenueCapabilities {
+                venue_id: "test_venue".to_string(),
+                account_mode: ProbedVenueAssumption::new(
+                    ObservedVenueMode::known(VenueAccountMode::SingleAccount, "single"),
+                    1,
+                ),
+                margin_mode: ProbedVenueAssumption::new(
+                    ObservedVenueMode::<VenueMarginMode>::unknown("mystery"),
+                    1,
+                ),
+                actions: vec![ProbedVenueAssumption::new(
+                    VenueActionCapability {
+                        action_class: VenueActionClass::StrategyExecution,
+                        status: VenueActionStatus::Supported,
+                    },
+                    1,
+                )],
+            })
+            .expect("publish capabilities");
+        let wakeups = MemoryWakeupSink::default();
+        let mut engine = engine(
+            2,
+            TestExecutor::successful(),
+            LedgerStore::in_memory().expect("ledger"),
+            MemoryLifecycleSink::default(),
+            wakeups.clone(),
+        )
+        .with_venue_capability_guard(store.guard(
+            "test_venue",
+            VenueActionClass::StrategyExecution,
+            1_000,
+        ));
+
+        let error = engine
+            .start(TestConfig { protected: true }, 1)
+            .expect_err("unknown capability must fail closed");
+        assert!(error.to_string().contains("margin mode is unknown"));
+        assert!(matches!(
+            engine.status(),
+            StrategyStatus::Halted {
+                reason: StrategyHaltReason::VenueCapability { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            wakeups.wakeups().as_slice(),
+            [(WakeupSource::StrategyHalt { strategy, .. }, _)] if strategy == "test_strategy"
+        ));
     }
 
     #[test]

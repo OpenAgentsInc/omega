@@ -9,6 +9,7 @@ use gpui::{
     ScrollHandle, Task, WeakEntity, Window, actions, px,
 };
 use lnmarkets_data::{CollectorHealth, CollectorStatus};
+use plugin_api::{VenueActionStatus, VenueCapabilityReport, VenueCapabilityVerificationStatus};
 use trading_ledger::ProfitReport;
 use trading_mandate::{MandateSnapshot, ReviewCadence};
 use ui::{Divider, Indicator, prelude::*};
@@ -62,6 +63,7 @@ pub struct OperatorBacktestSnapshot {
 pub struct OperatorConsoleSnapshot {
     pub generated_at_ms: i64,
     pub collector: Option<CollectorHealth>,
+    pub venue_capabilities: Option<VenueCapabilityReport>,
     pub strategies: Vec<OperatorStrategySnapshot>,
     pub backtests: Vec<OperatorBacktestSnapshot>,
     pub ledger: Option<ProfitReport>,
@@ -77,6 +79,7 @@ impl OperatorConsoleSnapshot {
         Self {
             generated_at_ms,
             collector: None,
+            venue_capabilities: None,
             strategies: Vec::new(),
             backtests: Vec::new(),
             ledger: None,
@@ -311,6 +314,89 @@ impl LnMarketsOperatorPanel {
                 })
                 .children(strategies)
                 .into_any_element(),
+        )
+    }
+
+    fn render_venue_capabilities(&self) -> gpui::AnyElement {
+        let content = match &self.snapshot.venue_capabilities {
+            Some(report) => {
+                let verification = &report.verification;
+                let verified = verification.status == VenueCapabilityVerificationStatus::Verified;
+                let status = if verified { "verified" } else { "unverified" };
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(Label::new(status).color(if verified {
+                                Color::Success
+                            } else {
+                                Color::Warning
+                            }))
+                            .when_some(verification.newest_probed_at_ms, |this, probed_at_ms| {
+                                this.child(
+                                    Label::new(format!(
+                                        "Probed {}",
+                                        format_timestamp(probed_at_ms)
+                                    ))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                                )
+                            }),
+                    )
+                    .when(verification.stale, |this| {
+                        this.child(
+                            Label::new("Capability probe is stale")
+                                .size(LabelSize::Small)
+                                .color(Color::Warning),
+                        )
+                    })
+                    .children(verification.reasons.iter().map(|reason| {
+                        Label::new(reason.clone())
+                            .size(LabelSize::Small)
+                            .color(Color::Warning)
+                    }))
+                    .when_some(report.capabilities.as_ref(), |this, capabilities| {
+                        this.child(
+                            Label::new(format!(
+                                "Account {:?} ({}) · margin {:?} ({})",
+                                capabilities.account_mode.value.typed,
+                                capabilities.account_mode.value.raw,
+                                capabilities.margin_mode.value.typed,
+                                capabilities.margin_mode.value.raw,
+                            ))
+                            .size(LabelSize::Small),
+                        )
+                        .children(capabilities.actions.iter().map(|action| {
+                            let status = match &action.value.status {
+                                VenueActionStatus::Supported => "supported".to_string(),
+                                VenueActionStatus::Disabled { reason } => {
+                                    format!("disabled: {reason}")
+                                }
+                                VenueActionStatus::Unknown { raw } => {
+                                    format!("unknown: {raw}")
+                                }
+                            };
+                            Label::new(format!(
+                                "{} {status} · probed {}",
+                                action.value.action_class,
+                                format_timestamp(action.probed_at_ms),
+                            ))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                        }))
+                    })
+                    .into_any_element()
+            }
+            None => Label::new("Venue capabilities are unavailable")
+                .size(LabelSize::Small)
+                .color(Color::Warning)
+                .into_any_element(),
+        };
+        section(
+            "lnmarkets.operator.capabilities",
+            "Venue capabilities",
+            content,
         )
     }
 
@@ -562,6 +648,7 @@ impl Render for LnMarketsOperatorPanel {
                 this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
             })
             .child(self.render_collector())
+            .child(self.render_venue_capabilities())
             .child(self.render_strategies())
             .child(self.render_backtests())
             .child(self.render_ledger())
@@ -751,6 +838,7 @@ mod tests {
                     stored_events: 100,
                     last_error: None,
                 }),
+                venue_capabilities: None,
                 strategies: vec![OperatorStrategySnapshot {
                     strategy_id: "funding_carry".into(),
                     status: "running".into(),
@@ -830,6 +918,7 @@ mod tests {
         for selector in [
             "lnmarkets.operator.panel",
             "lnmarkets.operator.collector",
+            "lnmarkets.operator.capabilities",
             "lnmarkets.operator.strategies",
             "lnmarkets.operator.strategy.funding_carry",
             "lnmarkets.operator.backtests",

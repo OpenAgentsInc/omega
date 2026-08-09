@@ -11,7 +11,9 @@ use lnmarkets_data::{Collector, CollectorConfig, CollectorHandle, MarketDataStor
 use parking_lot::Mutex;
 use plugin_api::{
     BackgroundServiceRegistration, CardSchemaRegistration, HostDeclaration, Maturity,
-    PluginManifest, PluginRegistry, Protocol, SettingsPageRegistration,
+    ObservedVenueMode, PluginManifest, PluginRegistry, ProbedVenueAssumption, Protocol,
+    SettingsPageRegistration, VenueAccountMode, VenueActionCapability, VenueActionClass,
+    VenueActionStatus, VenueCapabilities, VenueCapabilityStore, VenueMarginMode,
 };
 
 mod agent_tools;
@@ -57,6 +59,7 @@ pub use trading_mandate::{
 };
 
 const MAX_TRANSPORT_RESPONSE_BYTES: u64 = 1_048_577;
+pub(crate) const CAPABILITY_MAX_AGE_MS: i64 = 15_000;
 
 pub const MANIFEST: PluginManifest = PluginManifest {
     id: "lnmarkets",
@@ -111,7 +114,18 @@ impl plugin_api::OmegaPlugin for LnMarketsPlugin {
     }
 
     fn register(&self, registry: &mut PluginRegistry, cx: &mut App) {
-        start_market_data_service(cx.http_client(), cx);
+        let venue_capabilities = registry.venue_capabilities();
+        match unix_now_ms() {
+            Ok(probed_at_ms) => {
+                if let Err(error) = refresh_venue_capabilities(&venue_capabilities, probed_at_ms) {
+                    log::error!("could not publish LN Markets venue capabilities: {error}");
+                }
+            }
+            Err(error) => {
+                log::error!("could not read the clock for LN Markets capabilities: {error}")
+            }
+        }
+        start_market_data_service(cx.http_client(), venue_capabilities, cx);
         registry.add_background_service(BackgroundServiceRegistration {
             plugin_id: MANIFEST.id,
             service_id: "lnmarkets_market_data_collector",
@@ -189,19 +203,29 @@ fn operator_panel_loader() -> workspace::PluginPanelLoader {
 struct LnMarketsGlobal {
     collector: Arc<Mutex<Option<CollectorHandle>>>,
     trading_runtime: Result<Arc<TradingRuntime>, String>,
+    venue_capabilities: VenueCapabilityStore,
     _collector_task: Task<()>,
     _strategy_tick_task: Task<()>,
 }
 
 impl Global for LnMarketsGlobal {}
 
-fn start_market_data_service(http_client: Arc<dyn HttpClient>, cx: &mut App) {
+fn start_market_data_service(
+    http_client: Arc<dyn HttpClient>,
+    venue_capabilities: VenueCapabilityStore,
+    cx: &mut App,
+) {
     let _registrations = (
         lnmarkets_data::REGISTRATION,
         lnmarkets_trading::REGISTRATION,
     );
     let collector = Arc::new(Mutex::new(None));
-    let trading_runtime = TradingRuntime::open_default()
+    let strategy_capability_guard = venue_capabilities.guard(
+        MANIFEST.id,
+        VenueActionClass::StrategyExecution,
+        CAPABILITY_MAX_AGE_MS,
+    );
+    let trading_runtime = TradingRuntime::open_default(strategy_capability_guard)
         .map(Arc::new)
         .map_err(|error| format!("could not open the LN Markets trading runtime: {error:#}"));
     if let Err(error) = &trading_runtime {
@@ -268,6 +292,7 @@ fn start_market_data_service(http_client: Arc<dyn HttpClient>, cx: &mut App) {
     let strategy_tick_task = cx.background_spawn({
         let collector = collector.clone();
         let trading_runtime = trading_runtime.clone();
+        let venue_capabilities = venue_capabilities.clone();
         let executor = cx.background_executor().clone();
         async move {
             loop {
@@ -285,6 +310,9 @@ fn start_market_data_service(http_client: Arc<dyn HttpClient>, cx: &mut App) {
                         continue;
                     }
                 };
+                if let Err(error) = refresh_venue_capabilities(&venue_capabilities, at_ms) {
+                    log::warn!("could not refresh LN Markets venue capabilities: {error}");
+                }
                 if let Err(error) = runtime.process_collected_tick(&collector, at_ms).await {
                     log::warn!("LN Markets strategy tick was not processed: {error:#}");
                 }
@@ -294,10 +322,48 @@ fn start_market_data_service(http_client: Arc<dyn HttpClient>, cx: &mut App) {
     cx.set_global(LnMarketsGlobal {
         collector,
         trading_runtime,
+        venue_capabilities,
         _collector_task: collector_task,
         _strategy_tick_task: strategy_tick_task,
     });
     lnmarkets_ui::init_operator_panel(cx);
+}
+
+fn unix_now_ms() -> Result<i64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before the Unix epoch: {error}"))?;
+    i64::try_from(elapsed.as_millis()).map_err(|_| "system timestamp overflowed i64".to_string())
+}
+
+fn refresh_venue_capabilities(
+    store: &VenueCapabilityStore,
+    probed_at_ms: i64,
+) -> Result<(), plugin_api::VenueCapabilityPublicationError> {
+    let action = |action_class| {
+        ProbedVenueAssumption::new(
+            VenueActionCapability {
+                action_class,
+                status: VenueActionStatus::Supported,
+            },
+            probed_at_ms,
+        )
+    };
+    store.publish(VenueCapabilities {
+        venue_id: MANIFEST.id.to_string(),
+        account_mode: ProbedVenueAssumption::new(
+            ObservedVenueMode::known(VenueAccountMode::SingleAccount, "single_account"),
+            probed_at_ms,
+        ),
+        margin_mode: ProbedVenueAssumption::new(
+            ObservedVenueMode::known(VenueMarginMode::VenueManaged, "venue_managed"),
+            probed_at_ms,
+        ),
+        actions: vec![
+            action(VenueActionClass::AssetSwap),
+            action(VenueActionClass::StrategyExecution),
+        ],
+    })
 }
 
 pub fn collector(cx: &App) -> Option<CollectorHandle> {
@@ -310,6 +376,11 @@ pub fn trading_runtime(cx: &App) -> Result<Arc<TradingRuntime>, String> {
         .ok_or_else(|| "LN Markets is not initialized".to_string())?
         .trading_runtime
         .clone()
+}
+
+pub fn venue_capability_store(cx: &App) -> Option<VenueCapabilityStore> {
+    cx.try_global::<LnMarketsGlobal>()
+        .map(|plugin| plugin.venue_capabilities.clone())
 }
 
 pub fn portfolio_review_instruction(
@@ -389,23 +460,29 @@ pub fn operator_console_source(cx: &App) -> Result<Arc<dyn OperatorConsoleSource
     Ok(Arc::new(PluginOperatorConsoleSource {
         collector: plugin.collector.clone(),
         trading_runtime: plugin.trading_runtime.clone(),
+        venue_capabilities: plugin.venue_capabilities.clone(),
     }))
 }
 
 struct PluginOperatorConsoleSource {
     collector: Arc<Mutex<Option<CollectorHandle>>>,
     trading_runtime: Result<Arc<TradingRuntime>, String>,
+    venue_capabilities: VenueCapabilityStore,
 }
 
 impl OperatorConsoleSource for PluginOperatorConsoleSource {
     fn snapshot(&self, now_ms: i64) -> OperatorConsoleSnapshot {
         let collector = self.collector.lock().clone();
         let collector_health = collector.as_ref().map(CollectorHandle::health);
+        let venue_capabilities =
+            self.venue_capabilities
+                .report(MANIFEST.id, now_ms, CAPABILITY_MAX_AGE_MS);
         let runtime = match &self.trading_runtime {
             Ok(runtime) => runtime,
             Err(error) => {
                 let mut snapshot = OperatorConsoleSnapshot::unavailable(now_ms, error.clone());
                 snapshot.collector = collector_health;
+                snapshot.venue_capabilities = Some(venue_capabilities);
                 return snapshot;
             }
         };
@@ -426,6 +503,7 @@ impl OperatorConsoleSource for PluginOperatorConsoleSource {
                         format!("Could not read the trading runtime: {error:#}"),
                     );
                     snapshot.collector = collector_health;
+                    snapshot.venue_capabilities = Some(venue_capabilities);
                     return snapshot;
                 }
             };
@@ -486,6 +564,7 @@ impl OperatorConsoleSource for PluginOperatorConsoleSource {
         OperatorConsoleSnapshot {
             generated_at_ms: now_ms,
             collector: collector_health,
+            venue_capabilities: Some(venue_capabilities),
             strategies,
             backtests,
             ledger: Some(review.daily_report),
@@ -546,6 +625,33 @@ impl HttpTransport for OmegaHttpTransport {
             Ok(http::Response::from_parts(parts, bytes))
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_capability_surface_is_complete_and_fresh() {
+        let store = VenueCapabilityStore::default();
+        refresh_venue_capabilities(&store, 1_000).expect("publish capabilities");
+
+        let report = store.report(MANIFEST.id, 1_001, CAPABILITY_MAX_AGE_MS);
+        assert_eq!(
+            report.verification.status,
+            plugin_api::VenueCapabilityVerificationStatus::Verified
+        );
+        assert!(!report.verification.stale);
+        for action_class in [
+            VenueActionClass::AssetSwap,
+            VenueActionClass::StrategyExecution,
+        ] {
+            store
+                .guard(MANIFEST.id, action_class, CAPABILITY_MAX_AGE_MS)
+                .require_effectful(1_001)
+                .expect("reference action is supported");
+        }
     }
 }
 

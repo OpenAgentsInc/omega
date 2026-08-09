@@ -10334,3 +10334,26 @@ inversion.
   `builtin_plugin_manifests_declare_their_hosts_with_purposes` test in
   `crates/omega`, `plugin_identifiers_stay_out_of_core_crates` in
   `omega_deltas`, and the feature-off checks in `script/omega-checks`.
+
+### OMEGA-DELTA-0261 — Effectful venue behavior requires fresh, known capabilities
+
+Every plugin publishes a typed venue-capability snapshot through
+`plugin_api`. Account and margin modes retain the venue's raw observation and
+carry a platform-known interpretation only when one exists. Every mode and
+action-class assumption carries its own probe timestamp. A missing, unknown,
+disabled, or stale assumption returns a typed refusal before an effectful tool
+or strategy may act; read-only status remains available and labels the
+snapshot unverified.
+
+The strategy engine accepts the same capability guard as plugins and turns a
+refusal into a dedicated halt reason plus the existing typed operator wakeup.
+LN Markets is the reference adoption: its single-account, venue-managed mode
+and swap/strategy action set are published at service start and refreshed
+immediately before reconciliation. The feature/status tool and operator panel
+show the observed modes, action classes, verification state, freshness, and
+probe timestamps. Manual strategy halts remain available because they only
+reduce risk.
+
+- **Enforced by:** `plugin_api`, `strategy_engine`, `lnmarkets`, and
+  `lnmarkets_ui` unit tests and
+  `venue_capabilities_are_probed_typed_and_fail_closed` in `omega_deltas`.

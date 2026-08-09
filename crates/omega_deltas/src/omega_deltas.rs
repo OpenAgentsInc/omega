@@ -231,6 +231,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0258",
     "OMEGA-DELTA-0259",
     "OMEGA-DELTA-0260",
+    "OMEGA-DELTA-0261",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30411,5 +30412,82 @@ mod tests {
                 "OMEGA-DELTA-0260: the plugin contract lost `{required}`"
             );
         }
+    }
+
+    /// Effectful plugin tools and strategies share one typed, fresh venue
+    /// capability handshake. Unknown modes fail closed, the engine halts and
+    /// wakes, and operators can still inspect explicitly unverified evidence.
+    #[test]
+    fn venue_capabilities_are_probed_typed_and_fail_closed() {
+        let plugin_api =
+            without_comments(&read_repository_file("crates/plugin_api/src/plugin_api.rs"));
+        for required in [
+            "pub enum VenueAccountMode",
+            "pub enum VenueMarginMode",
+            "pub enum VenueActionClass",
+            "pub struct ProbedVenueAssumption",
+            "pub struct VenueCapabilities",
+            "pub struct VenueCapabilityReport",
+            "pub enum VenueCapabilityError",
+            "UnknownAccountMode",
+            "UnknownMarginMode",
+            "UnknownAction",
+            "StaleProbe",
+            "pub fn require_effectful",
+            "effectful_guard_refuses_unknown_account_mode",
+            "stale_probe_is_labeled_and_refused",
+        ] {
+            assert!(
+                plugin_api.contains(required),
+                "OMEGA-DELTA-0261: the capability contract lost `{required}`"
+            );
+        }
+
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "VenueCapability {",
+            "with_venue_capability_guard",
+            "self.require_venue_capability(at_ms)?",
+            "unknown_venue_capability_halts_and_wakes_before_start",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0261: the strategy fail-closed path lost `{required}`"
+            );
+        }
+
+        let plugin = without_comments(&read_repository_file("crates/lnmarkets/src/lnmarkets.rs"));
+        for required in [
+            "refresh_venue_capabilities",
+            "VenueAccountMode::SingleAccount",
+            "VenueMarginMode::VenueManaged",
+            "VenueActionClass::AssetSwap",
+            "VenueActionClass::StrategyExecution",
+            "CAPABILITY_MAX_AGE_MS",
+        ] {
+            assert!(
+                plugin.contains(required),
+                "OMEGA-DELTA-0261: the reference plugin adoption lost `{required}`"
+            );
+        }
+
+        let tools = without_comments(&read_repository_file("crates/lnmarkets/src/agent_tools.rs"));
+        assert!(
+            tools.contains("venue_capability_refusal")
+                && tools.contains("venue_capabilities")
+                && tools.contains("require_effectful"),
+            "OMEGA-DELTA-0261: agent tools stopped refusing or reporting capabilities"
+        );
+        let operator = without_comments(&read_repository_file(
+            "crates/lnmarkets_ui/src/operator_panel.rs",
+        ));
+        assert!(
+            operator.contains("render_venue_capabilities")
+                && operator.contains("Capability probe is stale")
+                && operator.contains("Probed {}"),
+            "OMEGA-DELTA-0261: operator capability evidence disappeared"
+        );
     }
 }
