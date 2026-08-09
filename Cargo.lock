@@ -296,6 +296,7 @@ dependencies = [
  "cloud_llm_client",
  "collections",
  "context_server",
+ "credentials_provider",
  "ctor",
  "db",
  "editor",
@@ -317,6 +318,7 @@ dependencies = [
  "language",
  "language_model",
  "language_models",
+ "lnmarkets_client",
  "log",
  "lsp",
  "omega_agent_detect",
@@ -360,6 +362,7 @@ dependencies = [
  "uuid",
  "watch",
  "web_search",
+ "zed_credentials_provider",
  "zed_env_vars",
  "zlog",
  "zstd",
@@ -9291,6 +9294,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnmarkets_client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-io",
+ "base64 0.22.1",
+ "futures 0.3.32",
+ "hmac",
+ "http_client",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2 0.10.9",
+ "smol",
+ "thiserror 2.0.17",
+ "zeroize",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15693,6 +15716,7 @@ dependencies = [
  "component",
  "context_server",
  "cpal",
+ "credentials_provider",
  "editor",
  "extension",
  "extension_host",
@@ -15707,6 +15731,7 @@ dependencies = [
  "itertools 0.14.0",
  "language",
  "language_model",
+ "lnmarkets_client",
  "log",
  "menu",
  "omega_actions",

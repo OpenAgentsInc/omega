@@ -35,6 +35,7 @@ cloud_api_types.workspace = true
 cloud_llm_client.workspace = true
 collections.workspace = true
 context_server.workspace = true
+credentials_provider.workspace = true
 db.workspace = true
 feature_flags.workspace = true
 fs.workspace = true
@@ -51,6 +52,7 @@ itertools.workspace = true
 language.workspace = true
 language_model.workspace = true
 language_models.workspace = true
+lnmarkets_client.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
@@ -82,6 +84,7 @@ uuid.workspace = true
 watch.workspace = true
 web_search.workspace = true
 zed_env_vars.workspace = true
+zed_credentials_provider.workspace = true
 zstd.workspace = true
 
 # Used only on Windows to resolve the running release channel/version so the WSL

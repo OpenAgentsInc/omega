@@ -1,0 +1,31 @@
+[package]
+name = "lnmarkets_client"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lnmarkets_client.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-io.workspace = true
+base64.workspace = true
+futures.workspace = true
+hmac.workspace = true
+http_client.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+sha2.workspace = true
+smol.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+http_client = { workspace = true, features = ["test-support"] }

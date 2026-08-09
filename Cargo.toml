@@ -98,6 +98,7 @@ members = [
     "crates/language_models_cloud",
     "crates/language_tools",
     "crates/languages",
+    "crates/lnmarkets_client",
     "crates/llama_cpp",
     "crates/lmstudio",
     "crates/lsp",
@@ -359,6 +360,7 @@ language_models = { path = "crates/language_models" }
 language_models_cloud = { path = "crates/language_models_cloud" }
 language_tools = { path = "crates/language_tools" }
 languages = { path = "crates/languages" }
+lnmarkets_client = { path = "crates/lnmarkets_client" }
 llama_cpp = { path = "crates/llama_cpp" }
 lmstudio = { path = "crates/lmstudio" }
 lsp = { path = "crates/lsp" }

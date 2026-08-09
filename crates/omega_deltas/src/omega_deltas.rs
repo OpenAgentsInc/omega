@@ -28893,4 +28893,70 @@ mod tests {
             );
         }
     }
+
+    /// OMEGA-DELTA-0241. The owner-held LN Markets credential stays in Omega,
+    /// and only signet swap effects can leave the direct v3 client.
+    #[test]
+    fn ln_markets_uses_one_local_direct_fail_closed_client() {
+        let client = without_comments(&read_repository_file(
+            "crates/lnmarkets_client/src/lnmarkets_client.rs",
+        ));
+        for required in [
+            "api.signet.lnmarkets.com/v3",
+            "api.lnmarkets.com/v3",
+            "LNM-ACCESS-SIGNATURE",
+            "rest_signature",
+            "CREDENTIAL_STORAGE_URL",
+            "authentication_failure_is_not_retried",
+        ] {
+            assert!(
+                client.contains(required),
+                "OMEGA-DELTA-0241: the direct v3 client lost `{required}`"
+            );
+        }
+
+        let tools = without_comments(&read_repository_file(
+            "crates/agent/src/tools/lnmarkets_tools.rs",
+        ));
+        for required in [
+            "lnmarkets_account",
+            "lnmarkets_market_data",
+            "lnmarkets_swap",
+            "if network == Network::Mainnet",
+            "No request was sent",
+        ] {
+            assert!(
+                tools.contains(required),
+                "OMEGA-DELTA-0241: the LN Markets tool boundary lost `{required}`"
+            );
+        }
+
+        let settings = without_comments(&read_repository_file(
+            "crates/settings_ui/src/pages/lnmarkets_settings_page.rs",
+        ));
+        for required in [
+            "Save & Test",
+            "write_credentials(CREDENTIAL_STORAGE_URL",
+            "LnMarketsClient::authenticated",
+        ] {
+            assert!(
+                settings.contains(required),
+                "OMEGA-DELTA-0241: the private credential handshake lost `{required}`"
+            );
+        }
+
+        let allowlist =
+            read_repository_file("crates/app_identity/fixtures/endpoint_allowlist.json");
+        for host in [
+            "api.signet.lnmarkets.com",
+            "api.lnmarkets.com",
+            "stream.signet.lnmarkets.com",
+            "stream.lnmarkets.com",
+        ] {
+            assert!(
+                allowlist.contains(host),
+                "OMEGA-DELTA-0241: release endpoint evidence lost `{host}`"
+            );
+        }
+    }
 }

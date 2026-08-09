@@ -18,6 +18,7 @@ mod go_to_definition_tool;
 mod grep_tool;
 mod list_agents_and_models_tool;
 mod list_directory_tool;
+mod lnmarkets_tools;
 mod market_demo_tools;
 mod move_path_tool;
 mod read_file_tool;
@@ -93,6 +94,7 @@ pub use go_to_definition_tool::*;
 pub use grep_tool::*;
 pub use list_agents_and_models_tool::*;
 pub use list_directory_tool::*;
+pub use lnmarkets_tools::*;
 pub use market_demo_tools::*;
 pub use move_path_tool::*;
 pub use read_file_tool::*;
@@ -228,6 +230,9 @@ tools! {
     GrepTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
+    LnMarketsAccountTool,
+    LnMarketsMarketDataTool,
+    LnMarketsSwapTool,
     MarketNetworkStatusTool,
     MarketProvisionCloudTool,
     MarketSwapQuoteTool,
@@ -259,6 +264,9 @@ pub const BASIC_TOOL_NAMES: &[&str] = &[
     MarketSwapQuoteTool::NAME,
     MarketExecuteSwapTool::NAME,
     MarketSwapStatusTool::NAME,
+    LnMarketsAccountTool::NAME,
+    LnMarketsMarketDataTool::NAME,
+    LnMarketsSwapTool::NAME,
 ];
 
 pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
@@ -274,6 +282,9 @@ pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
         MarketSwapQuoteTool::NAME => Some(MarketSwapQuoteTool::NAME),
         MarketExecuteSwapTool::NAME => Some(MarketExecuteSwapTool::NAME),
         MarketSwapStatusTool::NAME => Some(MarketSwapStatusTool::NAME),
+        LnMarketsAccountTool::NAME => Some(LnMarketsAccountTool::NAME),
+        LnMarketsMarketDataTool::NAME => Some(LnMarketsMarketDataTool::NAME),
+        LnMarketsSwapTool::NAME => Some(LnMarketsSwapTool::NAME),
         _ => None,
     }
 }
