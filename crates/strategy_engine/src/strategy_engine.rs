@@ -254,6 +254,11 @@ pub enum StrategyLifecycleEvent {
         strategy_id: String,
         report_digest: String,
     },
+    StateUpdated {
+        strategy_id: String,
+        at_ms: i64,
+        state: Value,
+    },
     LedgerEntryAppended {
         strategy_id: String,
         event_id: String,
@@ -375,6 +380,7 @@ where
         self.program.validate_config(&config)?;
         let approval = self.require_backtest(&config)?;
         let state = self.program.initial_state(&config)?;
+        let state_value = serde_json::to_value(&state)?;
         self.config = Some(config);
         self.state = Some(state);
         self.status = StrategyStatus::Running {
@@ -389,6 +395,12 @@ where
             strategy_id: self.program.strategy_id().to_string(),
             at_ms,
         });
+        self.lifecycle
+            .publish(StrategyLifecycleEvent::StateUpdated {
+                strategy_id: self.program.strategy_id().to_string(),
+                at_ms,
+                state: state_value,
+            });
         Ok(())
     }
 
@@ -456,7 +468,14 @@ where
             }
             submitted_count += 1;
         }
+        let state_value = serde_json::to_value(&step.next_state)?;
         self.state = Some(step.next_state);
+        self.lifecycle
+            .publish(StrategyLifecycleEvent::StateUpdated {
+                strategy_id: self.program.strategy_id().to_string(),
+                at_ms: tick.occurred_at_ms,
+                state: state_value,
+            });
         self.lifecycle
             .publish(StrategyLifecycleEvent::TickProcessed {
                 strategy_id: self.program.strategy_id().to_string(),
@@ -1140,6 +1159,11 @@ mod tests {
                     .iter()
                     .any(|event| matches!(event, StrategyLifecycleEvent::OrderSubmitted { .. }))
             );
+            assert!(lifecycle.events().iter().any(|event| matches!(
+                event,
+                StrategyLifecycleEvent::StateUpdated { at_ms: 100, state, .. }
+                    if state["ticks"] == 1
+            )));
         });
     }
 

@@ -13,6 +13,16 @@ path = "src/lnmarkets_trading.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 lnmarkets_client.workspace = true
 lnmarkets_data.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 strategy_engine.workspace = true
+trading_ledger.workspace = true
+trading_mandate.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+http.workspace = true

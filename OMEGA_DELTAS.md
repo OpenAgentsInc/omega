@@ -10061,3 +10061,28 @@ reports without weakening the execution gate.
 
 - **Enforced by:** `strategy_engine` and `lnmarkets_data` unit tests and
   `collected_backtests_gate_exact_live_strategy_parameters` in `omega_deltas`.
+
+### OMEGA-DELTA-0249 — Target rebalancing is measured, ladder-aware, and signet-only
+
+The first LN Markets strategy holds a configured share of account value in
+synthetic USD. Its model-free program emits an order only when account drift
+exceeds a configured threshold and the correction value exceeds the measured
+round-trip cost plus a configured margin. Order value is capped by the
+strategy limit and, when bucket data exists, by the configured share of the
+relevant bid or ask depth.
+
+Round-trip cost is configuration evidence with sample count, traded notional,
+timestamp, and source. A ledger reader remeasures it from attributed swap
+fills; no observed cost is embedded as a program constant. Each execution
+uses the direct synthetic-USD swap route once, records the fill and measured
+cost in the platform ledger, and exposes target, drift, last action, realized
+cost, and hurdle through a versioned state update for the later streaming
+card.
+
+The program configuration and executor both refuse mainnet. The generic
+backtest gate still binds the exact configuration before the engine starts,
+so signet is not a bypass around collected evidence or the active mandate.
+
+- **Enforced by:** `lnmarkets_trading` and `strategy_engine` unit tests and
+  `target_rebalancing_is_measured_ladder_aware_and_signet_only` in
+  `omega_deltas`.

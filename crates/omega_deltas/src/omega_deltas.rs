@@ -219,6 +219,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0246",
     "OMEGA-DELTA-0247",
     "OMEGA-DELTA-0248",
+    "OMEGA-DELTA-0249",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29538,5 +29539,56 @@ mod tests {
             trading.contains("pub fn collected_backtest_replay("),
             "OMEGA-DELTA-0248: LN Markets lost its collected replay adapter"
         );
+    }
+
+    /// The first live strategy derives one bounded synthetic-USD swap from
+    /// drift, measured cost, and available ladder depth.
+    #[test]
+    fn target_rebalancing_is_measured_ladder_aware_and_signet_only() {
+        let rebalance = without_comments(&read_repository_file(
+            "crates/lnmarkets_trading/src/rebalance_to_target.rs",
+        ));
+        for required in [
+            "pub const REBALANCE_TO_TARGET_SCHEMA",
+            "pub struct RebalanceCostMeasurement",
+            "pub target_synthetic_usd_weight_bps: u32",
+            "pub drift_threshold_bps: u32",
+            "pub cost_margin_bps: u32",
+            "pub liquidity_utilization_bps: u32",
+            "impl StrategyProgram for RebalanceToTargetProgram",
+            "if config.network != Network::Signet",
+            "if absolute_drift <= threshold",
+            "if expected_correction_usd <= hurdle_usd",
+            "tick.features.liquidity.ask_depth",
+            "tick.features.liquidity.bid_depth",
+            "NewSwapRequest::bitcoin_to_synthetic_usd",
+            "NewSwapRequest::synthetic_usd_to_bitcoin",
+            "let result = self.client.new_swap(&request).await?",
+            "pub fn measure_rebalance_cost(",
+            "source: \"trading_ledger:rebalance_to_target\".into()",
+            "target_rebalance_sells_btc_only_after_drift_and_cost_hurdles",
+            "target_rebalance_buys_btc_and_caps_size_at_the_ladder",
+            "signet_executor_previews_then_submits_one_swap_and_records_cost",
+            "executor_refuses_mainnet_before_any_request",
+        ] {
+            assert!(
+                rebalance.contains(required),
+                "OMEGA-DELTA-0249: target rebalancing lost `{required}`"
+            );
+        }
+
+        let engine = without_comments(&read_repository_file(
+            "crates/strategy_engine/src/strategy_engine.rs",
+        ));
+        for required in [
+            "StrategyLifecycleEvent::StateUpdated",
+            "state: state_value",
+            "state[\"ticks\"] == 1",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0249: streamable strategy state lost `{required}`"
+            );
+        }
     }
 }

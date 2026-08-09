@@ -1,3 +1,10 @@
+mod rebalance_to_target;
+
+pub use rebalance_to_target::{
+    REBALANCE_TO_TARGET_SCHEMA, RebalanceAction, RebalanceCostMeasurement, RebalanceToTargetConfig,
+    RebalanceToTargetProgram, RebalanceToTargetState, SyntheticUsdExecutor, measure_rebalance_cost,
+};
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TradingRegistration;
 
