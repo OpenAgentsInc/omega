@@ -127,6 +127,17 @@ pub(crate) fn omega_settings_data(cx: &App) -> Vec<SettingsPage> {
         SettingsPageItem::SectionHeader("Providers"),
     ];
     items.extend(provider_items);
+    items.push(SettingsPageItem::SectionHeader("Trading"));
+    items.push(SettingsPageItem::SubPageLink(SubPageLink {
+        title: "LN Markets".into(),
+        r#type: Default::default(),
+        description: Some("Connect an LN Markets account and test its API credentials.".into()),
+        search_aliases: &["LNMarkets", "Bitcoin", "synthetic USD"],
+        json_path: Some("lnmarkets"),
+        in_json: false,
+        files: USER,
+        render: crate::pages::render_lnmarkets_settings_page,
+    }));
     vec![SettingsPage {
         title: "API Keys",
         items: items.into_boxed_slice(),

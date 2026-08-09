@@ -3,6 +3,7 @@ mod audio_test_window;
 pub(crate) mod external_agents_page;
 mod feature_flags;
 mod llm_providers_page;
+mod lnmarkets_settings_page;
 mod mcp_servers_page;
 mod sandbox_settings;
 mod skill_creator;
@@ -20,6 +21,7 @@ pub(crate) use feature_flags::render_feature_flags_page;
 pub(crate) use llm_providers_page::{
     LlmProviderForm, render_add_llm_provider_popover, render_llm_providers_page,
 };
+pub(crate) use lnmarkets_settings_page::{LnMarketsSettingsPage, render_lnmarkets_settings_page};
 pub(crate) use mcp_servers_page::{
     McpServerForm, render_add_server_popover, render_mcp_servers_page,
 };

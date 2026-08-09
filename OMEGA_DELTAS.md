@@ -9902,3 +9902,24 @@ the visual lane (which installs no gate). The full drawn set is now admitted.
   `the_palette_matches_the_drawn_surface_in_both_directions` in
   `omega_deltas`, and `the_admitted_set_is_the_exo_surface_and_nothing_else`
   in `omega_zero_base`.
+
+### OMEGA-DELTA-0241 — LN Markets credentials stay local to a direct v3 client
+
+Omega connects to LN Markets without sending the account credential through
+the OpenAgents API. The new Rust client signs the exact v3 method, path, query,
+and compact JSON bytes that it sends. It rate-limits requests, retries only
+connection-phase failures and transient HTTP statuses, and never retries a 401.
+
+The API Keys screen stores the key, secret, passphrase, and selected network in
+Omega's private channel-scoped credential store. Save & Test calls the signed
+`/v3/account` route before retaining a new credential. The credential types
+redact their debug output and zero their owned strings when dropped.
+
+Omega Agent can read the configured account, read public ticker and synthetic
+USD prices, and request BTC/synthetic-USD swaps on signet. Mainnet account
+checks and public reads are available, but the swap tool refuses mainnet before
+it sends a request.
+
+- **Enforced by:** signer, retry, request-body, and credential tests in
+  `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in
+  `omega_deltas`; and the endpoint declarations in `app_identity`.

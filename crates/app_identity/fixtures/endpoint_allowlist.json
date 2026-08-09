@@ -67,6 +67,46 @@
       ]
     },
     {
+      "host": "api.signet.lnmarkets.com",
+      "purpose": "LN Markets v3 signet account data, public prices, and synthetic USD swaps requested in Omega",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/v3/"
+      ]
+    },
+    {
+      "host": "api.lnmarkets.com",
+      "purpose": "LN Markets v3 mainnet account checks and public prices; Omega blocks mainnet effects",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/v3/"
+      ]
+    },
+    {
+      "host": "stream.signet.lnmarkets.com",
+      "purpose": "Reserved LN Markets v1 signet market stream for the direct Rust client",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/v1/"
+      ]
+    },
+    {
+      "host": "stream.lnmarkets.com",
+      "purpose": "Reserved LN Markets v1 mainnet market stream for the direct Rust client",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/v1/"
+      ]
+    },
+    {
       "host": "zed.dev",
       "purpose": "Inherited Zed production app server",
       "owner": "OpenAgents",
