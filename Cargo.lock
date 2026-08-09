@@ -9327,6 +9327,7 @@ dependencies = [
  "sha2 0.10.9",
  "smol",
  "thiserror 2.0.17",
+ "uuid",
  "zeroize",
 ]
 

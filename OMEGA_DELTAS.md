@@ -9933,6 +9933,15 @@ entry point. Omega's default-on `lnmarkets` feature enables the agent and
 settings surfaces together. The feature-off build removes both surfaces and is
 part of `script/omega-checks`.
 
+The direct client covers the isolated-futures mutation surface. New market and
+limit trades encode margin or quantity as an exclusive typed choice, leverage
+is limited to 1 through 100, and trade IDs and positive amounts are validated
+before a request is built. Close, cancel, cancel-all, add-margin, cash-in,
+stoploss, and takeprofit operations name the account network and fail before
+transport if it differs from the configured credential. Trade responses decode
+the venue's four state booleans into one checked state enum. POST, PUT, and
+DELETE signature shapes are pinned, and mutations are single-attempt.
+
 - **Enforced by:** signer, retry, request-body, and credential tests in
   `lnmarkets_client`; `ln_markets_uses_one_local_direct_fail_closed_client` in
   `omega_deltas`; the feature-off checks in `script/omega-checks`; and the

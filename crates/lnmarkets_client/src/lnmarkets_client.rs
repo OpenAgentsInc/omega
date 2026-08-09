@@ -1,5 +1,6 @@
 use std::{
     fmt, io,
+    num::NonZeroU64,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Number;
 use sha2::Sha256;
 use thiserror::Error;
+use uuid::Uuid;
 use zeroize::Zeroize as _;
 
 pub const CREDENTIAL_STORAGE_URL: &str = "https://lnmarkets.com/api/v3";
@@ -203,6 +205,21 @@ pub enum Error {
     AuthenticationRequired,
     #[error("invalid LN Markets amount: {0}")]
     InvalidAmount(String),
+    #[error("LN Markets leverage must be between 1 and 100")]
+    InvalidLeverage,
+    #[error("invalid LN Markets trade ID: {0}")]
+    InvalidTradeId(#[source] uuid::Error),
+    #[error("invalid LN Markets isolated trade state flags")]
+    InvalidTradeState,
+    #[error("trailing stop distance must be between 0.001 and 10")]
+    InvalidTrailingStopDistance,
+    #[error(
+        "LN Markets request names {requested:?}, but the configured account uses {configured:?}"
+    )]
+    NetworkMismatch {
+        requested: Network,
+        configured: Network,
+    },
     #[error("failed to build LN Markets request: {0}")]
     BuildRequest(#[source] http::Error),
     #[error("failed to send LN Markets request: {0}")]
@@ -247,6 +264,12 @@ pub struct DecimalAmount(Number);
 impl DecimalAmount {
     pub fn as_number(&self) -> &Number {
         &self.0
+    }
+
+    fn is_positive(&self) -> bool {
+        self.0.as_u64().is_some_and(|value| value > 0)
+            || self.0.as_i64().is_some_and(|value| value > 0)
+            || self.0.as_f64().is_some_and(|value| value > 0.0)
     }
 }
 
@@ -558,8 +581,30 @@ pub struct FuturesFundingFee {
     pub trade_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FuturesIsolatedTradeState {
+    Open,
+    Running,
+    Closed,
+    Canceled,
+}
+
+impl FuturesIsolatedTradeState {
+    fn from_flags(open: bool, running: bool, closed: bool, canceled: bool) -> Result<Self, Error> {
+        match (open, running, closed, canceled) {
+            (true, false, false, false) => Ok(Self::Open),
+            (false, true, false, false) => Ok(Self::Running),
+            (true, true, false, false) => Ok(Self::Running),
+            (false, false, true, false) => Ok(Self::Closed),
+            (false, false, false, true) => Ok(Self::Canceled),
+            _ => Err(Error::InvalidTradeState),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "FuturesIsolatedTradeWire")]
 pub struct FuturesIsolatedTrade {
     pub canceled: bool,
     pub closed: bool,
@@ -595,6 +640,366 @@ pub struct FuturesIsolatedTrade {
     pub trade_type: String,
     #[serde(default, alias = "uid")]
     pub client_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub state: FuturesIsolatedTradeState,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FuturesIsolatedTradeWire {
+    canceled: bool,
+    closed: bool,
+    closed_at: Option<String>,
+    closing_fee: DecimalAmount,
+    created_at: String,
+    entry_margin: Option<DecimalAmount>,
+    entry_price: Option<DecimalAmount>,
+    exit_price: Option<DecimalAmount>,
+    filled_at: Option<String>,
+    id: String,
+    leverage: DecimalAmount,
+    liquidation: DecimalAmount,
+    maintenance_margin: DecimalAmount,
+    margin: DecimalAmount,
+    open: bool,
+    opening_fee: DecimalAmount,
+    pl: DecimalAmount,
+    price: DecimalAmount,
+    quantity: DecimalAmount,
+    running: bool,
+    side: String,
+    stoploss: DecimalAmount,
+    #[serde(default)]
+    stoploss_trailing_distance: Option<DecimalAmount>,
+    #[serde(default)]
+    sum_cash_in_margin: Option<DecimalAmount>,
+    #[serde(default)]
+    sum_cash_in_pl: Option<DecimalAmount>,
+    sum_funding_fees: DecimalAmount,
+    takeprofit: DecimalAmount,
+    #[serde(rename = "type")]
+    trade_type: String,
+    #[serde(default, alias = "uid")]
+    client_id: Option<String>,
+}
+
+impl TryFrom<FuturesIsolatedTradeWire> for FuturesIsolatedTrade {
+    type Error = Error;
+
+    fn try_from(trade: FuturesIsolatedTradeWire) -> Result<Self, Self::Error> {
+        let state = FuturesIsolatedTradeState::from_flags(
+            trade.open,
+            trade.running,
+            trade.closed,
+            trade.canceled,
+        )?;
+        Ok(Self {
+            canceled: trade.canceled,
+            closed: trade.closed,
+            closed_at: trade.closed_at,
+            closing_fee: trade.closing_fee,
+            created_at: trade.created_at,
+            entry_margin: trade.entry_margin,
+            entry_price: trade.entry_price,
+            exit_price: trade.exit_price,
+            filled_at: trade.filled_at,
+            id: trade.id,
+            leverage: trade.leverage,
+            liquidation: trade.liquidation,
+            maintenance_margin: trade.maintenance_margin,
+            margin: trade.margin,
+            open: trade.open,
+            opening_fee: trade.opening_fee,
+            pl: trade.pl,
+            price: trade.price,
+            quantity: trade.quantity,
+            running: trade.running,
+            side: trade.side,
+            stoploss: trade.stoploss,
+            stoploss_trailing_distance: trade.stoploss_trailing_distance,
+            sum_cash_in_margin: trade.sum_cash_in_margin,
+            sum_cash_in_pl: trade.sum_cash_in_pl,
+            sum_funding_fees: trade.sum_funding_fees,
+            takeprofit: trade.takeprofit,
+            trade_type: trade.trade_type,
+            client_id: trade.client_id,
+            state,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FuturesLeverage(u8);
+
+impl FuturesLeverage {
+    pub fn new(leverage: u8) -> Result<Self, Error> {
+        if (1..=100).contains(&leverage) {
+            Ok(Self(leverage))
+        } else {
+            Err(Error::InvalidLeverage)
+        }
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FuturesTradeId(Uuid);
+
+impl FromStr for FuturesTradeId {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value)
+            .map(Self)
+            .map_err(Error::InvalidTradeId)
+    }
+}
+
+impl fmt::Display for FuturesTradeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FuturesTradeSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuturesIsolatedTradeSize {
+    MarginSats(NonZeroU64),
+    QuantityUsd(NonZeroU64),
+}
+
+impl FuturesIsolatedTradeSize {
+    pub fn margin_sats(amount: u64) -> Result<Self, Error> {
+        NonZeroU64::new(amount)
+            .map(Self::MarginSats)
+            .ok_or_else(|| Error::InvalidAmount("margin must be greater than zero".into()))
+    }
+
+    pub fn quantity_usd(amount: u64) -> Result<Self, Error> {
+        NonZeroU64::new(amount)
+            .map(Self::QuantityUsd)
+            .ok_or_else(|| Error::InvalidAmount("quantity must be greater than zero".into()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FuturesIsolatedOrder {
+    Market,
+    Limit { price: DecimalAmount },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuturesIsolatedNewTradeRequest {
+    leverage: FuturesLeverage,
+    side: FuturesTradeSide,
+    size: FuturesIsolatedTradeSize,
+    order: FuturesIsolatedOrder,
+    stoploss: Option<DecimalAmount>,
+    takeprofit: Option<DecimalAmount>,
+    client_id: Option<String>,
+}
+
+impl FuturesIsolatedNewTradeRequest {
+    pub fn market(
+        leverage: FuturesLeverage,
+        side: FuturesTradeSide,
+        size: FuturesIsolatedTradeSize,
+    ) -> Self {
+        Self {
+            leverage,
+            side,
+            size,
+            order: FuturesIsolatedOrder::Market,
+            stoploss: None,
+            takeprofit: None,
+            client_id: None,
+        }
+    }
+
+    pub fn limit(
+        leverage: FuturesLeverage,
+        side: FuturesTradeSide,
+        size: FuturesIsolatedTradeSize,
+        price: DecimalAmount,
+    ) -> Result<Self, Error> {
+        if !price.is_positive() {
+            return Err(Error::InvalidAmount(
+                "limit price must be greater than zero".into(),
+            ));
+        }
+        Ok(Self {
+            leverage,
+            side,
+            size,
+            order: FuturesIsolatedOrder::Limit { price },
+            stoploss: None,
+            takeprofit: None,
+            client_id: None,
+        })
+    }
+
+    pub fn with_stoploss(mut self, stoploss: DecimalAmount) -> Result<Self, Error> {
+        if !stoploss.is_positive() {
+            return Err(Error::InvalidAmount(
+                "stoploss must be greater than zero".into(),
+            ));
+        }
+        self.stoploss = Some(stoploss);
+        Ok(self)
+    }
+
+    pub fn with_takeprofit(mut self, takeprofit: DecimalAmount) -> Result<Self, Error> {
+        if !takeprofit.is_positive() {
+            return Err(Error::InvalidAmount(
+                "takeprofit must be greater than zero".into(),
+            ));
+        }
+        self.takeprofit = Some(takeprofit);
+        Ok(self)
+    }
+
+    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
+    }
+
+    fn body(&self) -> Result<Vec<u8>, Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            leverage: u8,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            margin: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            price: Option<&'a DecimalAmount>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            quantity: Option<u64>,
+            side: FuturesTradeSide,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            stoploss: Option<&'a DecimalAmount>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            takeprofit: Option<&'a DecimalAmount>,
+            #[serde(rename = "type")]
+            trade_type: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            client_id: Option<&'a str>,
+        }
+
+        let (margin, quantity) = match self.size {
+            FuturesIsolatedTradeSize::MarginSats(amount) => (Some(amount.get()), None),
+            FuturesIsolatedTradeSize::QuantityUsd(amount) => (None, Some(amount.get())),
+        };
+        let (trade_type, price) = match &self.order {
+            FuturesIsolatedOrder::Market => ("market", None),
+            FuturesIsolatedOrder::Limit { price } => ("limit", Some(price)),
+        };
+        serde_json::to_vec(&Body {
+            leverage: self.leverage.get(),
+            margin,
+            price,
+            quantity,
+            side: self.side,
+            stoploss: self.stoploss.as_ref(),
+            takeprofit: self.takeprofit.as_ref(),
+            trade_type,
+            client_id: self.client_id.as_deref(),
+        })
+        .map_err(Error::Serialize)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FuturesIsolatedTradeReference {
+    pub id: FuturesTradeId,
+}
+
+impl FuturesIsolatedTradeReference {
+    pub fn new(id: FuturesTradeId) -> Self {
+        Self { id }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FuturesIsolatedAmountRequest {
+    pub amount: NonZeroU64,
+    pub id: FuturesTradeId,
+}
+
+impl FuturesIsolatedAmountRequest {
+    pub fn new(id: FuturesTradeId, amount: u64) -> Result<Self, Error> {
+        let amount = NonZeroU64::new(amount)
+            .ok_or_else(|| Error::InvalidAmount("amount must be greater than zero".into()))?;
+        Ok(Self { amount, id })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FuturesStoplossMode {
+    Fixed,
+    Trailing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FuturesIsolatedStoplossUpdate {
+    id: FuturesTradeId,
+    value: DecimalAmount,
+    mode: FuturesStoplossMode,
+}
+
+impl FuturesIsolatedStoplossUpdate {
+    pub fn fixed(id: FuturesTradeId, value: DecimalAmount) -> Result<Self, Error> {
+        if !value.is_positive() {
+            return Err(Error::InvalidAmount(
+                "fixed stoploss must be greater than zero".into(),
+            ));
+        }
+        Ok(Self {
+            id,
+            value,
+            mode: FuturesStoplossMode::Fixed,
+        })
+    }
+
+    pub fn trailing(id: FuturesTradeId, value: DecimalAmount) -> Result<Self, Error> {
+        let distance = value.as_number().as_f64();
+        if !distance.is_some_and(|distance| (0.001..=10.0).contains(&distance)) {
+            return Err(Error::InvalidTrailingStopDistance);
+        }
+        Ok(Self {
+            id,
+            value,
+            mode: FuturesStoplossMode::Trailing,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FuturesIsolatedTakeprofitUpdate {
+    id: FuturesTradeId,
+    value: DecimalAmount,
+}
+
+impl FuturesIsolatedTakeprofitUpdate {
+    pub fn new(id: FuturesTradeId, value: DecimalAmount) -> Result<Self, Error> {
+        if !value.is_positive() {
+            return Err(Error::InvalidAmount(
+                "takeprofit must be greater than zero".into(),
+            ));
+        }
+        Ok(Self { id, value })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -923,10 +1328,163 @@ impl LnMarketsClient {
             .await
     }
 
+    pub async fn isolated_new_trade(
+        &self,
+        network: Network,
+        trade: &FuturesIsolatedNewTradeRequest,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.require_network(network)?;
+        self.request_json(
+            Method::POST,
+            "/futures/isolated/trade",
+            "",
+            trade.body()?,
+            true,
+        )
+        .await
+    }
+
+    pub async fn isolated_close_trade(
+        &self,
+        network: Network,
+        trade: &FuturesIsolatedTradeReference,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.isolated_trade_post(network, "/futures/isolated/trade/close", trade)
+            .await
+    }
+
+    pub async fn isolated_cancel_trade(
+        &self,
+        network: Network,
+        trade: &FuturesIsolatedTradeReference,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.isolated_trade_post(network, "/futures/isolated/trade/cancel", trade)
+            .await
+    }
+
+    pub async fn isolated_cancel_all_trades(
+        &self,
+        network: Network,
+    ) -> Result<Vec<FuturesIsolatedTrade>, Error> {
+        self.require_network(network)?;
+        self.request_json(
+            Method::POST,
+            "/futures/isolated/trades/cancel-all",
+            "",
+            Vec::new(),
+            true,
+        )
+        .await
+    }
+
+    pub async fn isolated_add_margin(
+        &self,
+        network: Network,
+        request: &FuturesIsolatedAmountRequest,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.isolated_trade_post(network, "/futures/isolated/trade/add-margin", request)
+            .await
+    }
+
+    pub async fn isolated_cash_in(
+        &self,
+        network: Network,
+        request: &FuturesIsolatedAmountRequest,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.isolated_trade_post(network, "/futures/isolated/trade/cash-in", request)
+            .await
+    }
+
+    pub async fn isolated_update_stoploss(
+        &self,
+        network: Network,
+        request: &FuturesIsolatedStoplossUpdate,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.require_network(network)?;
+        let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
+        self.request_json(
+            Method::PUT,
+            "/futures/isolated/trade/stoploss",
+            "",
+            body,
+            true,
+        )
+        .await
+    }
+
+    pub async fn isolated_update_takeprofit(
+        &self,
+        network: Network,
+        request: &FuturesIsolatedTakeprofitUpdate,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.require_network(network)?;
+        let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
+        self.request_json(
+            Method::PUT,
+            "/futures/isolated/trade/takeprofit",
+            "",
+            body,
+            true,
+        )
+        .await
+    }
+
+    pub async fn isolated_remove_stoploss(
+        &self,
+        network: Network,
+        trade: &FuturesIsolatedTradeReference,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.isolated_trade_delete(network, "/futures/isolated/trade/stoploss", trade)
+            .await
+    }
+
+    pub async fn isolated_remove_takeprofit(
+        &self,
+        network: Network,
+        trade: &FuturesIsolatedTradeReference,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.isolated_trade_delete(network, "/futures/isolated/trade/takeprofit", trade)
+            .await
+    }
+
     pub async fn new_swap(&self, swap: &NewSwapRequest) -> Result<NewSwapResult, Error> {
         let body = serde_json::to_vec(swap).map_err(Error::Serialize)?;
         self.request_json(Method::POST, "/synthetic-usd/swap", "", body, true)
             .await
+    }
+
+    async fn isolated_trade_post<T: Serialize>(
+        &self,
+        network: Network,
+        path: &str,
+        request: &T,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.require_network(network)?;
+        let body = serde_json::to_vec(request).map_err(Error::Serialize)?;
+        self.request_json(Method::POST, path, "", body, true).await
+    }
+
+    async fn isolated_trade_delete<T: Serialize>(
+        &self,
+        network: Network,
+        path: &str,
+        request: &T,
+    ) -> Result<FuturesIsolatedTrade, Error> {
+        self.require_network(network)?;
+        let query = encoded_query(request)?;
+        self.request_json(Method::DELETE, path, &query, Vec::new(), true)
+            .await
+    }
+
+    fn require_network(&self, requested: Network) -> Result<(), Error> {
+        if requested == self.network {
+            Ok(())
+        } else {
+            Err(Error::NetworkMismatch {
+                requested,
+                configured: self.network,
+            })
+        }
     }
 
     async fn get_public<T: DeserializeOwned>(&self, path: &str, query: &str) -> Result<T, Error> {
@@ -1618,6 +2176,25 @@ mod tests {
             .body(body.as_bytes().to_vec())?)
     }
 
+    const TRADE_ID: &str = "d0b9f9a0-4f6e-4a5a-8b7a-7f0f5f9a8a1e";
+
+    fn isolated_trade_body(state: FuturesIsolatedTradeState) -> String {
+        let (open, running, closed, canceled) = match state {
+            FuturesIsolatedTradeState::Open => (true, false, false, false),
+            FuturesIsolatedTradeState::Running => (false, true, false, false),
+            FuturesIsolatedTradeState::Closed => (false, false, true, false),
+            FuturesIsolatedTradeState::Canceled => (false, false, false, true),
+        };
+        format!(
+            r#"{{"id":"{TRADE_ID}","type":"market","side":"buy","openingFee":0,"closingFee":0,"maintenanceMargin":100,"quantity":1,"margin":1000,"leverage":10,"price":100000,"liquidation":90000,"stoploss":0,"stoplossTrailingDistance":0.1,"takeprofit":0,"exitPrice":null,"pl":0,"createdAt":"2026-01-01T00:00:00.000Z","filledAt":"2026-01-01T00:00:01.000Z","closedAt":null,"entryPrice":100000,"entryMargin":1000,"open":{open},"running":{running},"canceled":{canceled},"closed":{closed},"sumFundingFees":0,"sumCashInPl":0,"sumCashInMargin":0,"clientId":null}}"#
+        )
+    }
+
+    fn authenticated_client(http_transport: Arc<dyn HttpTransport>) -> LnMarketsClient {
+        let credentials = Credentials::new("key", "secret", "passphrase").expect("credentials");
+        LnMarketsClient::authenticated(http_transport, Network::Signet, credentials)
+    }
+
     #[test]
     fn official_hmac_vector_matches() {
         let mut hmac = HmacSha256::new_from_slice(b"test-secret").expect("valid key");
@@ -1626,6 +2203,272 @@ mod tests {
             BASE64_STANDARD.encode(hmac.finalize().into_bytes()),
             "JJ8q7bXc7Kkj7cjj1EgBqA9pn70I9b2B8iLeDwDtQ2Y="
         );
+    }
+
+    #[test]
+    fn isolated_trade_inputs_enforce_sdk_constraints() {
+        assert!(matches!(
+            FuturesLeverage::new(0),
+            Err(Error::InvalidLeverage)
+        ));
+        assert!(matches!(
+            FuturesLeverage::new(101),
+            Err(Error::InvalidLeverage)
+        ));
+        assert_eq!(FuturesLeverage::new(100).expect("leverage").get(), 100);
+        assert!(FuturesIsolatedTradeSize::margin_sats(0).is_err());
+        assert!(FuturesIsolatedTradeSize::quantity_usd(0).is_err());
+
+        let leverage = FuturesLeverage::new(10).expect("leverage");
+        let margin = FuturesIsolatedTradeSize::margin_sats(1_000).expect("margin");
+        let market =
+            FuturesIsolatedNewTradeRequest::market(leverage, FuturesTradeSide::Buy, margin);
+        assert_eq!(
+            std::str::from_utf8(&market.body().expect("body")).expect("UTF-8"),
+            r#"{"leverage":10,"margin":1000,"side":"buy","type":"market"}"#
+        );
+
+        let quantity = FuturesIsolatedTradeSize::quantity_usd(25).expect("quantity");
+        let limit = FuturesIsolatedNewTradeRequest::limit(
+            leverage,
+            FuturesTradeSide::Sell,
+            quantity,
+            "64000.5".parse().expect("price"),
+        )
+        .expect("limit order");
+        assert_eq!(
+            std::str::from_utf8(&limit.body().expect("body")).expect("UTF-8"),
+            r#"{"leverage":10,"price":64000.5,"quantity":25,"side":"sell","type":"limit"}"#
+        );
+
+        let trade_id = TRADE_ID.parse().expect("trade ID");
+        assert!(FuturesIsolatedAmountRequest::new(trade_id, 0).is_err());
+        let trade_id = TRADE_ID.parse().expect("trade ID");
+        assert!(
+            FuturesIsolatedStoplossUpdate::trailing(trade_id, "0.0009".parse().expect("distance"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn isolated_trade_state_decodes_sdk_boolean_combinations() {
+        for expected in [
+            FuturesIsolatedTradeState::Open,
+            FuturesIsolatedTradeState::Running,
+            FuturesIsolatedTradeState::Closed,
+            FuturesIsolatedTradeState::Canceled,
+        ] {
+            let trade: FuturesIsolatedTrade =
+                serde_json::from_str(&isolated_trade_body(expected)).expect("trade");
+            assert_eq!(trade.state, expected);
+        }
+
+        let running_and_open = isolated_trade_body(FuturesIsolatedTradeState::Running)
+            .replace(r#""open":false"#, r#""open":true"#);
+        let trade: FuturesIsolatedTrade =
+            serde_json::from_str(&running_and_open).expect("running trade can remain open");
+        assert_eq!(trade.state, FuturesIsolatedTradeState::Running);
+
+        let invalid = isolated_trade_body(FuturesIsolatedTradeState::Open)
+            .replace(r#""open":true"#, r#""open":false"#);
+        assert!(serde_json::from_str::<FuturesIsolatedTrade>(&invalid).is_err());
+    }
+
+    #[test]
+    fn isolated_mutation_signature_vectors_cover_post_put_and_delete() {
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::POST,
+                "/v3/futures/isolated/trade",
+                r#"{"leverage":10,"margin":1000,"side":"buy","type":"market","clientId":"client-1"}"#,
+            )
+            .expect("POST signature"),
+            "ZDDA6BKkHfwR6T/70eTfMc4EPfGR1RcK4qBfCjOa65s="
+        );
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::PUT,
+                "/v3/futures/isolated/trade/stoploss",
+                r#"{"id":"d0b9f9a0-4f6e-4a5a-8b7a-7f0f5f9a8a1e","value":0.1,"mode":"trailing"}"#,
+            )
+            .expect("PUT signature"),
+            "vj3wVlzktwWdi3+d/pAFtWjzaQAHDhlAuNPx+VUoVOM="
+        );
+        assert_eq!(
+            rest_signature(
+                "test-secret",
+                "1700000000000",
+                &Method::DELETE,
+                "/v3/futures/isolated/trade/stoploss",
+                "?id=d0b9f9a0-4f6e-4a5a-8b7a-7f0f5f9a8a1e",
+            )
+            .expect("DELETE signature"),
+            "0IFIBtrTHD68kqd+bcilXY1HVPrqu8/U1Lz5zhHYgYM="
+        );
+    }
+
+    #[test]
+    fn isolated_mutations_use_documented_method_shapes() {
+        smol::block_on(async {
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let transport = FakeTransport::create({
+                let requests = requests.clone();
+                move |request| {
+                    let requests = requests.clone();
+                    async move {
+                        requests.lock().expect("requests").push((
+                            request.method().clone(),
+                            request.uri().path().to_owned(),
+                            request.uri().query().map(str::to_owned),
+                            String::from_utf8(request.body().clone()).expect("UTF-8 body"),
+                        ));
+                        if request.uri().path().ends_with("cancel-all") {
+                            response(200, "[]")
+                        } else {
+                            response(
+                                200,
+                                &isolated_trade_body(FuturesIsolatedTradeState::Running),
+                            )
+                        }
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let trade_id = || TRADE_ID.parse().expect("trade ID");
+            let reference = || FuturesIsolatedTradeReference::new(trade_id());
+            let order = FuturesIsolatedNewTradeRequest::market(
+                FuturesLeverage::new(10).expect("leverage"),
+                FuturesTradeSide::Buy,
+                FuturesIsolatedTradeSize::margin_sats(1_000).expect("margin"),
+            )
+            .with_client_id("client-1");
+            client
+                .isolated_new_trade(Network::Signet, &order)
+                .await
+                .expect("new trade");
+            client
+                .isolated_close_trade(Network::Signet, &reference())
+                .await
+                .expect("close");
+            client
+                .isolated_cancel_trade(Network::Signet, &reference())
+                .await
+                .expect("cancel");
+            client
+                .isolated_cancel_all_trades(Network::Signet)
+                .await
+                .expect("cancel all");
+            client
+                .isolated_add_margin(
+                    Network::Signet,
+                    &FuturesIsolatedAmountRequest::new(trade_id(), 1_000).expect("amount"),
+                )
+                .await
+                .expect("add margin");
+            client
+                .isolated_cash_in(
+                    Network::Signet,
+                    &FuturesIsolatedAmountRequest::new(trade_id(), 500).expect("amount"),
+                )
+                .await
+                .expect("cash in");
+            client
+                .isolated_update_stoploss(
+                    Network::Signet,
+                    &FuturesIsolatedStoplossUpdate::trailing(
+                        trade_id(),
+                        "0.1".parse().expect("distance"),
+                    )
+                    .expect("trailing stop"),
+                )
+                .await
+                .expect("update stoploss");
+            client
+                .isolated_update_takeprofit(
+                    Network::Signet,
+                    &FuturesIsolatedTakeprofitUpdate::new(
+                        trade_id(),
+                        "70000".parse().expect("takeprofit"),
+                    )
+                    .expect("takeprofit"),
+                )
+                .await
+                .expect("update takeprofit");
+            client
+                .isolated_remove_stoploss(Network::Signet, &reference())
+                .await
+                .expect("remove stoploss");
+            client
+                .isolated_remove_takeprofit(Network::Signet, &reference())
+                .await
+                .expect("remove takeprofit");
+
+            let requests = requests.lock().expect("requests");
+            assert_eq!(requests.len(), 10);
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|(method, path, _, _)| (method, path.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (&Method::POST, "/v3/futures/isolated/trade"),
+                    (&Method::POST, "/v3/futures/isolated/trade/close"),
+                    (&Method::POST, "/v3/futures/isolated/trade/cancel"),
+                    (&Method::POST, "/v3/futures/isolated/trades/cancel-all"),
+                    (&Method::POST, "/v3/futures/isolated/trade/add-margin"),
+                    (&Method::POST, "/v3/futures/isolated/trade/cash-in"),
+                    (&Method::PUT, "/v3/futures/isolated/trade/stoploss"),
+                    (&Method::PUT, "/v3/futures/isolated/trade/takeprofit"),
+                    (&Method::DELETE, "/v3/futures/isolated/trade/stoploss"),
+                    (&Method::DELETE, "/v3/futures/isolated/trade/takeprofit"),
+                ]
+            );
+            assert_eq!(
+                requests[8].2.as_deref(),
+                Some("id=d0b9f9a0-4f6e-4a5a-8b7a-7f0f5f9a8a1e")
+            );
+            assert!(requests[8].3.is_empty());
+        });
+    }
+
+    #[test]
+    fn isolated_post_is_single_attempt_and_network_mismatch_sends_nothing() {
+        smol::block_on(async {
+            let requests = Arc::new(StdMutex::new(0));
+            let transport = FakeTransport::create({
+                let requests = requests.clone();
+                move |_| {
+                    let requests = requests.clone();
+                    async move {
+                        *requests.lock().expect("request count") += 1;
+                        response(503, r#"{"message":"Service unavailable"}"#)
+                    }
+                }
+            });
+            let client = authenticated_client(transport);
+            let order = FuturesIsolatedNewTradeRequest::market(
+                FuturesLeverage::new(10).expect("leverage"),
+                FuturesTradeSide::Buy,
+                FuturesIsolatedTradeSize::margin_sats(1_000).expect("margin"),
+            );
+            let mismatch = client
+                .isolated_new_trade(Network::Mainnet, &order)
+                .await
+                .expect_err("network mismatch");
+            assert!(matches!(mismatch, Error::NetworkMismatch { .. }));
+            assert_eq!(*requests.lock().expect("request count"), 0);
+
+            let unavailable = client
+                .isolated_new_trade(Network::Signet, &order)
+                .await
+                .expect_err("503");
+            assert!(matches!(unavailable, Error::Api { status, .. } if status.as_u16() == 503));
+            assert_eq!(*requests.lock().expect("request count"), 1);
+        });
     }
 
     #[test]
