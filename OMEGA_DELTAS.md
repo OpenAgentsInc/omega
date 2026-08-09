@@ -10189,3 +10189,25 @@ and use create-new storage so a prior acceptance record cannot be replaced.
 - **Enforced by:** `lnmarkets` unit tests and
   `lnmarkets_signet_soak_receipts_fail_closed_over_complete_evidence` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0255 — Provider inventory hedging runs outside every custody boundary
+
+The LN Markets provider hedger is a standalone program with no dependency on
+Omega, Immortal, or the OpenAgents API. It reads an operator-owned Signet
+credential from a mounted secret file and sends requests directly to LN
+Markets. It refuses Mainnet before it creates a venue client. Its output
+contains cycle state and ledger results without credential material.
+
+Each cycle reads the configured provider inventory target, keeps one selected
+cross-margin or synthetic-USD hedge, and sends at most one venue mutation.
+Low liquidation distance causes a bounded margin top-up before an exposure
+change. The direct client keeps every mutation single-attempt.
+
+Fills, fees, funding settlements, and venue-balance residuals enter the shared
+append-only sats ledger with provider-hedger attribution. A measured evaluation
+passes only when hedged profit variance is below unhedged variance and funding
+carry covers all recorded fees.
+
+- **Enforced by:** `lnmarkets_hedger` unit tests and
+  `lnmarkets_provider_hedger_is_standalone_signet_and_ledger_backed` in
+  `omega_deltas`.

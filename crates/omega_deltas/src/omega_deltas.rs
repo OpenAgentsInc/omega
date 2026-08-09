@@ -225,6 +225,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0252",
     "OMEGA-DELTA-0253",
     "OMEGA-DELTA-0254",
+    "OMEGA-DELTA-0255",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29958,6 +29959,96 @@ mod tests {
             assert!(
                 agent.contains(required),
                 "OMEGA-DELTA-0254: autonomous review measurement lost `{required}`"
+            );
+        }
+    }
+
+    /// The provider hedger stays outside Omega and Immortal, refuses Mainnet,
+    /// loads one mounted operator secret, and writes every result to the ledger.
+    #[test]
+    fn lnmarkets_provider_hedger_is_standalone_signet_and_ledger_backed() {
+        let manifest = read_repository_file("crates/lnmarkets_hedger/Cargo.toml");
+        for required in [
+            "lnmarkets_client.workspace = true",
+            "trading_ledger.workspace = true",
+            "name = \"lnmarkets-hedger\"",
+        ] {
+            assert!(
+                manifest.contains(required),
+                "OMEGA-DELTA-0255: hedger manifest lost `{required}`"
+            );
+        }
+        for forbidden in [
+            "lnmarkets.workspace",
+            "omega.workspace",
+            "immortal",
+            "agent.workspace",
+            "gpui.workspace",
+        ] {
+            assert!(
+                !manifest.contains(forbidden),
+                "OMEGA-DELTA-0255: standalone hedger gained `{forbidden}`"
+            );
+        }
+
+        let hedger = without_comments(&read_repository_file(
+            "crates/lnmarkets_hedger/src/lnmarkets_hedger.rs",
+        ));
+        for required in [
+            "openagents.omega.lnmarkets-hedger-config.v1",
+            "the incubating provider hedger is restricted to Signet",
+            "pub enum HedgeInstrument",
+            "TopUpCrossMargin",
+            "self.venue.execute_once(action).await?",
+            "LedgerEntryKind::FundingSettlement",
+            "LedgerAccount::FeeExpense",
+            "LedgerAccount::TradingProfit",
+            "hedged_profit_variance < unhedged_profit_variance",
+            "lower_variance && nonnegative_net_carry",
+        ] {
+            assert!(
+                hedger.contains(required),
+                "OMEGA-DELTA-0255: hedger boundary lost `{required}`"
+            );
+        }
+
+        let daemon = without_comments(&read_repository_file("crates/lnmarkets_hedger/src/main.rs"));
+        for required in [
+            "LNMARKETS_HEDGER_CREDENTIALS_FILE",
+            "bytes.zeroize()",
+            "Credentials::new(",
+            "LnMarketsClient::authenticated(",
+            "redactable_summary(&report)",
+        ] {
+            assert!(
+                daemon.contains(required),
+                "OMEGA-DELTA-0255: hedger daemon lost `{required}`"
+            );
+        }
+        for forbidden in [
+            "LNMARKETS_API_KEY",
+            "LNMARKETS_SECRET",
+            "api.openagents.com",
+            "println!(\"{:?}\", credentials)",
+        ] {
+            assert!(
+                !daemon.contains(forbidden),
+                "OMEGA-DELTA-0255: hedger daemon restored `{forbidden}`"
+            );
+        }
+
+        let decision = without_comments(&read_repository_file(
+            "docs/omega/lnmarkets-hedger-daemon.md",
+        ));
+        for required in [
+            "Status: Accepted",
+            "Google Secret Manager",
+            "supports Signet only",
+            "A Mainnet deployment needs a new decision",
+        ] {
+            assert!(
+                decision.contains(required),
+                "OMEGA-DELTA-0255: hedger decision lost `{required}`"
             );
         }
     }

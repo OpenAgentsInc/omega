@@ -9390,6 +9390,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnmarkets_hedger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "futures 0.3.32",
+ "http 1.3.1",
+ "lnmarkets_client",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "smol",
+ "tempfile",
+ "tokio",
+ "trading_ledger",
+ "zed-reqwest",
+ "zeroize",
+]
+
+[[package]]
 name = "lnmarkets_trading"
 version = "0.1.0"
 dependencies = [

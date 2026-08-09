@@ -101,6 +101,7 @@ members = [
     "crates/languages",
     "crates/lnmarkets_client",
     "crates/lnmarkets_data",
+    "crates/lnmarkets_hedger",
     "crates/lnmarkets_trading",
     "crates/lnmarkets_ui",
     "crates/lnmarkets",
@@ -372,6 +373,7 @@ language_tools = { path = "crates/language_tools" }
 languages = { path = "crates/languages" }
 lnmarkets_client = { path = "crates/lnmarkets_client" }
 lnmarkets_data = { path = "crates/lnmarkets_data" }
+lnmarkets_hedger = { path = "crates/lnmarkets_hedger" }
 lnmarkets_trading = { path = "crates/lnmarkets_trading" }
 lnmarkets_ui = { path = "crates/lnmarkets_ui" }
 lnmarkets = { path = "crates/lnmarkets" }

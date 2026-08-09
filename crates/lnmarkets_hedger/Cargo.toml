@@ -1,0 +1,38 @@
+[package]
+name = "lnmarkets_hedger"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Standalone LN Markets provider inventory hedger"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lnmarkets_hedger.rs"
+doctest = false
+
+[[bin]]
+name = "lnmarkets-hedger"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+futures.workspace = true
+http.workspace = true
+lnmarkets_client.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+smol.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time"] }
+trading_ledger.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,13 @@
+{
+  "schema": "openagents.omega.lnmarkets-hedger-config.v1",
+  "network": "signet",
+  "instrument": "cross_margin",
+  "target_inventory_sats": 1000000,
+  "hedge_ratio_bps": 10000,
+  "minimum_adjustment_sats": 1000,
+  "maximum_adjustment_sats": 100000,
+  "cross_leverage": 2,
+  "minimum_liquidation_distance_bps": 1500,
+  "margin_top_up_sats": 25000,
+  "poll_interval_seconds": 30
+}
