@@ -60,6 +60,25 @@ pub(crate) fn agent_message(index: usize, text: &'static str, cx: &App) -> gpui:
         .into_any_element()
 }
 
+pub fn market_chat_inline_demo(cards: Vec<AnyElement>, cx: &App) -> AnyElement {
+    v_flex()
+        .debug_selector(|| "market.chat.inline_cards".into())
+        .gap_1()
+        .max_w(px(680.0))
+        .child(user_message(
+            302,
+            "Show the market state and the evidence behind the decision.",
+            cx,
+        ))
+        .child(agent_message(
+            302,
+            "The typed results are attached inline and update in place.",
+            cx,
+        ))
+        .children(cards)
+        .into_any_element()
+}
+
 /// One conversation exercising both market cards: the person asks what the
 /// network looks like and gets the inline map, then requests a swap and
 /// watches the swap card walk its lifecycle. Every value is a demo fixture.

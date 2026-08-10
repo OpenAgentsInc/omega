@@ -44,6 +44,8 @@ use trading_mandate::{
 };
 use ui::SharedString;
 
+mod card_renderers;
+
 const VENUE: &str = "hyperliquid";
 const STRATEGY_ID: &str = "OMEGA-BOUNDED-QUOTE-001";
 const CAPABILITY_MAX_AGE_MS: i64 = 30_000;
@@ -66,6 +68,7 @@ struct GovernanceState {
     orders: Vec<Value>,
     positions: Vec<Value>,
     strategy: Option<Value>,
+    latest_review: Option<Value>,
     halted_reason: Option<String>,
     #[serde(skip)]
     processed_event_keys: HashSet<String>,
@@ -632,11 +635,20 @@ impl plugin_api::OmegaPlugin for NautilusGovernancePlugin {
             "omega.nautilus.governance.v1",
             "omega.nautilus.command_receipt.v1",
             "omega.nautilus.ledger.fill.v1",
-        ] {
+        ]
+        .into_iter()
+        .chain(card_renderers::CARD_SCHEMAS)
+        .chain(std::iter::once(card_renderers::VERIFICATION_SCHEMA))
+        {
             registry.add_card_schema(CardSchemaRegistration {
                 plugin_id: MANIFEST.id,
                 schema,
             });
+        }
+        for renderer in card_renderers::card_renderer_registrations() {
+            if let Err(error) = registry.add_card_renderer(renderer) {
+                log::error!("could not register a Nautilus governance card renderer: {error}");
+            }
         }
     }
 }
@@ -838,6 +850,25 @@ impl SessionReviewDriver for GovernanceReviewDriver {
         } else {
             ReviewDisposition::Intervention { kinds }
         };
+        let decision = match &disposition {
+            ReviewDisposition::NoChange => json!({"type":"no_change"}),
+            ReviewDisposition::Intervention { .. } => {
+                json!({"type":"action","summary":"bounded_intervention"})
+            }
+        };
+        let review_payload = json!({
+            "schema":"omega.market.review-turn.v1",
+            "at_ms":evidence.at_ms,
+            "trigger":evidence.source.transcript_label(),
+            "read_sources":evidence.tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+            "prediction":evidence.tool_calls.iter().any(|call| call.name == PredictionTool::NAME).then_some("recorded"),
+            "decision":decision,
+            "model_id":evidence.model_id,
+            "input_tokens":evidence.token_usage.input_total(),
+            "output_tokens":evidence.token_usage.output_tokens,
+            "token_cost_microusd":Value::Null,
+            "wall_clock_ms":evidence.wall_clock_ms,
+        });
         let record = ReviewCostRecord {
             schema_version: REVIEW_ACCOUNTING_SCHEMA_VERSION,
             turn_id: format!("{session_id}:{}", evidence.at_ms),
@@ -853,7 +884,11 @@ impl SessionReviewDriver for GovernanceReviewDriver {
             venues: vec![VENUE.into()],
             strategies: vec![STRATEGY_ID.into()],
         };
-        self.runtime.review_accounting.append(record).is_ok()
+        if self.runtime.review_accounting.append(record).is_err() {
+            return false;
+        }
+        self.runtime.state.lock().latest_review = Some(review_payload);
+        true
     }
 }
 
@@ -911,6 +946,14 @@ impl From<ToolOutput> for LanguageModelToolResultContent {
     }
 }
 
+fn emit_card_update(events: &ToolCallEventStream, payload: &Value, title: &'static str) {
+    let content = serde_json::to_string_pretty(payload)
+        .unwrap_or_else(|error| format!("could not serialize inline market card: {error}"));
+    events.update_fields(acp::ToolCallUpdateFields::new().title(title).content(vec![
+        acp::ToolCallContent::Content(acp::Content::new(content)),
+    ]));
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AccountInput {
@@ -918,6 +961,9 @@ pub enum AccountInput {
     Positions,
     Exposure,
     Ledger,
+    CandleLite,
+    Sparkline,
+    Review,
 }
 
 struct AccountTool {
@@ -944,12 +990,38 @@ impl AgentTool for AccountTool {
             .runtime
             .refresh_from_source(cx)
             .map_err(|error| ToolOutput::error(error.to_string()));
+        let market_snapshot =
+            NautilusStreamSource::try_global(cx).map(|source| source.read(cx).market_snapshot());
         cx.spawn(async move |_cx| {
             refresh?;
-            let _input = input
+            let input = input
                 .recv()
                 .await
                 .map_err(|error| ToolOutput::error(error.to_string()))?;
+            let card_kind = match input {
+                AccountInput::Positions => Some(card_renderers::LiveCardKind::Positions),
+                AccountInput::CandleLite => Some(card_renderers::LiveCardKind::CandleLite),
+                AccountInput::Sparkline => Some(card_renderers::LiveCardKind::Sparkline),
+                AccountInput::Account | AccountInput::Exposure | AccountInput::Ledger => None,
+                AccountInput::Review => {
+                    return self
+                        .runtime
+                        .state
+                        .lock()
+                        .latest_review
+                        .clone()
+                        .map(ToolOutput::ok)
+                        .ok_or_else(|| ToolOutput::error("no Nautilus review turn has completed"));
+                }
+            };
+            if let Some(kind) = card_kind {
+                let snapshot = market_snapshot
+                    .as_ref()
+                    .ok_or_else(|| ToolOutput::error("Nautilus stream source is unavailable"))?;
+                return card_renderers::live_card_payload(snapshot, kind)
+                    .map(ToolOutput::ok)
+                    .ok_or_else(|| ToolOutput::error("Nautilus stream has no card data yet"));
+            }
             self.runtime
                 .snapshot()
                 .map(ToolOutput::ok)
@@ -1053,7 +1125,7 @@ impl AgentTool for PredictionTool {
                 })
                 .map_err(|error| ToolOutput::error(error.to_string()))?;
             Ok(ToolOutput::ok(
-                json!({"schema":"omega.nautilus.prediction.v1","prediction":event}),
+                json!({"schema":"omega.market.prediction.v1","prediction":event}),
             ))
         })
     }
@@ -1199,18 +1271,37 @@ impl AgentTool for OrderTool {
                 ToolPermissionContext::new(Self::NAME, vec![summary]), cx,
             ));
             authorize.await.map_err(|error| ToolOutput::error(error.to_string()))?;
-            let (command, action, extra_notional, prediction_id, emergency) = match input {
+            let (command, action, extra_notional, prediction_id, emergency, pending_card, total_units) = match input {
                 OrderInput::Place { client_order_id, instrument_id, side, quantity, price, post_only, reduce_only, prediction_id, decision_id } => {
                     self.runtime.require_prediction(&prediction_id, &decision_id).map_err(|error| ToolOutput::error(error.to_string()))?;
                     let extra = if reduce_only { 0 } else { decimal_product_to_units(&quantity, &price, 0).map_err(|error| ToolOutput::error(error.to_string()))?.unsigned_abs() };
-                    (NautilusCommand::PlaceOrder { client_order_id, instrument_id, side: side.into(), quantity, price, post_only, reduce_only }, VenueActionClass::OrderPlacement, extra, Some(prediction_id), reduce_only)
+                    let total_units = quantity.parse::<f64>().ok().filter(|value| value.is_finite() && *value >= 0.0).unwrap_or(0.0);
+                    let pending_card = json!({
+                        "schema":"omega.market.order-lifecycle.v1",
+                        "network":"testnet",
+                        "order_id":client_order_id,
+                        "stage":"placed",
+                        "filled_units":0.0,
+                        "total_units":total_units,
+                    });
+                    (NautilusCommand::PlaceOrder { client_order_id, instrument_id, side: side.into(), quantity, price, post_only, reduce_only }, VenueActionClass::OrderPlacement, extra, Some(prediction_id), reduce_only, Some(pending_card), total_units)
                 }
-                OrderInput::Cancel { client_order_id } => (NautilusCommand::CancelOrder { client_order_id }, VenueActionClass::OrderCancellation, 0, None, true),
+                OrderInput::Cancel { client_order_id } => (NautilusCommand::CancelOrder { client_order_id }, VenueActionClass::OrderCancellation, 0, None, true, None, 0.0),
             };
             let revision = self.runtime.authorize(action, extra_notional, emergency).map_err(|error| ToolOutput::error(error.to_string()))?;
+            if let Some(pending_card) = pending_card.as_ref() {
+                emit_card_update(&events, pending_card, "Nautilus testnet order: placed");
+            }
             let receipt = send_once(self.channel.as_ref(), CommandRequest { command_id: self.runtime.next_command_id("order"), command }).await?;
             self.runtime.record_receipt(&receipt, revision, prediction_id.as_deref()).map_err(|error| ToolOutput::error(error.to_string()))?;
-            Ok(ToolOutput::ok(json!({"schema":"omega.nautilus.order.v1","network":"testnet","mandate_revision":revision,"single_attempt":true,"receipt":receipt})))
+            let mut output = card_renderers::order_receipt_payload(&receipt, total_units)
+                .unwrap_or_else(|| json!({"schema":"omega.nautilus.order.v1","network":"testnet","receipt":receipt}));
+            if let Some(output) = output.as_object_mut() {
+                output.insert("mandate_revision".into(), revision.into());
+                output.insert("single_attempt".into(), true.into());
+                output.insert("prediction_id".into(), prediction_id.into());
+            }
+            Ok(ToolOutput::ok(output))
         })
     }
 }
@@ -1533,6 +1624,30 @@ mod tests {
         assert_eq!(decimal_to_units("0.001", 8)?, 100_000);
         assert_eq!(decimal_product_to_units("0.001", "60000", 6)?, 60_000_000);
         Ok(())
+    }
+
+    #[gpui::test]
+    async fn order_lifecycle_update_keeps_one_typed_card(_cx: &mut gpui::TestAppContext) {
+        let (stream, mut events) = ToolCallEventStream::test();
+        emit_card_update(
+            &stream,
+            &json!({
+                "schema":"omega.market.order-lifecycle.v1",
+                "order_id":"O-OMEGA-302-1",
+                "stage":"placed",
+                "filled_units":0.0,
+                "total_units":0.08,
+            }),
+            "Nautilus testnet order: placed",
+        );
+        let update = events.expect_update_fields().await;
+        assert_eq!(
+            update.title.as_deref(),
+            Some("Nautilus testnet order: placed")
+        );
+        let content = update.content.expect("typed card content");
+        assert_eq!(content.len(), 1);
+        assert!(format!("{content:?}").contains("omega.market.order-lifecycle.v1"));
     }
 
     #[test]

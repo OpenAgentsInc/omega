@@ -243,8 +243,9 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0270",
     "OMEGA-DELTA-0271",
     "OMEGA-DELTA-0272",
-    "OMEGA-DELTA-0275",
     "OMEGA-DELTA-0273",
+    "OMEGA-DELTA-0274",
+    "OMEGA-DELTA-0275",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31329,6 +31330,94 @@ mod tests {
             assert!(
                 governance.contains(required),
                 "OMEGA-DELTA-0273: governance boundary lost `{required}`"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_market_cards_are_plugin_owned_versioned_and_stream_backed() {
+        let dispatch = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/plugin_tool_cards.rs",
+        ));
+        for required in [
+            "value.get(\"schema\")",
+            "registry(cx)?.card_renderer(schema)",
+            "(renderer.render)(&payload, cx)",
+        ] {
+            assert!(
+                dispatch.contains(required),
+                "OMEGA-DELTA-0274: plugin card dispatch lost `{required}`"
+            );
+        }
+
+        let cards = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/card_renderers.rs",
+        ));
+        for required in [
+            "omega.market.candle-lite.v1",
+            "omega.market.sparkline.v1",
+            "omega.market.stats.v1",
+            "omega.market.positions.v1",
+            "omega.market.order-lifecycle.v1",
+            "omega.market.prediction.v1",
+            "omega.market.review-turn.v1",
+            "omega.market.oracle-attestation.v1",
+            "omega.market.verification.v1",
+            "CandlestickChart",
+            "Sparkline",
+            "PriceTicker",
+            "MarketStatsStrip",
+            "PositionsPanel",
+            "OrderLifecycleToast",
+            "PredictionCard",
+            "ReviewTurnCard",
+            "OracleAttestationReadout",
+            "VerificationRow",
+            "MarketTokens::from_theme(cx).grayscale()",
+            "live_card_payload",
+            "NautilusMarketSnapshot",
+            "order_receipt_payload",
+            "market_chat_inline_demo",
+        ] {
+            assert!(
+                cards.contains(required),
+                "OMEGA-DELTA-0274: inline market cards lost `{required}`"
+            );
+        }
+
+        let governance = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ));
+        for required in [
+            "registry.add_card_renderer(renderer)",
+            "source.read(cx).market_snapshot()",
+            "emit_card_update(&events, pending_card",
+            "omega.market.prediction.v1",
+            "omega.market.review-turn.v1",
+        ] {
+            assert!(
+                governance.contains(required),
+                "OMEGA-DELTA-0274: plugin registration or live card wiring lost `{required}`"
+            );
+        }
+
+        let hardcoded = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/market_tool_cards.rs",
+        ));
+        for schema in [
+            "omega.market.candle-lite.v1",
+            "omega.market.sparkline.v1",
+            "omega.market.stats.v1",
+            "omega.market.positions.v1",
+            "omega.market.order-lifecycle.v1",
+            "omega.market.prediction.v1",
+            "omega.market.review-turn.v1",
+            "omega.market.oracle-attestation.v1",
+            "omega.market.verification.v1",
+        ] {
+            assert!(
+                !hardcoded.contains(schema),
+                "OMEGA-DELTA-0274: `{schema}` entered the hardcoded market card path"
             );
         }
     }

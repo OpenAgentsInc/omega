@@ -10654,6 +10654,31 @@ accepted venue receipt. Mainnet remains unrepresentable on this surface.
   testnet lifecycle tests and
   `nautilus_market_ui_is_live_confirmed_and_single_attempt` in `omega_deltas`.
 
+### OMEGA-DELTA-0274 — Inline market cards dispatch through plugin-owned schemas
+
+Market tool results render inline only when their top-level versioned schema
+has a renderer registered by an owning plugin. The transcript asks the shared
+plugin registry for the exact schema; new market cards do not add another
+hardcoded branch to `market_tool_cards.rs`. Version 1 covers candle-lite,
+sparkline, ticker and market statistics, positions, order lifecycle,
+prediction, review-turn, oracle attestation, and address or invoice
+verification payloads.
+
+Each renderer adapts typed JSON into the shared `ui` or `command_center_ui`
+component. The component library exercises every schema through the market
+chat harness before live use and repeats structural state in a grayscale audit.
+The Nautilus account tool derives candle, sparkline, and position cards from
+the bounded typed stream snapshot. Prediction and order tools emit the
+venue-neutral schemas directly; an order placement publishes its placed state
+as an update and its accepted or cancelled outcome as the final value, so one
+tool call remains one evolving card. Missing or malformed card data fails back
+to the generic tool result instead of inventing market state.
+
+- **Enforced by:** `nautilus_governance`, `agent_ui`, `ui`, and `omega_deltas`
+  tests, including
+  `inline_market_cards_are_plugin_owned_versioned_and_stream_backed` in
+  `omega_deltas`.
+
 ### OMEGA-DELTA-0275 — Trading docks are capability-derived live projections
 
 Omega adds three movable workspace panels for the market lane: a portfolio
