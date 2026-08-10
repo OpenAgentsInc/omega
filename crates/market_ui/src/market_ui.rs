@@ -25,8 +25,8 @@ pub use session_flow::{
     AdmitOutcome, CancelEntry, CloseEntry, MarketSession, QuoteCandidate,
     SESSION_FLOW_TRACKING_ISSUE, SESSION_STORE_DIRECTORY, SESSION_STORE_SCHEMA,
     SessionFlowAvailability, SessionPhase, StatusEntry, StatusLane, StatusSlot, fold_status_lanes,
-    load_stored_records, select_quote, session_flow_availability, swp_profile_support,
-    throwaway_session_signer, wrap_for_transport,
+    load_stored_records, rfq_quote_set, select_quote, session_flow_availability,
+    swp_profile_support, throwaway_session_signer, wrap_for_transport,
 };
 pub use session_transport::{SESSION_SUBSCRIPTION_ID, SessionSocketEvent, run_session_socket};
 

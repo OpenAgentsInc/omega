@@ -62,6 +62,7 @@ use immortal_client::mkt_swp_client::{
     SwapRecordFactory, SwapType,
 };
 use serde_json::{Map, Value, json};
+use ui::prelude::SharedString;
 
 use crate::discovery::OfferingListing;
 
@@ -337,6 +338,64 @@ pub fn select_quote(candidates: &[QuoteCandidate], now: u64) -> Option<usize> {
                 .then_with(|| b.event.pubkey.cmp(&a.event.pubkey))
         })
         .map(|(index, _)| index)
+}
+
+/// Maps a MKT-SWP asset identifier's rail segment to the ticker the RFQ
+/// comparison card displays. This is bounded-field parsing after the semantic
+/// route was already chosen: unknown rails keep the full identifier so the
+/// label is never a guess.
+fn rail_ticker(asset_id: &str) -> SharedString {
+    match asset_id.rsplit(':').next() {
+        Some("lightning") => "LN".into(),
+        Some("chain") => "BTC".into(),
+        Some("liquid") => "L-BTC".into(),
+        _ => asset_id.to_owned().into(),
+    }
+}
+
+/// Projects the session's received quote candidates into the typed
+/// `QuoteSet` rendered by `ui::RfqComparisonCard` — the wiring point between
+/// the live NIP-MKT session flow and the RFQ comparison card. Candidates
+/// whose canonical amounts overflow a `u64` are omitted rather than
+/// misrendered; providers stay unrated until receipts-backed reputation
+/// lands.
+pub fn rfq_quote_set(
+    candidates: &[QuoteCandidate],
+    network: ui::SwapNetwork,
+    now: u64,
+) -> Option<ui::QuoteSet> {
+    let seconds_until = |expires_at: u64| {
+        i64::try_from(expires_at)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(i64::try_from(now).unwrap_or(i64::MAX))
+    };
+    let first = candidates
+        .iter()
+        .find(|candidate| candidate.input_amount.parse::<u64>().is_ok())?;
+    let input_sats = first.input_amount.parse::<u64>().ok()?;
+    let quotes: Vec<ui::RfqQuote> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            Some(ui::RfqQuote {
+                provider: candidate.event.pubkey.clone().into(),
+                reputation: ui::RfqReputation::Unrated,
+                output_sats: candidate.output_amount.parse().ok()?,
+                fee_sats: candidate.maximum_total_fee.parse().ok()?,
+                fee_bps: candidate.fee_bps.parse().ok(),
+                expires_in_secs: seconds_until(candidate.expires_at),
+            })
+        })
+        .collect();
+    if quotes.is_empty() {
+        return None;
+    }
+    Some(ui::QuoteSet {
+        from_ticker: rail_ticker(&first.asset_pair.0),
+        to_ticker: rail_ticker(&first.asset_pair.1),
+        input_sats,
+        network,
+        quotes,
+    })
 }
 
 /// One rendered entry inside a per-signer Status lane.
@@ -1141,6 +1200,47 @@ mod tests {
         ];
         assert_eq!(select_quote(&candidates, now), Some(1));
         assert_eq!(select_quote(&candidates[..1], now), None);
+    }
+
+    #[test]
+    fn the_rfq_card_adapter_agrees_with_the_selection_policy() {
+        let now = 100;
+        let mut candidates = vec![
+            candidate("10000", "90", "bb", 200),
+            candidate("10000", "40", "aa", 160),
+            candidate("12000", "40", "cc", 90),
+        ];
+        candidates[0].asset_pair = (
+            "swp:1:bip122:00000000000000000000000000000000:btc:lightning".to_owned(),
+            "swp:1:bip122:00000000000000000000000000000000:btc:chain".to_owned(),
+        );
+        let quote_set = rfq_quote_set(&candidates, ui::SwapNetwork::Regtest, now)
+            .expect("the candidates project to a quote set");
+        assert_eq!(quote_set.from_ticker.as_ref(), "LN");
+        assert_eq!(quote_set.to_ticker.as_ref(), "BTC");
+        assert_eq!(quote_set.input_sats, 100_000);
+        assert_eq!(quote_set.quotes.len(), 3);
+        assert_eq!(quote_set.quotes[0].expires_in_secs, 100);
+        assert_eq!(quote_set.quotes[2].expires_in_secs, -10);
+        // The card's best highlight lands on the same quote the session
+        // ordering policy would accept.
+        assert_eq!(quote_set.best(), select_quote(&candidates, now));
+        assert_eq!(quote_set.best(), Some(1));
+    }
+
+    #[test]
+    fn the_rfq_card_adapter_omits_unrenderable_amounts() {
+        let now = 100;
+        let overflowing = "99999999999999999999999999";
+        let candidates = vec![
+            candidate(overflowing, "40", "aa", 200),
+            candidate("10000", "90", "bb", 200),
+        ];
+        let quote_set = rfq_quote_set(&candidates, ui::SwapNetwork::Regtest, now)
+            .expect("one renderable candidate remains");
+        assert_eq!(quote_set.quotes.len(), 1);
+        assert_eq!(quote_set.quotes[0].provider.as_ref(), "bb");
+        assert!(rfq_quote_set(&candidates[..1], ui::SwapNetwork::Regtest, now).is_none());
     }
 
     fn status_event(signer: &MarketSigner, created_at: u64, sequence: &str, state: &str) -> Event {

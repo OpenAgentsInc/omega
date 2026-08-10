@@ -9,7 +9,7 @@ use crate::prelude::*;
 
 /// The primary-interface user bubble, verbatim from the transcript renderer,
 /// with the hover copy affordance messages carry in the real chat.
-fn user_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement {
+pub(crate) fn user_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement {
     let group = SharedString::from(format!("market-demo-user-{index}"));
     h_flex()
         .id(("market-demo-user", index))
@@ -41,7 +41,7 @@ fn user_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement 
 
 /// Agent prose at the transcript's text size — no bubble, no border — with
 /// the hover copy affordance.
-fn agent_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement {
+pub(crate) fn agent_message(index: usize, text: &'static str, cx: &App) -> gpui::AnyElement {
     let group = SharedString::from(format!("market-demo-agent-{index}"));
     h_flex()
         .id(("market-demo-agent", index))
