@@ -37,4 +37,5 @@ libc.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
+reqwest = { workspace = true, features = ["blocking", "json"] }
 tempfile.workspace = true

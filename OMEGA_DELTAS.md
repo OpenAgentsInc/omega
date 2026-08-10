@@ -10766,14 +10766,26 @@ The admission floor is the upward-rounded measured median plus an explicit
 margin; a fee schedule is not a substitute for the observation.
 
 The credentialed measurement harness can represent testnet only. Every entry
-has one reduce-only exit and all fill events enter the shared ledger. An
-ambiguous cancel ends the run instead of retrying. Restart reconciliation
-deduplicates filled venue orders, and its safety proof requires zero positions
-and zero live order states. Because a prior-process Hyperliquid GTC remainder
-was not reliably visible in the Nautilus restart projection during the #305
-experiment, an official venue `openOrders` and position query remains a
-required operator check before another measurement segment. Mainnet remains
-hard-refused.
+has one reduce-only exit and all fill events enter the shared ledger. Taker and
+risk-reducing orders are IOC, while each maker GTC has a unique client order ID
+and may be canceled exactly once by that ID. An ambiguous cancel ends the run
+instead of retrying. Restart reconciliation deduplicates filled venue orders.
+Before every new exposure and after every segment, the harness must obtain both
+an official Hyperliquid `openOrders` plus clearinghouse zero-exposure snapshot
+and Nautilus zero-position plus zero-live-order observations. A mismatch stops
+the run; an engine projection cannot overrule official venue state. Mainnet
+remains hard-refused.
+
+Hyperliquid can report a partially filled IOC to Nautilus without a terminal
+cancel event even though its remainder cannot rest and official `openOrders` is
+empty. The live stream therefore publishes `orders_open` and `positions_open`,
+and excludes the impossible partially-filled IOC remainder from live order
+state. Historical fills and closed positions remain available through their
+lossless events and the ledger. On restart, nested `OrderFilled` events from
+reconciled positions are republished once by trade ID so filtering closed
+positions out of live state cannot erase fill evidence. A refusal receipt
+followed by a venue fill is a contract breach that blocks further measurement;
+it is never permission to retry.
 
 - **Enforced by:** `nautilus_governance`, `nautilus_sidecar`, and
   `omega_deltas` tests, including

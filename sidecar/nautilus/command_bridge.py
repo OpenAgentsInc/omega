@@ -284,7 +284,11 @@ class CommandExecutionStrategy(Strategy):
                 order_side=OrderSide.BUY if command["side"] == "buy" else OrderSide.SELL,
                 quantity=Quantity.from_str(command["quantity"]),
                 price=Price.from_str(command["price"]),
-                time_in_force=TimeInForce.GTC,
+                time_in_force=(
+                    TimeInForce.IOC
+                    if command["time_in_force"] == "ioc"
+                    else TimeInForce.GTC
+                ),
                 post_only=command["post_only"],
                 reduce_only=command["reduce_only"],
                 client_order_id=client_order_id,
@@ -436,6 +440,7 @@ def validate_command(command: dict[str, Any]) -> str | None:
             "side",
             "quantity",
             "price",
+            "time_in_force",
             "post_only",
             "reduce_only",
         },
@@ -460,6 +465,8 @@ def validate_command(command: dict[str, Any]) -> str | None:
             return "unknown_strategy"
     if command_type == "place_order":
         if command.get("side") not in {"buy", "sell"}:
+            return "invalid_order"
+        if command.get("time_in_force") not in {"gtc", "ioc"}:
             return "invalid_order"
         if not all(
             isinstance(command.get(field), str) and command[field]

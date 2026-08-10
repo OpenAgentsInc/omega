@@ -37,6 +37,7 @@ ui.workspace = true
 [dev-dependencies]
 agent = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+reqwest = { workspace = true, features = ["blocking", "json"] }
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 theme.workspace = true

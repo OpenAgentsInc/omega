@@ -14,7 +14,7 @@ use gpui::{App, Task};
 use language_model::LanguageModelToolResultContent;
 use nautilus_sidecar::{
     CommandReceipt, CommandRequest, NautilusCommand, NautilusCommandChannel, NautilusStreamSource,
-    OrderSide, StrategyParameters, StreamEvent, credential_state,
+    OrderSide, OrderTimeInForce, StrategyParameters, StreamEvent, credential_state,
 };
 use parking_lot::Mutex;
 use plugin_api::{
@@ -1578,7 +1578,7 @@ impl AgentTool for OrderTool {
                         "filled_units":0.0,
                         "total_units":total_units,
                     });
-                    (NautilusCommand::PlaceOrder { client_order_id, instrument_id, side: side.into(), quantity, price, post_only, reduce_only }, VenueActionClass::OrderPlacement, extra, Some(prediction_id), reduce_only, Some(pending_card), total_units)
+                    (NautilusCommand::PlaceOrder { client_order_id, instrument_id, side: side.into(), quantity, price, time_in_force: OrderTimeInForce::Gtc, post_only, reduce_only }, VenueActionClass::OrderPlacement, extra, Some(prediction_id), reduce_only, Some(pending_card), total_units)
                 }
                 OrderInput::Cancel { client_order_id } => (NautilusCommand::CancelOrder { client_order_id }, VenueActionClass::OrderCancellation, 0, None, true, None, 0.0),
             };
@@ -1654,7 +1654,7 @@ impl AgentTool for RiskTool {
             let revision = self.runtime.authorize(VenueActionClass::OrderPlacement, 0, true).map_err(|error| ToolOutput::error(error.to_string()))?;
             let receipt = send_once(self.channel.as_ref(), CommandRequest {
                 command_id: self.runtime.next_command_id(action),
-                command: NautilusCommand::PlaceOrder { client_order_id, instrument_id, side: side.into(), quantity, price, post_only: false, reduce_only: true },
+                command: NautilusCommand::PlaceOrder { client_order_id, instrument_id, side: side.into(), quantity, price, time_in_force: OrderTimeInForce::Ioc, post_only: false, reduce_only: true },
             }).await?;
             self.runtime.record_receipt(&receipt, revision, None).map_err(|error| ToolOutput::error(error.to_string()))?;
             Ok(ToolOutput::ok(json!({"schema":"omega.nautilus.risk.v1","action":action,"emergency_prediction_exemption":true,"mandate_revision":revision,"single_attempt":true,"receipt":receipt})))
@@ -1924,6 +1924,7 @@ fn log_error(context: &str, error: &anyhow::Error) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nautilus_sidecar::{OfficialVenueState, evaluate_official_venue_state};
     use std::{collections::BTreeSet, path::PathBuf, time::Duration};
     use trading_mandate::TradingMandate;
 
@@ -1982,6 +1983,147 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         bail!("no typed testnet quote arrived before the measurement deadline")
+    }
+
+    fn official_testnet_state(owner_address: &str) -> Result<OfficialVenueState> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .context("build Hyperliquid testnet safety client")?;
+        let open_orders = client
+            .post("https://api.hyperliquid-testnet.xyz/info")
+            .json(&json!({"type":"openOrders","user":owner_address}))
+            .send()
+            .context("query Hyperliquid testnet openOrders")?
+            .error_for_status()
+            .context("Hyperliquid testnet openOrders status")?
+            .bytes()
+            .context("read Hyperliquid testnet openOrders")?;
+        let clearinghouse = client
+            .post("https://api.hyperliquid-testnet.xyz/info")
+            .json(&json!({"type":"clearinghouseState","user":owner_address}))
+            .send()
+            .context("query Hyperliquid testnet clearinghouseState")?
+            .error_for_status()
+            .context("Hyperliquid testnet clearinghouseState status")?
+            .bytes()
+            .context("read Hyperliquid testnet clearinghouseState")?;
+        evaluate_official_venue_state(&open_orders, &clearinghouse)
+    }
+
+    fn engine_zero_observations(
+        frame: &nautilus_sidecar::StreamFrame,
+    ) -> (Option<bool>, Option<bool>) {
+        let mut zero_positions = None;
+        let mut zero_orders = None;
+        for event in &frame.state {
+            if let StreamEvent::PositionState { positions, .. } = event {
+                zero_positions = Some(positions.is_empty());
+            }
+            if let StreamEvent::OrderState { orders, .. } = event {
+                zero_orders = Some(!orders.iter().any(|order| {
+                    find_string(order, &["status"]).is_some_and(|status| {
+                        matches!(
+                            status.to_ascii_uppercase().as_str(),
+                            "INITIALIZED"
+                                | "SUBMITTED"
+                                | "ACCEPTED"
+                                | "OPEN"
+                                | "TRIGGERED"
+                                | "PENDING_UPDATE"
+                                | "PENDING_CANCEL"
+                                | "PARTIALLY_FILLED"
+                        )
+                    })
+                }));
+            }
+        }
+        (zero_positions, zero_orders)
+    }
+
+    fn require_official_and_engine_zero(
+        supervisor: &nautilus_sidecar::NautilusSupervisor,
+        runtime: &GovernanceRuntime,
+        owner_address: &str,
+    ) -> Result<()> {
+        let official_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let official_before = loop {
+            let state = official_testnet_state(owner_address)?;
+            if state.is_zero_exposure() || std::time::Instant::now() >= official_deadline {
+                break state;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        if !official_before.is_zero_exposure() {
+            bail!(
+                "official testnet safety gate refused: open_order_ids={:?} positions={:?}",
+                official_before
+                    .open_orders
+                    .iter()
+                    .map(|order| order.oid)
+                    .collect::<Vec<_>>(),
+                official_before.positions,
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut zero_positions = None;
+        let mut zero_orders = None;
+        let mut last_positions = Vec::new();
+        let mut last_live_orders = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let frame = supervisor.take_stream_frame()?;
+            runtime.ingest(&frame.state)?;
+            for event in &frame.state {
+                if let StreamEvent::PositionState { positions, .. } = event {
+                    last_positions.clone_from(positions);
+                }
+                if let StreamEvent::OrderState { orders, .. } = event {
+                    last_live_orders = orders
+                        .iter()
+                        .filter(|order| {
+                            find_string(order, &["status"]).is_some_and(|status| {
+                                matches!(
+                                    status.to_ascii_uppercase().as_str(),
+                                    "INITIALIZED"
+                                        | "SUBMITTED"
+                                        | "ACCEPTED"
+                                        | "OPEN"
+                                        | "TRIGGERED"
+                                        | "PENDING_UPDATE"
+                                        | "PENDING_CANCEL"
+                                        | "PARTIALLY_FILLED"
+                                )
+                            })
+                        })
+                        .cloned()
+                        .collect();
+                }
+            }
+            let (positions, orders) = engine_zero_observations(&frame);
+            if positions.is_some() {
+                zero_positions = positions;
+            }
+            if orders.is_some() {
+                zero_orders = orders;
+            }
+            if zero_positions == Some(true) && zero_orders == Some(true) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if zero_positions != Some(true) || zero_orders != Some(true) {
+            bail!(
+                "Nautilus safety gate did not report zero positions and zero orders: zero_positions={zero_positions:?} zero_orders={zero_orders:?} positions={last_positions:?} live_orders={last_live_orders:?}"
+            );
+        }
+        let official_after = official_testnet_state(owner_address)?;
+        if !official_after.is_zero_exposure() {
+            bail!("official testnet state changed during the Nautilus safety gate");
+        }
+        println!(
+            "cost_floor_safety_gate=official_open_orders:0 official_positions:0 nautilus_orders:0 nautilus_positions:0"
+        );
+        Ok(())
     }
 
     fn quote_price(quote: &StreamEvent, side: OrderSide, taker: bool) -> Result<String> {
@@ -2121,6 +2263,11 @@ mod tests {
                 side,
                 quantity: quantity.into(),
                 price,
+                time_in_force: if post_only {
+                    OrderTimeInForce::Gtc
+                } else {
+                    OrderTimeInForce::Ioc
+                },
                 post_only,
                 reduce_only,
             },
@@ -2453,6 +2600,7 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: "0.001".into(),
                 price,
+                time_in_force: OrderTimeInForce::Gtc,
                 post_only: true,
                 reduce_only: false,
             },
@@ -2540,6 +2688,7 @@ mod tests {
                 side: OrderSide::Sell,
                 quantity: "0.001".into(),
                 price,
+                time_in_force: OrderTimeInForce::Ioc,
                 post_only: false,
                 reduce_only: true,
             },
@@ -2603,6 +2752,8 @@ mod tests {
     fn confirmed_testnet_flat_reconciliation_records_known_fills() -> Result<()> {
         let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
             .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let private_key = nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?;
+        let owner_address = private_key.ethereum_address()?;
         let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
@@ -2615,10 +2766,7 @@ mod tests {
             reconciliation_lookback_minutes: 60,
             health_timeout: Duration::from_secs(40),
         };
-        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(
-            config,
-            nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?,
-        )?;
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(config, private_key)?;
         supervisor.start()?;
         let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -2690,8 +2838,27 @@ mod tests {
         if fills.len() < 2 {
             bail!("testnet reconciliation did not record both known fills");
         }
+        let official = official_testnet_state(&owner_address)?;
+        if !official.is_zero_exposure() {
+            bail!("official testnet state is not flat after reconciliation: {official:?}");
+        }
+        let known_venue_order_ids = ["57672332979", "57672471851"];
+        let known_fill_entries = known_venue_order_ids
+            .iter()
+            .map(|venue_order_id| {
+                fills
+                    .iter()
+                    .find(|entry| {
+                        entry.metadata["fill"]["venue_order_id"].as_str() == Some(*venue_order_id)
+                    })
+                    .map(|entry| (*venue_order_id, entry.event_id.clone()))
+                    .with_context(|| {
+                        format!("known venue fill {venue_order_id} did not reach the ledger")
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
         println!(
-            "testnet flat reconciliation evidence: positions=0 open_orders=0 fill_entries={} fee_entries={}",
+            "testnet flat reconciliation evidence: official_positions=0 official_open_orders=0 nautilus_positions=0 nautilus_open_orders=0 known_fill_entries={known_fill_entries:?} fill_entries={} fee_entries={}",
             fills.len(),
             entries
                 .iter()
@@ -2714,6 +2881,19 @@ mod tests {
         }
         let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
             .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let clip = std::env::var("OMEGA_NAUTILUS_COST_CLIP")
+            .context("OMEGA_NAUTILUS_COST_CLIP must be 65, 325, or 650")?;
+        let (requested_notional_usd, quantity) = match clip.as_str() {
+            "65" => (65_u64, "0.001"),
+            "325" => (325, "0.005"),
+            "650" => (650, "0.01"),
+            _ => bail!("OMEGA_NAUTILUS_COST_CLIP must be 65, 325, or 650"),
+        };
+        let path = match std::env::var("OMEGA_NAUTILUS_COST_PATH").as_deref() {
+            Ok("taker_taker") => CostPath::TakerTaker,
+            Ok("maker_taker") => CostPath::MakerTaker,
+            _ => bail!("OMEGA_NAUTILUS_COST_PATH must be taker_taker or maker_taker"),
+        };
         let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
@@ -2726,148 +2906,141 @@ mod tests {
             reconciliation_lookback_minutes: 60,
             health_timeout: Duration::from_secs(40),
         };
-        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(
-            config,
-            nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?,
-        )?;
+        let private_key = nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?;
+        let owner_address = private_key.ethereum_address()?;
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(config, private_key)?;
         supervisor.start()?;
         let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
-        let configurations = [(65_u64, "0.001"), (325, "0.005"), (650, "0.01")];
-        let mut summaries = Vec::new();
         let mut incomplete_maker_attempts = Vec::new();
-        for (requested_notional_usd, quantity) in configurations {
-            for path in [CostPath::TakerTaker, CostPath::MakerTaker] {
-                let mut samples = Vec::new();
-                let max_attempts = if path == CostPath::MakerTaker { 15 } else { 10 };
-                for attempt in 1..=max_attempts {
-                    if samples.len() == 5 {
-                        break;
-                    }
-                    let entry_quote = next_testnet_quote(&supervisor, Duration::from_secs(60))?;
-                    let entry_id = format!(
-                        "O-305-{}-{requested_notional_usd}-{attempt}-{}",
-                        match path {
-                            CostPath::MakerTaker => "MAKER",
-                            CostPath::TakerTaker => "TAKER",
+        let mut samples = Vec::new();
+        let max_attempts = if path == CostPath::MakerTaker { 20 } else { 10 };
+        for attempt in 1..=max_attempts {
+            if samples.len() == 5 {
+                break;
+            }
+            require_official_and_engine_zero(&supervisor, &runtime, &owner_address)?;
+            let entry_quote = next_testnet_quote(&supervisor, Duration::from_secs(60))?;
+            let entry_id = format!(
+                "O-305-{}-{requested_notional_usd}-{attempt}-{}",
+                match path {
+                    CostPath::MakerTaker => "MAKER",
+                    CostPath::TakerTaker => "TAKER",
+                },
+                unix_ms()?
+            );
+            submit_measurement_order(
+                &mut supervisor,
+                entry_id.clone(),
+                OrderSide::Buy,
+                quantity,
+                quote_price(&entry_quote, OrderSide::Buy, path == CostPath::TakerTaker)?,
+                path == CostPath::MakerTaker,
+                false,
+            )?;
+            let (entry_fill, latest_quote) = wait_for_measurement_fill(
+                &supervisor,
+                &runtime,
+                &entry_id,
+                quantity,
+                if path == CostPath::MakerTaker {
+                    Duration::from_secs(45)
+                } else {
+                    Duration::from_secs(20)
+                },
+            )?;
+            let Some(entry_fill) = entry_fill else {
+                if path == CostPath::MakerTaker {
+                    let cancel = supervisor.send_command(CommandRequest {
+                        command_id: format!("cost-floor-cancel-{}", unix_ms()?),
+                        command: NautilusCommand::CancelOrder {
+                            client_order_id: entry_id,
                         },
-                        unix_ms()?
-                    );
-                    submit_measurement_order(
-                        &mut supervisor,
-                        entry_id.clone(),
-                        OrderSide::Buy,
-                        quantity,
-                        quote_price(&entry_quote, OrderSide::Buy, path == CostPath::TakerTaker)?,
-                        path == CostPath::MakerTaker,
-                        false,
-                    )?;
-                    let (entry_fill, latest_quote) = wait_for_measurement_fill(
-                        &supervisor,
-                        &runtime,
-                        &entry_id,
-                        quantity,
-                        if path == CostPath::MakerTaker {
-                            Duration::from_secs(45)
-                        } else {
-                            Duration::from_secs(20)
-                        },
-                    )?;
-                    let Some(entry_fill) = entry_fill else {
-                        let cancel = supervisor.send_command(CommandRequest {
-                            command_id: format!("cost-floor-cancel-{}", unix_ms()?),
-                            command: NautilusCommand::CancelOrder {
-                                client_order_id: entry_id,
-                            },
-                        })?;
-                        if !matches!(
-                            cancel.outcome,
-                            nautilus_sidecar::CommandOutcome::OrderCanceled { .. }
-                        ) {
-                            bail!(
-                                "unfilled maker cancel was not confirmed: {:?}",
-                                cancel.outcome
-                            );
-                        }
-                        incomplete_maker_attempts.push((requested_notional_usd, attempt));
-                        continue;
-                    };
-                    let observed_quantity = if let StreamEvent::Fill { state, .. } = &entry_fill {
-                        find_string(&Value::Object(state.clone()), &["last_qty"])
-                            .context("entry fill has no quantity")?
-                    } else {
-                        bail!("entry fill has the wrong event type");
-                    };
-                    let complete_size =
-                        decimal_to_units(&observed_quantity, 8)? == decimal_to_units(quantity, 8)?;
-                    if !complete_size {
-                        let cancel = supervisor.send_command(CommandRequest {
-                            command_id: format!("cost-floor-partial-cancel-{}", unix_ms()?),
-                            command: NautilusCommand::CancelOrder {
-                                client_order_id: entry_id,
-                            },
-                        })?;
-                        if !matches!(
-                            cancel.outcome,
-                            nautilus_sidecar::CommandOutcome::OrderCanceled { .. }
-                        ) {
-                            bail!(
-                                "partial maker cancel was not confirmed: {:?}",
-                                cancel.outcome
-                            );
-                        }
-                        incomplete_maker_attempts.push((requested_notional_usd, attempt));
-                    }
-                    let exit_quote = if let Some(quote) = latest_quote {
-                        quote
-                    } else {
-                        next_testnet_quote(&supervisor, Duration::from_secs(60))?
-                    };
-                    let exit_id = format!(
-                        "O-305-EXIT-{requested_notional_usd}-{attempt}-{}",
-                        unix_ms()?
-                    );
-                    submit_measurement_order(
-                        &mut supervisor,
-                        exit_id.clone(),
-                        OrderSide::Sell,
-                        &observed_quantity,
-                        quote_price(&exit_quote, OrderSide::Sell, true)?,
-                        false,
-                        true,
-                    )?;
-                    let (exit_fill, _) = wait_for_measurement_fill(
-                        &supervisor,
-                        &runtime,
-                        &exit_id,
-                        &observed_quantity,
-                        Duration::from_secs(20),
-                    )?;
-                    let exit_fill =
-                        exit_fill.context("reduce-only testnet exit fill did not arrive")?;
-                    if complete_size {
-                        let sample = CostFloorSample::from_legs(
-                            requested_notional_usd,
-                            CostLegObservation::from_events(&entry_quote, &entry_fill)?,
-                            CostLegObservation::from_events(&exit_quote, &exit_fill)?,
-                        )?;
-                        println!("cost_floor_sample={}", serde_json::to_string(&sample)?);
-                        samples.push(sample);
+                    })?;
+                    if !matches!(
+                        cancel.outcome,
+                        nautilus_sidecar::CommandOutcome::OrderCanceled { .. }
+                    ) {
+                        bail!(
+                            "unfilled maker cancel was not confirmed: {:?}",
+                            cancel.outcome
+                        );
                     }
                 }
-                if samples.len() == 5 {
-                    summaries.push(CostFloorSummary::stable(&samples, 3)?);
-                } else if path == CostPath::TakerTaker {
-                    bail!("taker path did not complete five samples");
+                incomplete_maker_attempts.push((requested_notional_usd, attempt));
+                require_official_and_engine_zero(&supervisor, &runtime, &owner_address)?;
+                continue;
+            };
+            let observed_quantity = if let StreamEvent::Fill { state, .. } = &entry_fill {
+                find_string(&Value::Object(state.clone()), &["last_qty"])
+                    .context("entry fill has no quantity")?
+            } else {
+                bail!("entry fill has the wrong event type");
+            };
+            let complete_size =
+                decimal_to_units(&observed_quantity, 8)? == decimal_to_units(quantity, 8)?;
+            if !complete_size && path == CostPath::MakerTaker {
+                let cancel = supervisor.send_command(CommandRequest {
+                    command_id: format!("cost-floor-partial-cancel-{}", unix_ms()?),
+                    command: NautilusCommand::CancelOrder {
+                        client_order_id: entry_id,
+                    },
+                })?;
+                if !matches!(
+                    cancel.outcome,
+                    nautilus_sidecar::CommandOutcome::OrderCanceled { .. }
+                ) {
+                    bail!(
+                        "partial maker cancel was not confirmed: {:?}",
+                        cancel.outcome
+                    );
                 }
+                incomplete_maker_attempts.push((requested_notional_usd, attempt));
+            }
+            let exit_quote = if let Some(quote) = latest_quote {
+                quote
+            } else {
+                next_testnet_quote(&supervisor, Duration::from_secs(60))?
+            };
+            let exit_id = format!(
+                "O-305-EXIT-{requested_notional_usd}-{attempt}-{}",
+                unix_ms()?
+            );
+            submit_measurement_order(
+                &mut supervisor,
+                exit_id.clone(),
+                OrderSide::Sell,
+                &observed_quantity,
+                quote_price(&exit_quote, OrderSide::Sell, true)?,
+                false,
+                true,
+            )?;
+            let (exit_fill, _) = wait_for_measurement_fill(
+                &supervisor,
+                &runtime,
+                &exit_id,
+                &observed_quantity,
+                Duration::from_secs(20),
+            )?;
+            let exit_fill = exit_fill.context("reduce-only testnet exit fill did not arrive")?;
+            require_official_and_engine_zero(&supervisor, &runtime, &owner_address)?;
+            if complete_size {
+                let sample = CostFloorSample::from_legs(
+                    requested_notional_usd,
+                    CostLegObservation::from_events(&entry_quote, &entry_fill)?,
+                    CostLegObservation::from_events(&exit_quote, &exit_fill)?,
+                )?;
+                println!("cost_floor_sample={}", serde_json::to_string(&sample)?);
+                samples.push(sample);
             }
         }
+        let summary = CostFloorSummary::stable(&samples, 3)?;
         let entries = runtime.ledger.entries(&LedgerQuery::default())?;
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "schema":COST_FLOOR_SCHEMA,
                 "network":"testnet",
-                "summaries":summaries,
+                "summary":summary,
                 "incomplete_maker_attempts":incomplete_maker_attempts,
                 "ledger_fill_entries":entries.iter().filter(|entry| entry.kind == LedgerEntryKind::Fill).count(),
                 "ending_posture":"flat_after_every_completed_sample",
@@ -2875,14 +3048,157 @@ mod tests {
             }))?
         );
         supervisor.stop()?;
-        if summaries
-            .iter()
-            .filter(|summary| summary.path == CostPath::MakerTaker)
-            .count()
-            != configurations.len()
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the testnet key and public read-only venue access"]
+    fn confirmed_testnet_cost_floor_safety_gate_is_zero() -> Result<()> {
+        let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
+            .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .context("repository root")?
+            .to_path_buf();
+        let config = nautilus_sidecar::NautilusConfig {
+            network: nautilus_sidecar::Network::Testnet,
+            python: repository_root.join("sidecar/nautilus/.venv/bin/python"),
+            engine: repository_root.join("sidecar/nautilus/engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(40),
+        };
+        let private_key = nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?;
+        let owner_address = private_key.ethereum_address()?;
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(config, private_key)?;
+        supervisor.start()?;
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        require_official_and_engine_zero(&supervisor, &runtime, &owner_address)?;
+        supervisor.stop()?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires explicit authorization to close the observed testnet-only 0.0002 BTC exposure"]
+    fn confirmed_testnet_cost_floor_closes_exact_observed_exposure_once() -> Result<()> {
+        if std::env::var("OMEGA_NAUTILUS_COST_CLEANUP_CONFIRM").as_deref()
+            != Ok("close-exact-observed-0.0002")
         {
-            bail!("maker completion did not produce a stable median at every clip");
+            bail!(
+                "set OMEGA_NAUTILUS_COST_CLEANUP_CONFIRM=close-exact-observed-0.0002 after explicit authorization"
+            );
         }
+        let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
+            .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let private_key = nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?;
+        let owner_address = private_key.ethereum_address()?;
+        let official_before = official_testnet_state(&owner_address)?;
+        if !official_before.open_orders.is_empty()
+            || official_before.positions
+                != vec![nautilus_sidecar::OfficialPosition {
+                    coin: "BTC".into(),
+                    size: "0.0002".into(),
+                }]
+        {
+            bail!(
+                "cleanup refused: expected no open orders and exact BTC 0.0002 exposure, got open_order_ids={:?} positions={:?}",
+                official_before
+                    .open_orders
+                    .iter()
+                    .map(|order| order.oid)
+                    .collect::<Vec<_>>(),
+                official_before.positions,
+            );
+        }
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .context("repository root")?
+            .to_path_buf();
+        let config = nautilus_sidecar::NautilusConfig {
+            network: nautilus_sidecar::Network::Testnet,
+            python: repository_root.join("sidecar/nautilus/.venv/bin/python"),
+            engine: repository_root.join("sidecar/nautilus/engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(40),
+        };
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(config, private_key)?;
+        supervisor.start()?;
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let quote = next_testnet_quote(&supervisor, Duration::from_secs(60))?;
+        let client_order_id = format!("O-305-EXACT-CLEANUP-{}", unix_ms()?);
+        let receipt = supervisor.send_command(CommandRequest {
+            command_id: "cost-floor-exact-cleanup-305".into(),
+            command: NautilusCommand::PlaceOrder {
+                client_order_id: client_order_id.clone(),
+                instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                side: OrderSide::Sell,
+                quantity: "0.0002".into(),
+                price: quote_price(&quote, OrderSide::Sell, true)?,
+                time_in_force: OrderTimeInForce::Ioc,
+                post_only: false,
+                reduce_only: true,
+            },
+        })?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        let mut fill_key = None;
+        let mut zero_positions = None;
+        let mut zero_orders = None;
+        let mut official_after = official_testnet_state(&owner_address)?;
+        while std::time::Instant::now() < deadline {
+            let frame = supervisor.take_stream_frame()?;
+            runtime.ingest(&frame.state)?;
+            for event in &frame.state {
+                if let StreamEvent::Fill {
+                    generation,
+                    sequence,
+                    state,
+                    ..
+                } = event
+                    && find_string(&Value::Object(state.clone()), &["client_order_id"]).as_deref()
+                        == Some(client_order_id.as_str())
+                {
+                    fill_key = Some((*generation, *sequence));
+                }
+            }
+            let (positions, orders) = engine_zero_observations(&frame);
+            if positions.is_some() {
+                zero_positions = positions;
+            }
+            if orders.is_some() {
+                zero_orders = orders;
+            }
+            official_after = official_testnet_state(&owner_address)?;
+            if fill_key.is_some()
+                && official_after.is_zero_exposure()
+                && zero_positions == Some(true)
+                && zero_orders == Some(true)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let (generation, sequence) = fill_key.context("exact cleanup fill did not arrive")?;
+        if !official_after.is_zero_exposure() {
+            bail!("official venue was not flat after exact cleanup: {official_after:?}");
+        }
+        if zero_positions != Some(true) || zero_orders != Some(true) {
+            bail!("Nautilus was not flat with zero live orders after exact cleanup");
+        }
+        let entries = runtime.ledger.entries(&LedgerQuery::default())?;
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.kind == LedgerEntryKind::Fill
+                    && entry.metadata["generation"] == generation
+                    && entry.metadata["stream_sequence"] == sequence
+            })
+            .context("exact cleanup fill did not reach the ledger")?;
+        println!(
+            "cost_floor_cleanup=official_open_orders:0 official_positions:0 nautilus_orders:0 nautilus_positions:0 generation={generation} sequence={sequence} ledger_event_id={} receipt={:?}",
+            entry.event_id, receipt.outcome
+        );
+        supervisor.stop()?;
         Ok(())
     }
 
@@ -3027,6 +3343,7 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: "0.001".into(),
                 price: flatten_price,
+                time_in_force: OrderTimeInForce::Ioc,
                 post_only: false,
                 reduce_only: true,
             },

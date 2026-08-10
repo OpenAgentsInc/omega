@@ -104,6 +104,7 @@ class OmegaStreamStrategy(Strategy):
         self._last_account_snapshot_ns = 0
         self._last_order_signature = ""
         self._last_position_signature = ""
+        self._published_fill_ids: set[str] = set()
 
     def on_start(self) -> None:
         self.subscribe_quotes(INSTRUMENT, client_id=CLIENT)
@@ -144,10 +145,17 @@ class OmegaStreamStrategy(Strategy):
         self._publisher.publish("order", event.to_dict(), lossless=True)
 
     def on_order_filled(self, event: Any) -> None:
-        self._publisher.publish("fill", event.to_dict(), lossless=True)
+        self._publish_fill(event.to_dict())
 
     def on_position_event(self, event: Any) -> None:
         self._publisher.publish("position", event.to_dict(), lossless=True)
+
+    def _publish_fill(self, event: dict[str, Any]) -> None:
+        fill_id = event.get("trade_id") or event.get("event_id")
+        if not isinstance(fill_id, str) or not fill_id or fill_id in self._published_fill_ids:
+            return
+        self._published_fill_ids.add(fill_id)
+        self._publisher.publish("fill", event, lossless=True)
 
     def _publish_state(self, _: Any) -> None:
         account = self.cache.account_for_venue(VENUE)
@@ -165,7 +173,19 @@ class OmegaStreamStrategy(Strategy):
                 self._last_account_event_count = account.event_count
                 self._last_account_snapshot_ns = now_ns
 
-        orders = [order.to_dict() for order in self.cache.orders(venue=VENUE)]
+        orders = [order.to_dict() for order in self.cache.orders_open(venue=VENUE)]
+        # An IOC remainder can never rest at the venue. Hyperliquid reconciliation can
+        # reconstruct a partial fill without a terminal cancel event, leaving Nautilus'
+        # local cache at PARTIALLY_FILLED after the official openOrders set is empty.
+        # Do not publish that impossible remainder as live state.
+        orders = [
+            order
+            for order in orders
+            if not (
+                order.get("time_in_force") == "IOC"
+                and order.get("status") == "PARTIALLY_FILLED"
+            )
+        ]
         order_signature = json.dumps(orders, sort_keys=True, separators=(",", ":"))
         if order_signature != self._last_order_signature:
             self._publisher.publish(
@@ -175,7 +195,13 @@ class OmegaStreamStrategy(Strategy):
             )
             self._last_order_signature = order_signature
 
-        positions = [position.to_dict() for position in self.cache.positions(venue=VENUE)]
+        all_positions = [position.to_dict() for position in self.cache.positions(venue=VENUE)]
+        for position in all_positions:
+            for event in position.get("events", []):
+                if isinstance(event, dict) and event.get("type") == "OrderFilled":
+                    self._publish_fill(event)
+
+        positions = [position.to_dict() for position in self.cache.positions_open(venue=VENUE)]
         position_signature = json.dumps(positions, sort_keys=True, separators=(",", ":"))
         if position_signature != self._last_position_signature:
             self._publisher.publish(

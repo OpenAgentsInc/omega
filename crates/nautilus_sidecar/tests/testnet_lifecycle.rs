@@ -4,7 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nautilus_sidecar::{
     CommandOutcome, CommandRequest, LifecycleEvent, NautilusCommand, NautilusConfig,
-    NautilusSupervisor, Network, OrderSide, PrivateKey, StrategyParameters, StreamEvent,
+    NautilusSupervisor, Network, OrderSide, OrderTimeInForce, PrivateKey, StrategyParameters,
+    StreamEvent,
 };
 
 #[test]
@@ -224,6 +225,7 @@ fn command_channel_places_cancels_and_controls_an_engine_strategy() {
                 side: OrderSide::Buy,
                 quantity: "0.001".into(),
                 price,
+                time_in_force: OrderTimeInForce::Gtc,
                 post_only: true,
                 reduce_only: false,
             },

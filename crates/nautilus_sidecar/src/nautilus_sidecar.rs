@@ -15,8 +15,9 @@ mod agent_wallet;
 
 pub use agent_wallet::{
     AGENT_WALLET_AUTHORITY_COPY, AgentApprovalStatus, AgentWalletHaltReason, AgentWalletSummary,
-    StoredAgentWallet, credential_key, evaluate_extra_agents, generate_and_store_agent_wallet,
-    load_agent_wallet, refresh_agent_wallet_approval,
+    OfficialOpenOrder, OfficialPosition, OfficialVenueState, StoredAgentWallet, credential_key,
+    evaluate_extra_agents, evaluate_official_venue_state, generate_and_store_agent_wallet,
+    load_agent_wallet, probe_official_venue_state, refresh_agent_wallet_approval,
 };
 
 pub const ENABLE_ENVIRONMENT_VARIABLE: &str = "OMEGA_NAUTILUS_SIDECAR";
@@ -106,6 +107,22 @@ impl PrivateKey {
             bail!("Hyperliquid testnet private key has an invalid shape");
         }
         Ok(Self(Zeroizing::new(value)))
+    }
+
+    pub fn ethereum_address(&self) -> Result<String> {
+        let encoded = self
+            .0
+            .strip_prefix("0x")
+            .context("Hyperliquid private key has no hexadecimal prefix")?;
+        let bytes = hex::decode(encoded).context("decode Hyperliquid private key")?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("Hyperliquid private key is not 32 bytes"))?;
+        let secret_key = secp256k1::SecretKey::from_byte_array(bytes)
+            .context("parse Hyperliquid private key")?;
+        let public_key =
+            secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret_key);
+        agent_wallet::ethereum_address(&public_key)
     }
 }
 
@@ -477,6 +494,13 @@ pub struct StrategyParameters {
     pub mandate_revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderTimeInForce {
+    Gtc,
+    Ioc,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NautilusCommand {
@@ -486,6 +510,7 @@ pub enum NautilusCommand {
         side: OrderSide,
         quantity: String,
         price: String,
+        time_in_force: OrderTimeInForce,
         post_only: bool,
         reduce_only: bool,
     },
@@ -2138,6 +2163,7 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: "0.001".into(),
                 price: "60000.0".into(),
+                time_in_force: OrderTimeInForce::Gtc,
                 post_only: true,
                 reduce_only: false,
             },
@@ -2224,6 +2250,7 @@ done
                     side: OrderSide::Buy,
                     quantity: "0.001".into(),
                     price: "60000".into(),
+                    time_in_force: OrderTimeInForce::Gtc,
                     post_only: true,
                     reduce_only: false,
                 },

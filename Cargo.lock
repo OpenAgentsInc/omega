@@ -10482,6 +10482,7 @@ dependencies = [
  "trading_mandate",
  "trading_workspace_ui",
  "ui",
+ "zed-reqwest",
 ]
 
 [[package]]
@@ -10505,6 +10506,7 @@ dependencies = [
  "smol",
  "tempfile",
  "thiserror 2.0.17",
+ "zed-reqwest",
  "zed_credentials_provider",
  "zeroize",
 ]

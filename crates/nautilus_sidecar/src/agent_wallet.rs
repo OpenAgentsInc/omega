@@ -54,7 +54,7 @@ fn validate_address(label: &str, address: &str) -> Result<()> {
     Ok(())
 }
 
-fn ethereum_address(public_key: &PublicKey) -> Result<String> {
+pub(crate) fn ethereum_address(public_key: &PublicKey) -> Result<String> {
     let serialized = public_key.serialize_uncompressed();
     let coordinates = serialized
         .get(1..)
@@ -304,6 +304,140 @@ struct ExtraAgent {
     valid_until_ms: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialOpenOrder {
+    pub coin: String,
+    pub oid: u64,
+    pub cloid: Option<String>,
+    pub side: String,
+    pub sz: String,
+    pub limit_px: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OfficialPosition {
+    pub coin: String,
+    pub size: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OfficialVenueState {
+    pub network: Network,
+    pub open_orders: Vec<OfficialOpenOrder>,
+    pub positions: Vec<OfficialPosition>,
+}
+
+impl OfficialVenueState {
+    pub fn is_zero_exposure(&self) -> bool {
+        self.network == Network::Testnet && self.open_orders.is_empty() && self.positions.is_empty()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearinghouseState {
+    asset_positions: Vec<AssetPosition>,
+}
+
+#[derive(Deserialize)]
+struct AssetPosition {
+    position: PositionWire,
+}
+
+#[derive(Deserialize)]
+struct PositionWire {
+    coin: String,
+    szi: String,
+}
+
+fn decimal_is_zero(value: &str) -> Result<bool> {
+    let unsigned = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
+    if unsigned.is_empty()
+        || unsigned
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit() && byte != b'.')
+        || unsigned.bytes().filter(|byte| *byte == b'.').count() > 1
+    {
+        bail!("Hyperliquid position size is not a decimal");
+    }
+    Ok(unsigned.bytes().all(|byte| byte == b'0' || byte == b'.'))
+}
+
+pub fn evaluate_official_venue_state(
+    open_orders_response: &[u8],
+    clearinghouse_response: &[u8],
+) -> Result<OfficialVenueState> {
+    let open_orders = serde_json::from_slice::<Vec<OfficialOpenOrder>>(open_orders_response)
+        .context("decode Hyperliquid openOrders response")?;
+    let clearinghouse = serde_json::from_slice::<ClearinghouseState>(clearinghouse_response)
+        .context("decode Hyperliquid clearinghouseState response")?;
+    let mut positions = Vec::new();
+    for asset in clearinghouse.asset_positions {
+        if !decimal_is_zero(&asset.position.szi)? {
+            positions.push(OfficialPosition {
+                coin: asset.position.coin,
+                size: asset.position.szi,
+            });
+        }
+    }
+    Ok(OfficialVenueState {
+        network: Network::Testnet,
+        open_orders,
+        positions,
+    })
+}
+
+async fn info_response(
+    http_client: Arc<dyn HttpClient>,
+    network: Network,
+    body: Vec<u8>,
+) -> Result<Vec<u8>> {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(info_url(network)?)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .body(AsyncBody::from(body))?;
+    let mut response = http_client.send(request).await?;
+    if !response.status().is_success() {
+        bail!("Hyperliquid info probe returned {}", response.status());
+    }
+    let mut response_body = Vec::new();
+    response.body_mut().read_to_end(&mut response_body).await?;
+    Ok(response_body)
+}
+
+pub async fn probe_official_venue_state(
+    http_client: Arc<dyn HttpClient>,
+    network: Network,
+    owner_address: &str,
+) -> Result<OfficialVenueState> {
+    validate_address("Hyperliquid owner address", owner_address)?;
+    let open_orders = info_response(
+        http_client.clone(),
+        network,
+        serde_json::to_vec(&serde_json::json!({
+            "type": "openOrders",
+            "user": owner_address,
+        }))?,
+    )
+    .await?;
+    let clearinghouse = info_response(
+        http_client,
+        network,
+        serde_json::to_vec(&serde_json::json!({
+            "type": "clearinghouseState",
+            "user": owner_address,
+        }))?,
+    )
+    .await?;
+    evaluate_official_venue_state(&open_orders, &clearinghouse)
+}
+
 pub fn evaluate_extra_agents(
     wallet: &StoredAgentWallet,
     response: &[u8],
@@ -405,6 +539,25 @@ mod tests {
             TESTNET_INFO_URL
         );
         assert!(info_url(Network::Mainnet).is_err());
+    }
+
+    #[test]
+    fn official_venue_state_requires_zero_orders_and_positions() {
+        let zero = evaluate_official_venue_state(
+            br#"[]"#,
+            br#"{"assetPositions":[{"position":{"coin":"BTC","szi":"0.000"}}]}"#,
+        )
+        .expect("zero venue state");
+        assert!(zero.is_zero_exposure());
+
+        let exposed = evaluate_official_venue_state(
+            br#"[{"coin":"BTC","oid":7,"cloid":"0x01","side":"B","sz":"0.001","limitPx":"60000"}]"#,
+            br#"{"assetPositions":[{"position":{"coin":"BTC","szi":"-0.001"}}]}"#,
+        )
+        .expect("exposed venue state");
+        assert!(!exposed.is_zero_exposure());
+        assert_eq!(exposed.open_orders[0].oid, 7);
+        assert_eq!(exposed.positions[0].size, "-0.001");
     }
 
     #[test]

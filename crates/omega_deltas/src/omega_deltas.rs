@@ -31574,5 +31574,48 @@ mod tests {
             !governance.contains("Network::Mainnet"),
             "OMEGA-DELTA-0277: cost-floor governance made mainnet representable"
         );
+        for required in [
+            "require_official_and_engine_zero",
+            "official_open_orders:0",
+            "official_positions:0",
+            "nautilus_orders:0",
+            "nautilus_positions:0",
+        ] {
+            assert!(
+                governance.contains(required),
+                "OMEGA-DELTA-0277: dual safety gate lost `{required}`"
+            );
+        }
+        let sidecar = [
+            read_repository_file("crates/nautilus_sidecar/src/nautilus_sidecar.rs"),
+            read_repository_file("crates/nautilus_sidecar/src/agent_wallet.rs"),
+        ]
+        .join(" ");
+        for required in [
+            "OrderTimeInForce",
+            "Ioc",
+            "probe_official_venue_state",
+            "openOrders",
+            "clearinghouseState",
+        ] {
+            assert!(
+                sidecar.contains(required),
+                "OMEGA-DELTA-0277: venue safety boundary lost `{required}`"
+            );
+        }
+        let stream = read_repository_file("sidecar/nautilus/stream_strategy.py");
+        for required in [
+            "cache.orders_open(venue=VENUE)",
+            "cache.positions_open(venue=VENUE)",
+            "order.get(\"time_in_force\") == \"IOC\"",
+            "order.get(\"status\") == \"PARTIALLY_FILLED\"",
+            "self._published_fill_ids",
+            "event.get(\"type\") == \"OrderFilled\"",
+        ] {
+            assert!(
+                stream.contains(required),
+                "OMEGA-DELTA-0277: reconciled live-state filter lost `{required}`"
+            );
+        }
     }
 }

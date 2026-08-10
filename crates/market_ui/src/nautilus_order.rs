@@ -3,7 +3,7 @@
 //! remain terminal and are never retried.
 
 use nautilus_sidecar::{
-    CommandOutcome, CommandReceipt, CommandRequest, NautilusCommand, OrderSide,
+    CommandOutcome, CommandReceipt, CommandRequest, NautilusCommand, OrderSide, OrderTimeInForce,
 };
 use ui::{
     MarketEnvironment, OrderConfirmation, OrderConfirmationSource, OrderDraft, OrderKind,
@@ -78,6 +78,7 @@ impl NautilusOrderIntent {
                 side: OrderSide::Buy,
                 quantity: format!("{:.3}", self.preview.quantity),
                 price: format!("{:.1}", self.preview.limit_price),
+                time_in_force: OrderTimeInForce::Gtc,
                 post_only: true,
                 reduce_only: false,
             },
