@@ -10441,6 +10441,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nautilus_sidecar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "credentials_provider",
+ "gpui",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.17",
+ "zed_credentials_provider",
+ "zeroize",
+]
+
+[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11399,6 +11417,7 @@ dependencies = [
  "menu",
  "migrator",
  "mimalloc",
+ "nautilus_sidecar",
  "node_runtime",
  "notifications",
  "omega_actions",

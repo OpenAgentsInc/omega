@@ -1,0 +1,31 @@
+[package]
+name = "nautilus_sidecar"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/nautilus_sidecar.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+credentials_provider.workspace = true
+gpui.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+thiserror.workspace = true
+zed_credentials_provider.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

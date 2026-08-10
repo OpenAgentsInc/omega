@@ -113,6 +113,7 @@ members = [
     "crates/lsp_locations",
     "crates/markdown",
     "crates/market_ui",
+    "crates/nautilus_sidecar",
     "crates/mermaid_render",
     "crates/media",
     "crates/menu",
@@ -390,6 +391,7 @@ lsp = { path = "crates/lsp" }
 lsp_locations = { path = "crates/lsp_locations" }
 markdown = { path = "crates/markdown" }
 market_ui = { path = "crates/market_ui" }
+nautilus_sidecar = { path = "crates/nautilus_sidecar" }
 mermaid_render = { path = "crates/mermaid_render" }
 media = { path = "crates/media" }
 menu = { path = "crates/menu" }

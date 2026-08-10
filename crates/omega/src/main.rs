@@ -753,6 +753,8 @@ fn main() {
         // omega#244: registers the Markets panel's palette toggle; inert
         // unless OMEGA_MARKET_PANEL=1 (the panel itself loads in zed.rs).
         market_ui::init(cx);
+        // OMEGA-DELTA-0268: the optional testnet-only execution engine is app-owned.
+        nautilus_sidecar::init(cx);
         zed::telemetry_log::init(cx);
         zed::remote_debug::init(cx);
         web_search::init(cx);

@@ -238,6 +238,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0265",
     "OMEGA-DELTA-0266",
     "OMEGA-DELTA-0267",
+    "OMEGA-DELTA-0268",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30909,5 +30910,51 @@ mod tests {
                 "OMEGA-DELTA-0267: the retained plugin seam lost `{required}`"
             );
         }
+    }
+
+    /// Omega owns one versioned testnet sidecar lifecycle and refuses any
+    /// configuration that could aim the execution engine at mainnet.
+    #[test]
+    fn nautilus_lifecycle_is_app_owned_versioned_and_testnet_only() {
+        let lifecycle = without_comments(&read_repository_file(
+            "crates/nautilus_sidecar/src/nautilus_sidecar.rs",
+        ));
+        for required in [
+            "pub enum Network",
+            "Testnet",
+            "mainnet is disabled; only testnet is permitted",
+            "EVENT_SCHEMA",
+            "ensure_healthy(",
+            "pub fn stop(",
+        ] {
+            assert!(
+                lifecycle.contains(required),
+                "OMEGA-DELTA-0268: Nautilus lifecycle lost `{required}`"
+            );
+        }
+        assert!(
+            !lifecycle.contains("Network::Mainnet"),
+            "OMEGA-DELTA-0268: Nautilus lifecycle gained a mainnet path"
+        );
+
+        let engine = without_comments(&read_repository_file("sidecar/nautilus/engine.py"));
+        for required in [
+            "HyperliquidEnvironment.TESTNET",
+            "with_reconciliation_lookback_mins",
+            "EVENT_SCHEMA",
+            "Startup reconciliation completed",
+            "args.network != \"testnet\"",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0268: Nautilus engine boundary lost `{required}`"
+            );
+        }
+
+        let startup = without_comments(&read_repository_file("crates/omega/src/main.rs"));
+        assert!(
+            startup.contains("nautilus_sidecar::init(cx);"),
+            "OMEGA-DELTA-0268: Omega no longer owns the Nautilus lifecycle"
+        );
     }
 }

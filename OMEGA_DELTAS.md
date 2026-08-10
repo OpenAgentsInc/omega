@@ -10527,3 +10527,23 @@ remain the governance layer above Nautilus.
 
 - **Enforced by:** `strategy_engine` compatibility tests and
   `nautilus_executes_while_omega_governs` in `omega_deltas`.
+
+### OMEGA-DELTA-0268 — Omega owns a testnet-only Nautilus engine lifecycle
+
+Omega can opt into one managed local NautilusTrader process. The app reads the
+Hyperliquid testnet key from its private, release-namespaced credential store,
+passes it only through the child environment, waits for a versioned lifecycle
+event proving the testnet account and bounded reconciliation are available,
+restarts a crashed process with a new generation, and terminates the child
+during app shutdown. Lifecycle events are typed JSON and generation-fenced.
+
+The sidecar pins CPython 3.12 and `nautilus_trader==2.0.0rc2`. Both the Rust
+configuration and Python entrypoint reject mainnet. The engine config uses the
+Hyperliquid TESTNET data and execution adapters, in-memory Nautilus state, and
+a 60-minute reconciliation lookback. It installs no strategy and submits no
+orders; tick-rate strategy work remains inside Nautilus in the later engine
+strategy lane, while governance remains above this process boundary.
+
+- **Enforced by:** `nautilus_sidecar` unit tests and
+  `nautilus_lifecycle_is_app_owned_versioned_and_testnet_only` in
+  `omega_deltas`.
