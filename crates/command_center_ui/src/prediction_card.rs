@@ -23,8 +23,23 @@ pub enum ForecastDisplay {
     },
 }
 
+/// The color intent of a forecast headline, resolved to a concrete token at
+/// render time when the theme (`cx`) is in hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForecastTone {
+    Direction(PredictedDirection),
+    Neutral,
+}
+
+fn tone_color(tone: ForecastTone, cx: &App) -> Color {
+    match tone {
+        ForecastTone::Direction(direction) => direction_color(direction, cx),
+        ForecastTone::Neutral => Color::Accent,
+    }
+}
+
 impl ForecastDisplay {
-    fn headline(&self) -> (SharedString, Color, IconName) {
+    fn headline(&self) -> (SharedString, ForecastTone, IconName) {
         match self {
             Self::Directional { direction, .. } => {
                 let (label, icon) = match direction {
@@ -32,7 +47,7 @@ impl ForecastDisplay {
                     PredictedDirection::Down => ("down", IconName::OmegaPredictDown),
                     PredictedDirection::Flat => ("no change", IconName::Dash),
                 };
-                (label.into(), direction_color(*direction), icon)
+                (label.into(), ForecastTone::Direction(*direction), icon)
             }
             Self::Distribution { outcomes } => {
                 let best = outcomes
@@ -40,7 +55,7 @@ impl ForecastDisplay {
                     .max_by_key(|(_, probability)| *probability)
                     .map(|(outcome, _)| outcome.clone())
                     .unwrap_or_else(|| "distribution".into());
-                (best, Color::Accent, IconName::OmegaPredict)
+                (best, ForecastTone::Neutral, IconName::OmegaPredict)
             }
         }
     }
@@ -246,7 +261,8 @@ impl PredictionCard {
 impl RenderOnce for PredictionCard {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let data = self.data;
-        let (headline, headline_color, headline_icon) = data.forecast.headline();
+        let (headline, headline_tone, headline_icon) = data.forecast.headline();
+        let headline_color = tone_color(headline_tone, cx);
         let (horizon, horizon_color) = data.horizon_line(self.now_ms);
         let distribution_rows = match &data.forecast {
             ForecastDisplay::Distribution { outcomes } => outcomes.clone(),
@@ -294,7 +310,11 @@ impl RenderOnce for PredictionCard {
                                     .color(headline_color),
                             ),
                     )
-                    .child(Label::new(horizon).size(LabelSize::XSmall).color(horizon_color)),
+                    .child(
+                        Label::new(horizon)
+                            .size(LabelSize::XSmall)
+                            .color(horizon_color),
+                    ),
             )
             .child(
                 v_flex()
@@ -367,7 +387,8 @@ impl RenderOnce for PredictionList {
                 )
             })
             .children(self.rows.into_iter().enumerate().map(|(index, row)| {
-                let (headline, headline_color, headline_icon) = row.forecast.headline();
+                let (headline, headline_tone, headline_icon) = row.forecast.headline();
+                let headline_color = tone_color(headline_tone, cx);
                 let (horizon, horizon_color) = row.horizon_line(now_ms);
                 let verdict = match &row.resolution {
                     PredictionResolution::Pending => None,
@@ -401,7 +422,11 @@ impl RenderOnce for PredictionList {
                             .color(headline_color),
                     )
                     .child(Label::new(row.instrument.clone()).size(LabelSize::Small))
-                    .child(Label::new(headline).size(LabelSize::XSmall).color(headline_color))
+                    .child(
+                        Label::new(headline)
+                            .size(LabelSize::XSmall)
+                            .color(headline_color),
+                    )
                     .child(
                         Label::new(format_probability_micros(row.confidence_micros))
                             .size(LabelSize::XSmall)
@@ -513,7 +538,12 @@ impl Component for PredictionCard {
         let predictions = demo_predictions();
         let mut examples: Vec<_> = predictions
             .iter()
-            .zip(["Pending", "Resolved correct", "Resolved wrong", "No change (scored)"])
+            .zip([
+                "Pending",
+                "Resolved correct",
+                "Resolved wrong",
+                "No change (scored)",
+            ])
             .map(|(data, name)| {
                 single_example(
                     name,
@@ -632,9 +662,9 @@ mod tests {
         };
         event.draft.confidence_micros = 550_000;
         let data = PredictionCardData::from_event(&event, None);
-        let (headline, color, _) = data.forecast.headline();
+        let (headline, tone, _) = data.forecast.headline();
         assert_eq!(headline.as_ref(), "no change");
-        assert_eq!(color, Color::Muted);
+        assert_eq!(tone, ForecastTone::Direction(PredictedDirection::Flat));
     }
 
     #[test]

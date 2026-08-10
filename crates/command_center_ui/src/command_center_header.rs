@@ -46,7 +46,8 @@ impl PortfolioSummary {
     ) -> anyhow::Result<Self> {
         let mut portfolio_value_sats = 0_i64;
         for venue in venues {
-            portfolio_value_sats = portfolio_value_sats.saturating_add(ledger.venue_balance(venue)?);
+            portfolio_value_sats =
+                portfolio_value_sats.saturating_add(ledger.venue_balance(venue)?);
         }
         let today = ledger.profit_report(&LedgerQuery {
             from_ms: Some((now_ms - DAY_MS).max(0)),
@@ -117,18 +118,18 @@ impl RenderOnce for CommandCenterHeader {
             .child(stat_cell(
                 "PnL today",
                 format_signed_sats(summary.pnl_today_sats),
-                signed_color(summary.pnl_today_sats),
+                signed_color(summary.pnl_today_sats, cx),
             ))
             .child(stat_cell(
                 "PnL 30d",
                 format_signed_sats(summary.pnl_30d_sats),
-                signed_color(summary.pnl_30d_sats),
+                signed_color(summary.pnl_30d_sats, cx),
             ))
             .child(stat_cell(
                 "Max drawdown",
                 format_sats(summary.max_drawdown_sats),
                 if summary.max_drawdown_sats < 0 {
-                    Color::Error
+                    signed_color(summary.max_drawdown_sats, cx)
                 } else {
                     Color::Muted
                 },

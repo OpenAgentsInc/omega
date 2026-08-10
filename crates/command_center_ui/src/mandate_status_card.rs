@@ -266,9 +266,15 @@ impl RenderOnce for MandateStatusCard {
             Color::Muted
         };
         let expiry = if expired {
-            format!("expired {}", format_countdown(self.expires_at_ms, self.now_ms))
+            format!(
+                "expired {}",
+                format_countdown(self.expires_at_ms, self.now_ms)
+            )
         } else {
-            format!("expires {}", format_countdown(self.expires_at_ms, self.now_ms))
+            format!(
+                "expires {}",
+                format_countdown(self.expires_at_ms, self.now_ms)
+            )
         };
         let network = match self.network {
             TradingNetwork::Signet => "signet",
@@ -465,7 +471,10 @@ mod tests {
         assert!((meters[0].fraction - 0.5).abs() < 1e-6);
         assert!((meters[2].fraction - 0.5).abs() < 1e-6);
         assert!((meters[4].fraction - 0.5).abs() < 1e-6);
-        assert!((meters[5].fraction - 0.5).abs() < 1e-6, "liquidation meter inverts: min buffer over live distance");
+        assert!(
+            (meters[5].fraction - 0.5).abs() < 1e-6,
+            "liquidation meter inverts: min buffer over live distance"
+        );
     }
 
     #[test]

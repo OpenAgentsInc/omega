@@ -353,7 +353,9 @@ impl RenderOnce for ActivityFeed {
                         "command-center-activity-feed-rows",
                         count,
                         move |range, _window, _cx| {
-                            range.filter_map(|index| Some(feed_row(events.get(index)?))).collect()
+                            range
+                                .filter_map(|index| Some(feed_row(events.get(index)?)))
+                                .collect()
                         },
                     )
                     .h(self.height)
@@ -561,7 +563,10 @@ mod tests {
             99_000,
         );
         assert_eq!(authorized.kind, ActivityEventKind::Order);
-        assert_eq!(authorized.at_ms, 99_000, "untimestamped lifecycle variants use the observation time");
+        assert_eq!(
+            authorized.at_ms, 99_000,
+            "untimestamped lifecycle variants use the observation time"
+        );
     }
 
     #[test]

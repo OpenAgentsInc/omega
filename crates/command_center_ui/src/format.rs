@@ -1,53 +1,47 @@
-//! Minimal local number-formatting and up/down color shims.
+//! Command-center number and color helpers.
 //!
-//! A shared financial theme-token and formatting kit is landing in
-//! `crates/ui` as part of omega#284; when it does, these helpers get
-//! replaced by that kit so every market surface agrees on formatting and
-//! colorblind-safe up/down semantics. Until then the command-center
-//! components format through this one module so the swap is a single edit.
+//! The number grouping, sats/BTC/USD formatting, and colorblind-safe up/down
+//! semantics all come from the shared financial kit in `crates/ui`
+//! (`ui::MarketTokens`, `ui::MarketDirection`, `ui::format_sats`, …) so every
+//! market surface agrees on one formatting and color path. The helpers here
+//! are the thin command-center-specific layer on top: signed money wrappers,
+//! the prediction/probability/basis-point/duration formatters the kit does
+//! not carry, and the `App`-resolved direction colors that turn a signed
+//! quantity into one of the kit's tokens.
 
 use chrono::{TimeZone as _, Utc};
-use ui::Color;
+use gpui::App;
+use ui::{
+    Color, MarketDirection, MarketTokens, format_btc as kit_format_btc, format_grouped_u64,
+    format_sats as kit_format_sats,
+};
 
-fn group_thousands(value: u64) -> String {
-    let digits = value.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    let offset = digits.len() % 3;
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (index + 3 - offset).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(character);
-    }
-    grouped
-}
-
+/// Unsigned sats with a leading `-` when negative: `"1,234,567 sats"`.
 pub fn format_sats(sats: i64) -> String {
     let sign = if sats < 0 { "-" } else { "" };
-    format!("{sign}{} sats", group_thousands(sats.unsigned_abs()))
+    format!("{sign}{}", kit_format_sats(sats.unsigned_abs()))
 }
 
+/// Sats that always show their direction: `"+42,000 sats"`, `"-1,000 sats"`,
+/// `"0 sats"`.
 pub fn format_signed_sats(sats: i64) -> String {
     let sign = match sats {
         value if value > 0 => "+",
         value if value < 0 => "-",
         _ => "",
     };
-    format!("{sign}{} sats", group_thousands(sats.unsigned_abs()))
+    format!("{sign}{}", kit_format_sats(sats.unsigned_abs()))
 }
 
+/// BTC with a leading `-` when negative; eight decimals via the kit.
 pub fn format_btc(sats: i64) -> String {
     let sign = if sats < 0 { "-" } else { "" };
-    let absolute = sats.unsigned_abs();
-    format!(
-        "{sign}{}.{:08} BTC",
-        absolute / 100_000_000,
-        absolute % 100_000_000
-    )
+    format!("{sign}{}", kit_format_btc(sats.unsigned_abs()))
 }
 
+/// Whole-dollar USD with grouped thousands: `"$1,234"`.
 pub fn format_usd(usd: u64) -> String {
-    format!("${}", group_thousands(usd))
+    format!("${}", format_grouped_u64(usd))
 }
 
 /// Formats a micro-probability (`prediction_events::PROBABILITY_SCALE`) as a
@@ -105,23 +99,27 @@ pub fn format_wall_clock(at_ms: i64) -> String {
     }
 }
 
-/// Sign coloring for PnL-like values. The colorblind-safe up/down pair is
-/// the shared token kit's job; these map onto the theme's existing semantic
-/// colors until it lands.
-pub fn signed_color(value: i64) -> Color {
-    match value {
-        value if value > 0 => Color::Success,
-        value if value < 0 => Color::Error,
-        _ => Color::Muted,
-    }
+/// The shared kit's colorblind-safe token for a signed quantity's direction:
+/// blue up for gains, orange down for losses, muted when flat.
+pub fn signed_color(value: i64, cx: &App) -> Color {
+    token_color(MarketDirection::of_i64(value), cx)
 }
 
-pub fn direction_color(direction: prediction_events::PredictedDirection) -> Color {
+/// The same up/down token for a prediction's directional call.
+pub fn direction_color(direction: prediction_events::PredictedDirection, cx: &App) -> Color {
+    token_color(market_direction(direction), cx)
+}
+
+fn token_color(direction: MarketDirection, cx: &App) -> Color {
+    Color::Custom(MarketTokens::from_theme(cx).direction_color(direction))
+}
+
+fn market_direction(direction: prediction_events::PredictedDirection) -> MarketDirection {
     use prediction_events::PredictedDirection;
     match direction {
-        PredictedDirection::Up => Color::Success,
-        PredictedDirection::Down => Color::Error,
-        PredictedDirection::Flat => Color::Muted,
+        PredictedDirection::Up => MarketDirection::Up,
+        PredictedDirection::Down => MarketDirection::Down,
+        PredictedDirection::Flat => MarketDirection::Flat,
     }
 }
 
@@ -146,6 +144,12 @@ mod tests {
     }
 
     #[test]
+    fn usd_groups_thousands() {
+        assert_eq!(format_usd(0), "$0");
+        assert_eq!(format_usd(1_234_567), "$1,234,567");
+    }
+
+    #[test]
     fn probability_and_bps_formatting() {
         assert_eq!(format_probability_micros(720_000), "72%");
         assert_eq!(format_probability_micros(333_000), "33.3%");
@@ -164,9 +168,18 @@ mod tests {
     }
 
     #[test]
-    fn signed_colors_map_to_semantic_theme_colors() {
-        assert_eq!(signed_color(1), Color::Success);
-        assert_eq!(signed_color(-1), Color::Error);
-        assert_eq!(signed_color(0), Color::Muted);
+    fn direction_maps_onto_the_shared_kit() {
+        assert_eq!(
+            market_direction(prediction_events::PredictedDirection::Up),
+            MarketDirection::Up
+        );
+        assert_eq!(
+            market_direction(prediction_events::PredictedDirection::Down),
+            MarketDirection::Down
+        );
+        assert_eq!(
+            market_direction(prediction_events::PredictedDirection::Flat),
+            MarketDirection::Flat
+        );
     }
 }
