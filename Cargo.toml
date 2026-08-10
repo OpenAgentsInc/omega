@@ -34,6 +34,7 @@ members = [
     "crates/cloud_api_types",
     "crates/cloud_llm_client",
     "crates/collections",
+    "crates/command_center_ui",
     "crates/command_palette",
     "crates/command_palette_hooks",
     "crates/component",
@@ -308,6 +309,7 @@ cloud_api_client = { path = "crates/cloud_api_client" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
 collections = { path = "crates/collections", version = "0.1.0" }
+command_center_ui = { path = "crates/command_center_ui" }
 command_palette = { path = "crates/command_palette" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 compliance = { path = "tooling/compliance" }

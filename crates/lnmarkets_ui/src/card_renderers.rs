@@ -26,6 +26,10 @@ pub fn card_renderer_registrations() -> Vec<CardRendererRegistration> {
             render_backtest as CardRenderer,
         ),
         ("omega.lnmarkets.mandate.v1", render_mandate as CardRenderer),
+        (
+            "omega.lnmarkets.prediction.v1",
+            render_prediction as CardRenderer,
+        ),
     ]
     .into_iter()
     .map(|(schema, render)| CardRendererRegistration {
@@ -245,6 +249,19 @@ fn render_mandate(payload: &Value, cx: &App) -> Option<AnyElement> {
     ))
 }
 
+// The prediction card is the venue-neutral command-center component
+// (omega#284); this renderer only adapts the stored event out of the tool
+// payload.
+fn render_prediction(payload: &Value, _cx: &App) -> Option<AnyElement> {
+    let event: prediction_events::PredictionEvent =
+        serde_json::from_value(payload.get("prediction")?.clone()).ok()?;
+    let data = command_center_ui::PredictionCardData::from_event(&event, None);
+    Some(
+        command_center_ui::PredictionCard::new(data, command_center_ui::unix_now_ms())
+            .into_any_element(),
+    )
+}
+
 fn render_card(title: &str, status: &str, rows: Vec<(String, String)>, cx: &App) -> AnyElement {
     let card_id = match title {
         "Derived market features" => "features",
@@ -386,6 +403,38 @@ impl Component for LnMarketsToolCardsPreview {
                             "expectancy_millisats": if status == "passed" { 2400 } else { -800 },
                             "maximum_drawdown_sats": if status == "passed" { 350 } else { 2200 },
                             "outcome": { "status": status },
+                        },
+                    })
+                }, cx),
+                preview_group("Prediction", ["recorded"], |_status| {
+                    json!({
+                        "schema": "omega.lnmarkets.prediction.v1",
+                        "status": "recorded",
+                        "prediction": {
+                            "sequence": 12,
+                            "prediction_id": "pred-demo",
+                            "schema_version": 1,
+                            "emitted_at_ms": 1786276800000_i64,
+                            "actor": { "type": "agent", "agent_id": "trading-session" },
+                            "mandate_scope": { "venue": "lnmarkets", "network": "signet" },
+                            "instrument": "BTCUSD",
+                            "forecast": {
+                                "type": "directional",
+                                "direction": "up",
+                                "probability_micros": 720000,
+                            },
+                            "confidence_micros": 720000,
+                            "horizon_ms": 3600000_u64,
+                            "resolution_rule": {
+                                "source": "stored_last_price",
+                                "baseline_at_ms": 1786276800000_i64,
+                                "resolve_at_ms": 1786280400000_i64,
+                                "flat_tolerance_bps": 25,
+                            },
+                            "scoring_rule": "brier",
+                            "observation_refs": [],
+                            "private_payload_ref": Value::Null,
+                            "subsequent_decision_id": "decision-demo",
                         },
                     })
                 }, cx),
