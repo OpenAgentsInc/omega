@@ -9,6 +9,7 @@
 
 mod candles;
 mod market_kit;
+mod order_book;
 mod plot;
 mod viz_chip;
 mod viz_cloud_provision;
@@ -26,6 +27,7 @@ mod viz_zone;
 
 pub use candles::*;
 pub use market_kit::*;
+pub use order_book::*;
 pub use plot::*;
 pub use viz_chip::*;
 pub use viz_cloud_provision::*;
@@ -410,6 +412,7 @@ mod tests {
                 .child(WhereShouldTheMoneySit::preview(window, cx))
                 .child(Plot::preview(window, cx))
                 .child(CandlestickChart::preview(window, cx))
+                .child(OrderBookLadder::preview(window, cx))
         }
     }
 
