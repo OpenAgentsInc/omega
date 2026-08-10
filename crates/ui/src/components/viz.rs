@@ -7,6 +7,7 @@
 //! a color with a dash pattern, glyph, or stroke shape, so scenes survive
 //! grayscale and color-vision deficiencies. See omega#247.
 
+mod candles;
 mod market_kit;
 mod plot;
 mod viz_chip;
@@ -23,6 +24,7 @@ mod viz_rfq;
 mod viz_swap;
 mod viz_zone;
 
+pub use candles::*;
 pub use market_kit::*;
 pub use plot::*;
 pub use viz_chip::*;
@@ -407,6 +409,7 @@ mod tests {
                 .child(RfqComparisonCard::preview(window, cx))
                 .child(WhereShouldTheMoneySit::preview(window, cx))
                 .child(Plot::preview(window, cx))
+                .child(CandlestickChart::preview(window, cx))
         }
     }
 
