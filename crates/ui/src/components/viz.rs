@@ -38,6 +38,7 @@ mod price_ticker;
 mod qr;
 mod sparkline;
 mod stats_strip;
+mod swap_network;
 mod trade_tape;
 mod venue_status;
 mod viz_chip;
@@ -86,6 +87,7 @@ pub use price_ticker::*;
 pub use qr::*;
 pub use sparkline::*;
 pub use stats_strip::*;
+pub use swap_network::*;
 pub use trade_tape::*;
 pub use venue_status::*;
 pub use viz_chip::*;
@@ -506,6 +508,10 @@ mod tests {
                 .child(OpenOrdersTable::preview(window, cx))
                 .child(PositionsPanel::preview(window, cx))
                 .child(OrderLifecycleToast::preview(window, cx))
+                .child(RailSelector::preview(window, cx))
+                .child(LightningInvoiceDisplay::preview(window, cx))
+                .child(VerificationRow::preview(window, cx))
+                .child(SwapTransferHistoryTable::preview(window, cx))
         }
     }
 
@@ -559,6 +565,10 @@ mod tests {
             "market.open_orders",
             "market.positions",
             "market.order_lifecycle",
+            "market.rail_selector",
+            "market.lightning_invoice",
+            "market.verification_row",
+            "market.swap_transfer_history",
         ] {
             assert!(
                 !rendered.occurrences(selector).is_empty(),
