@@ -10787,6 +10787,15 @@ positions out of live state cannot erase fill evidence. A refusal receipt
 followed by a venue fill is a contract breach that blocks further measurement;
 it is never permission to retry.
 
+The command bridge declares the mutation `sent` immediately before invoking
+Nautilus. Callbacks can run synchronously inside that invocation, so every
+order denial, venue rejection, or cancel rejection after this boundary is an
+`unknown` outcome with a typed post-dispatch reason. It cannot be represented
+as `refused`, which is reserved for validation and other failures known to
+occur before dispatch. The Rust receiver also maps legacy post-dispatch
+refusal reasons to `Unknown` so callback ordering cannot falsely prove that no
+venue effect occurred.
+
 - **Enforced by:** `nautilus_governance`, `nautilus_sidecar`, and
   `omega_deltas` tests, including
   `nautilus_cost_floor_is_typed_stable_and_testnet_only`.

@@ -821,9 +821,29 @@ pub enum RefusalReason {
 #[serde(rename_all = "snake_case")]
 pub enum UnknownReason {
     DispatchFailed,
+    PostDispatchRiskDenied,
+    PostDispatchVenueRejected,
+    PostDispatchCancelRejected,
     TransportClosed,
     Timeout,
     MalformedOutcome,
+}
+
+impl RefusalReason {
+    fn post_dispatch_unknown(self) -> Option<UnknownReason> {
+        match self {
+            Self::RiskDenied => Some(UnknownReason::PostDispatchRiskDenied),
+            Self::VenueRejected => Some(UnknownReason::PostDispatchVenueRejected),
+            Self::CancelRejected => Some(UnknownReason::PostDispatchCancelRejected),
+            Self::InvalidCommand
+            | Self::InvalidEnvelope
+            | Self::InvalidCommandId
+            | Self::UnknownStrategy
+            | Self::InvalidOrder
+            | Self::InvalidParameters
+            | Self::OrderNotFound => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1467,6 +1487,15 @@ impl NautilusSupervisor {
                     });
                 }
                 CommandEvent::Refused { reason_code, .. } => {
+                    if let Some(reason_code) = reason_code.post_dispatch_unknown() {
+                        return Ok(unknown_receipt(
+                            request.command_id,
+                            command_type,
+                            acknowledged,
+                            sent,
+                            reason_code,
+                        ));
+                    }
                     return Ok(CommandReceipt {
                         command_id: request.command_id,
                         command_type,
@@ -2185,6 +2214,28 @@ mod tests {
         assert!(encoded.get("message").is_none());
     }
 
+    #[test]
+    fn post_dispatch_failures_are_never_refused() {
+        for (refusal, unknown) in [
+            (
+                RefusalReason::RiskDenied,
+                UnknownReason::PostDispatchRiskDenied,
+            ),
+            (
+                RefusalReason::VenueRejected,
+                UnknownReason::PostDispatchVenueRejected,
+            ),
+            (
+                RefusalReason::CancelRejected,
+                UnknownReason::PostDispatchCancelRejected,
+            ),
+        ] {
+            assert_eq!(refusal.post_dispatch_unknown(), Some(unknown));
+        }
+        assert_eq!(RefusalReason::InvalidOrder.post_dispatch_unknown(), None);
+        assert_eq!(RefusalReason::OrderNotFound.post_dispatch_unknown(), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn commands_cross_one_stdio_channel_with_typed_outcomes() {
@@ -2210,6 +2261,18 @@ while IFS= read -r command; do
       printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"cancel-1","command_type":"cancel_order"}\n' "$generation"
       printf 'OMEGA_NAUTILUS_EVENT {"type":"sent","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"cancel-1","command_type":"cancel_order","client_order_id":"O-OMEGA-287-1","mutation_state":"sent"}\n' "$generation"
       printf 'OMEGA_NAUTILUS_EVENT {"type":"order_canceled","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"cancel-1","command_type":"cancel_order","client_order_id":"O-OMEGA-287-1","venue_order_id":"venue-1"}\n' "$generation"
+      ;;
+    *'"command_id":"legacy-risk-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"legacy-risk-1","command_type":"place_order"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"refused","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"legacy-risk-1","command_type":"place_order","reason_code":"risk_denied"}\n' "$generation"
+      ;;
+    *'"command_id":"post-dispatch-risk-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"post-dispatch-risk-1","command_type":"place_order"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"sent","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"post-dispatch-risk-1","command_type":"place_order","client_order_id":"O-OMEGA-287-RISK-2","mutation_state":"sent"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"unknown","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"post-dispatch-risk-1","command_type":"place_order","client_order_id":"O-OMEGA-287-RISK-2","mutation_state":"unknown","reason_code":"post_dispatch_risk_denied"}\n' "$generation"
+      ;;
+    *'"command_id":"invalid-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"refused","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"invalid-1","command_type":"place_order","reason_code":"invalid_order"}\n' "$generation"
       ;;
     *'"command_id":"params-1"'*)
       printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters"}\n' "$generation"
@@ -2276,6 +2339,78 @@ done
         assert!(matches!(
             cancel.outcome,
             CommandOutcome::OrderCanceled { .. }
+        ));
+
+        let legacy_risk = supervisor
+            .send_command(CommandRequest {
+                command_id: "legacy-risk-1".into(),
+                command: NautilusCommand::PlaceOrder {
+                    client_order_id: "O-OMEGA-287-RISK-1".into(),
+                    instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                    side: OrderSide::Buy,
+                    quantity: "0.001".into(),
+                    price: "60000".into(),
+                    time_in_force: OrderTimeInForce::Ioc,
+                    post_only: false,
+                    reduce_only: false,
+                },
+            })
+            .expect("legacy risk command");
+        assert!(legacy_risk.acknowledged);
+        assert!(!legacy_risk.sent);
+        assert!(matches!(
+            legacy_risk.outcome,
+            CommandOutcome::Unknown {
+                reason_code: UnknownReason::PostDispatchRiskDenied
+            }
+        ));
+
+        let post_dispatch_risk = supervisor
+            .send_command(CommandRequest {
+                command_id: "post-dispatch-risk-1".into(),
+                command: NautilusCommand::PlaceOrder {
+                    client_order_id: "O-OMEGA-287-RISK-2".into(),
+                    instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                    side: OrderSide::Buy,
+                    quantity: "0.001".into(),
+                    price: "60000".into(),
+                    time_in_force: OrderTimeInForce::Ioc,
+                    post_only: false,
+                    reduce_only: false,
+                },
+            })
+            .expect("post-dispatch risk command");
+        assert!(post_dispatch_risk.acknowledged);
+        assert!(post_dispatch_risk.sent);
+        assert!(matches!(
+            post_dispatch_risk.outcome,
+            CommandOutcome::Unknown {
+                reason_code: UnknownReason::PostDispatchRiskDenied
+            }
+        ));
+
+        let invalid = supervisor
+            .send_command(CommandRequest {
+                command_id: "invalid-1".into(),
+                command: NautilusCommand::PlaceOrder {
+                    client_order_id: "O-OMEGA-287-INVALID".into(),
+                    instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                    side: OrderSide::Buy,
+                    quantity: "0.001".into(),
+                    price: "60000".into(),
+                    time_in_force: OrderTimeInForce::Gtc,
+                    post_only: true,
+                    reduce_only: false,
+                },
+            })
+            .expect("invalid command");
+        assert!(!invalid.acknowledged);
+        assert!(!invalid.sent);
+        assert!(matches!(
+            invalid.outcome,
+            CommandOutcome::Refused {
+                reason_code: RefusalReason::InvalidOrder
+            }
         ));
 
         let parameters = supervisor

@@ -31605,6 +31605,63 @@ mod tests {
                 "OMEGA-DELTA-0277: venue safety boundary lost `{required}`"
             );
         }
+        for required in [
+            "PostDispatchRiskDenied",
+            "PostDispatchVenueRejected",
+            "PostDispatchCancelRejected",
+            "post_dispatch_unknown",
+        ] {
+            assert!(
+                sidecar.contains(required),
+                "OMEGA-DELTA-0277: receipt uncertainty boundary lost `{required}`"
+            );
+        }
+        let bridge = read_repository_file("sidecar/nautilus/command_bridge.py");
+        for required in [
+            "post_dispatch_risk_denied",
+            "post_dispatch_venue_rejected",
+            "post_dispatch_cancel_rejected",
+            "def _emit_post_dispatch_unknown(",
+        ] {
+            assert!(
+                bridge.contains(required),
+                "OMEGA-DELTA-0277: bridge uncertainty boundary lost `{required}`"
+            );
+        }
+        assert!(
+            !bridge.contains("_emit_order_refusal"),
+            "OMEGA-DELTA-0277: post-dispatch callbacks regained refusal output"
+        );
+        let place_order = bridge
+            .split_once("def place_order(")
+            .and_then(|(_, source)| source.split_once("def cancel_order_by_id("))
+            .map(|(source, _)| source)
+            .expect("OMEGA-DELTA-0277: place-order bridge section is missing");
+        let place_sent = place_order
+            .find("mutation_state=\"sent\"")
+            .expect("OMEGA-DELTA-0277: place-order sent boundary is missing");
+        let place_submit = place_order
+            .find("self.submit_order(order")
+            .expect("OMEGA-DELTA-0277: place-order Nautilus invocation is missing");
+        assert!(
+            place_sent < place_submit,
+            "OMEGA-DELTA-0277: place-order sent boundary follows Nautilus invocation"
+        );
+        let cancel_order = bridge
+            .split_once("def cancel_order_by_id(")
+            .and_then(|(_, source)| source.split_once("def on_order_denied("))
+            .map(|(source, _)| source)
+            .expect("OMEGA-DELTA-0277: cancel-order bridge section is missing");
+        let cancel_sent = cancel_order
+            .find("mutation_state=\"sent\"")
+            .expect("OMEGA-DELTA-0277: cancel-order sent boundary is missing");
+        let cancel_submit = cancel_order
+            .find("self.cancel_order(client_order_id")
+            .expect("OMEGA-DELTA-0277: cancel-order Nautilus invocation is missing");
+        assert!(
+            cancel_sent < cancel_submit,
+            "OMEGA-DELTA-0277: cancel-order sent boundary follows Nautilus invocation"
+        );
         let stream = read_repository_file("sidecar/nautilus/stream_strategy.py");
         for required in [
             "cache.orders_open(venue=VENUE)",

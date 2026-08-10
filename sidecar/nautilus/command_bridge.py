@@ -293,21 +293,23 @@ class CommandExecutionStrategy(Strategy):
                 reduce_only=command["reduce_only"],
                 client_order_id=client_order_id,
             )
-            self.submit_order(order, client_id=HYPERLIQUID_CLIENT_ID)
             emit(
                 command,
                 "sent",
                 client_order_id=command["client_order_id"],
                 mutation_state="sent",
             )
+            self.submit_order(order, client_id=HYPERLIQUID_CLIENT_ID)
         except Exception:
-            emit(
-                command,
-                "unknown",
-                client_order_id=command["client_order_id"],
-                mutation_state="unknown",
-                reason_code="dispatch_failed",
-            )
+            pending_command = self.place_commands.pop(str(client_order_id), None)
+            if pending_command is not None:
+                emit(
+                    pending_command,
+                    "unknown",
+                    client_order_id=pending_command["client_order_id"],
+                    mutation_state="unknown",
+                    reason_code="dispatch_failed",
+                )
 
     def cancel_order_by_id(self, command: dict[str, Any]) -> None:
         client_order_id = ClientOrderId.from_str(command["client_order_id"])
@@ -317,27 +319,37 @@ class CommandExecutionStrategy(Strategy):
             return
         self.cancel_commands[str(client_order_id)] = command
         try:
-            self.cancel_order(client_order_id, client_id=HYPERLIQUID_CLIENT_ID)
             emit(
                 command,
                 "sent",
                 client_order_id=command["client_order_id"],
                 mutation_state="sent",
             )
+            self.cancel_order(client_order_id, client_id=HYPERLIQUID_CLIENT_ID)
         except Exception:
-            emit(
-                command,
-                "unknown",
-                client_order_id=command["client_order_id"],
-                mutation_state="unknown",
-                reason_code="dispatch_failed",
-            )
+            pending_command = self.cancel_commands.pop(str(client_order_id), None)
+            if pending_command is not None:
+                emit(
+                    pending_command,
+                    "unknown",
+                    client_order_id=pending_command["client_order_id"],
+                    mutation_state="unknown",
+                    reason_code="dispatch_failed",
+                )
 
     def on_order_denied(self, event: Any) -> None:
-        self._emit_order_refusal(event.client_order_id, "risk_denied")
+        self._emit_post_dispatch_unknown(
+            self.place_commands,
+            event.client_order_id,
+            "post_dispatch_risk_denied",
+        )
 
     def on_order_rejected(self, event: Any) -> None:
-        self._emit_order_refusal(event.client_order_id, "venue_rejected")
+        self._emit_post_dispatch_unknown(
+            self.place_commands,
+            event.client_order_id,
+            "post_dispatch_venue_rejected",
+        )
 
     def on_order_accepted(self, event: Any) -> None:
         command = self.place_commands.pop(str(event.client_order_id), None)
@@ -353,9 +365,11 @@ class CommandExecutionStrategy(Strategy):
         publish_fill(event)
 
     def on_order_cancel_rejected(self, event: Any) -> None:
-        command = self.cancel_commands.pop(str(event.client_order_id), None)
-        if command is not None:
-            emit(command, "refused", reason_code="cancel_rejected")
+        self._emit_post_dispatch_unknown(
+            self.cancel_commands,
+            event.client_order_id,
+            "post_dispatch_cancel_rejected",
+        )
 
     def on_order_canceled(self, event: Any) -> None:
         command = self.cancel_commands.pop(str(event.client_order_id), None)
@@ -367,10 +381,21 @@ class CommandExecutionStrategy(Strategy):
                 venue_order_id=str(event.venue_order_id),
             )
 
-    def _emit_order_refusal(self, client_order_id: ClientOrderId, reason_code: str) -> None:
-        command = self.place_commands.pop(str(client_order_id), None)
+    def _emit_post_dispatch_unknown(
+        self,
+        pending_commands: dict[str, dict[str, Any]],
+        client_order_id: ClientOrderId,
+        reason_code: str,
+    ) -> None:
+        command = pending_commands.pop(str(client_order_id), None)
         if command is not None:
-            emit(command, "refused", reason_code=reason_code)
+            emit(
+                command,
+                "unknown",
+                client_order_id=str(client_order_id),
+                mutation_state="unknown",
+                reason_code=reason_code,
+            )
 
 
 class CommandController(Controller):
