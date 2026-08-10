@@ -237,6 +237,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0264",
     "OMEGA-DELTA-0265",
     "OMEGA-DELTA-0266",
+    "OMEGA-DELTA-0267",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30836,6 +30837,76 @@ mod tests {
             assert!(
                 ledger.contains(required),
                 "OMEGA-DELTA-0266: receipt ledger support lost `{required}`"
+            );
+        }
+    }
+
+    #[test]
+    fn nautilus_executes_while_omega_governs() {
+        let strategy_engine = read_repository_file("crates/strategy_engine/src/strategy_engine.rs");
+        for required in [
+            "New live strategies run at tick rate inside Nautilus",
+            "continuous versioned event stream",
+            "versioned commands use the fast command channel",
+            "fast command channel",
+            "neither an LLM nor MCP belongs in the",
+            "per-tick path",
+            "#[deprecated(",
+            "superseded by the Nautilus fast command channel",
+            "send a typed command to Nautilus instead",
+            "pub trait VenueExecutor",
+            "async fn execute_once",
+            "pub trait MandateAuthority",
+            "pub enum StrategyHaltReason",
+            "pub enum StrategyLifecycleEvent",
+            "PredictionStore",
+            "LedgerStore",
+            "WakeupSink",
+        ] {
+            assert!(
+                strategy_engine.contains(required),
+                "OMEGA-DELTA-0267: the governance/execution boundary lost `{required}`"
+            );
+        }
+
+        let strategy_manifest = read_repository_file("crates/strategy_engine/Cargo.toml");
+        assert!(
+            strategy_manifest.contains(
+                "description = \"Trading governance policy and legacy strategy compatibility for Omega\""
+            ),
+            "OMEGA-DELTA-0267: strategy_engine presents itself as the live execution engine"
+        );
+        for forbidden in ["agent.workspace", "language_model.workspace", "mcp"] {
+            assert!(
+                !strategy_manifest.contains(forbidden),
+                "OMEGA-DELTA-0267: the strategy hot path gained governance-loop dependency `{forbidden}`"
+            );
+        }
+
+        let legacy_lnmarkets =
+            read_repository_file("crates/lnmarkets_trading/src/lnmarkets_trading.rs");
+        assert!(
+            legacy_lnmarkets.contains(
+                "LN Markets is the retained legacy venue integration tracked by omega#291"
+            ),
+            "OMEGA-DELTA-0267: the deprecated venue consumer is no longer explicitly bounded"
+        );
+
+        let plugin_api = read_repository_file("crates/plugin_api/src/plugin_api.rs");
+        for required in [
+            "Plugins do not implement venue connectivity",
+            "Nautilus owns market-data and",
+            "continuous versioned event stream",
+            "typed, versioned command channel",
+            "governance tools",
+            "cards, settings, panels",
+            "review drivers, and capability observations",
+            "pub trait OmegaPlugin",
+            "pub struct PluginRegistry",
+        ] {
+            assert!(
+                plugin_api.contains(required),
+                "OMEGA-DELTA-0267: the retained plugin seam lost `{required}`"
             );
         }
     }

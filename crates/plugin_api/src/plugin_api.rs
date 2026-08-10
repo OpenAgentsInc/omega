@@ -6,6 +6,12 @@
 //! [`PluginRegistry`] populated at startup. Core crates read the registry; they
 //! never name a plugin. The only file that names plugins is
 //! `crates/omega/src/plugins.rs`.
+//!
+//! Plugins do not implement venue connectivity. Nautilus owns market-data and
+//! execution adapters behind a continuous versioned event stream. Its fast
+//! typed, versioned command channel carries execution operations. This registry
+//! remains the extension seam for governance tools, cards, settings, panels,
+//! review drivers, and capability observations.
 
 use std::{
     any::{Any, TypeId},

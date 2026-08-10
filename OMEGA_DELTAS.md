@@ -10021,13 +10021,14 @@ entry point.
 - **Enforced by:** `agent_wakeup` unit tests and
   `native_agent_wakeups_are_labeled_typed_and_bounded` in `omega_deltas`.
 
-### OMEGA-DELTA-0247 — Strategies execute deterministically within the mandate
+### OMEGA-DELTA-0247 — Legacy strategies execute deterministically within the mandate
 
-Omega has one venue-neutral strategy engine. Strategy programs are pure,
-typed functions from configuration, prior state, and a feature tick to next
-state and order intents. The model remains outside this loop. A background
-service processes start, adjust, tick, and halt commands in order and publishes
-one typed lifecycle stream for the future agent tool card.
+Omega retains its first venue-neutral strategy engine for existing LN Markets
+integrations. Strategy programs are pure, typed functions from configuration,
+prior state, and a feature tick to next state and order intents. The model
+remains outside this loop. A background service processes start, adjust, tick,
+and halt commands in order and publishes one typed lifecycle stream for the
+future agent tool card.
 
 Before one single-attempt venue mutation, the engine validates the intent,
 previews its resulting risk, requires a venue-side stop for leveraged risk
@@ -10037,6 +10038,10 @@ order-frequency, and liquidation-buffer limits. Any program, mandate, venue,
 protection, or ledger failure halts the strategy and publishes a typed agent
 wakeup. Every admitted order and each returned fill, fee, and funding event is
 written to the venue-neutral ledger with strategy attribution.
+
+OMEGA-DELTA-0267 supersedes this runtime as the execution architecture. The
+compatibility path and its safety laws remain enforced while it exists, but new
+tick strategies and venue adapters belong in Nautilus.
 
 - **Enforced by:** `strategy_engine` and `trading_mandate` unit tests and
   `strategy_execution_is_deterministic_bounded_and_single_attempt` in
@@ -10496,3 +10501,29 @@ settlement, and exports the signed proof events with hash-chained ledger rows.
 - **Enforced by:** `market_ui` and `trading_ledger` unit tests and
   `nip_mkt_effects_receipts_and_provider_network_are_event_verifiable` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0267 — Nautilus executes while Omega governs
+
+Nautilus is the venue and execution layer. Tick-rate market data and strategy
+execution stay inside its hot loop. Omega consumes a continuous typed,
+versioned event stream and sends typed, versioned operations over a fast
+command channel. MCP may wrap discrete governance operations, but neither MCP
+nor an LLM participates in the per-tick path.
+
+`strategy_engine` owns the policy Nautilus does not: mandate authorization,
+halt taxonomy, exact-configuration backtest admission, lifecycle evidence,
+prediction records, wakeups, and ledger reconciliation. Its former
+`VenueExecutor` and `execute_once` path remains temporarily for existing LN
+Markets integrations, with deprecation markers that direct new integrations to
+the Nautilus command channel. Retaining that compatibility path does not make
+it an approved venue adapter; its single-attempt and fail-closed laws remain in
+force until it is removed.
+
+The venue-plugin-per-exchange design is retired. `plugin_api` remains the
+registry seam for governance tools, cards, settings, panels, review drivers,
+and capability observations, but plugins do not supply venue connectivity.
+`trading_mandate`, `trading_ledger`, `agent_wakeup`, and `prediction_events`
+remain the governance layer above Nautilus.
+
+- **Enforced by:** `strategy_engine` compatibility tests and
+  `nautilus_executes_while_omega_governs` in `omega_deltas`.

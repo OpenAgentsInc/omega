@@ -1,3 +1,22 @@
+#![allow(
+    deprecated,
+    reason = "this crate retains the legacy venue path during the Nautilus migration"
+)]
+
+//! Governance policy and retained compatibility types for automated trading.
+//!
+//! New live strategies run at tick rate inside Nautilus. Omega stays above that
+//! hot loop: it owns mandate authorization, backtest admission, lifecycle and
+//! halt policy, prediction evidence, wakeups, and ledger reconciliation. The
+//! app consumes the engine's continuous versioned event stream. Typed,
+//! versioned commands use the fast command channel. MCP tools may issue
+//! discrete governance commands, but neither an LLM nor MCP belongs in the
+//! per-tick path.
+//!
+//! The venue-executing runtime in this crate remains temporarily for existing
+//! LN Markets integrations. It is deprecated and must not be used for new venue
+//! connectivity.
+
 use std::{collections::VecDeque, sync::Arc};
 
 use agent_wakeup::WakeupSource;
@@ -247,11 +266,17 @@ pub struct VenueExecution {
 }
 
 #[async_trait]
+#[deprecated(
+    note = "superseded by the Nautilus fast command channel; retained for legacy integrations"
+)]
 pub trait VenueExecutor: Send + Sync + 'static {
     async fn preview(&self, intent: &OrderIntent) -> Result<VenueRiskSnapshot>;
 
     /// This method is called once for each admitted intent. Implementations
     /// must not retry an ambiguous mutation.
+    #[deprecated(
+        note = "send a typed command to Nautilus instead; retained for legacy integrations"
+    )]
     async fn execute_once(&self, intent: &OrderIntent) -> Result<VenueExecution>;
 
     /// Called once per cancel intent. Implementations must not retry an

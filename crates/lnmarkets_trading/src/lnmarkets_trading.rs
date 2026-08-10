@@ -1,3 +1,8 @@
+#![allow(
+    deprecated,
+    reason = "LN Markets is the retained legacy venue integration tracked by omega#291"
+)]
+
 mod funding_carry;
 mod rebalance_to_target;
 mod threshold_swing;

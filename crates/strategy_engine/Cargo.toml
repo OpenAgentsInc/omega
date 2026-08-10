@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
-description = "Venue-neutral bounded strategy runtime for Omega"
+description = "Trading governance policy and legacy strategy compatibility for Omega"
 
 [lints]
 workspace = true
