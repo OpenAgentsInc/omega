@@ -28,6 +28,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const TRADE_BUFFER_CAPACITY: usize = 2_048;
 const TRADES_PER_FRAME: usize = 256;
 const STATE_SNAPSHOT_CAPACITY: usize = 2_048;
+const MARKET_SNAPSHOT_TRADE_CAPACITY: usize = 4_096;
+const MARKET_SNAPSHOT_FILL_CAPACITY: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -520,11 +522,33 @@ pub struct RenderableBookLevel {
     pub size: String,
 }
 
+/// The retained, render-facing view of the typed testnet stream. Market data
+/// may be coalesced before it reaches a frame, while account/order/position/
+/// fill state is retained from the lossless queue. Consumers never parse the
+/// sidecar's raw NDJSON or infer venue state from lifecycle logs.
+#[derive(Clone, Debug, Default)]
+pub struct NautilusMarketSnapshot {
+    pub latest_quote: Option<StreamEvent>,
+    pub recent_trades: Vec<StreamEvent>,
+    pub bids: Vec<RenderableBookLevel>,
+    pub asks: Vec<RenderableBookLevel>,
+    pub account: Option<StreamEvent>,
+    pub orders: Vec<serde_json::Value>,
+    pub positions: Vec<serde_json::Value>,
+    pub recent_fills: Vec<StreamEvent>,
+    pub frame_count: u64,
+}
+
 #[derive(Default)]
 pub struct NautilusStreamSource {
     latest_quote: Option<StreamEvent>,
     bids: HashMap<String, String>,
     asks: HashMap<String, String>,
+    recent_trades: VecDeque<StreamEvent>,
+    account: Option<StreamEvent>,
+    orders: Vec<serde_json::Value>,
+    positions: Vec<serde_json::Value>,
+    recent_fills: VecDeque<StreamEvent>,
     trade_count: u64,
     state_event_count: u64,
     frame_count: u64,
@@ -564,6 +588,46 @@ impl NautilusStreamSource {
         self.state.iter().cloned().collect()
     }
 
+    pub fn market_snapshot(&self) -> NautilusMarketSnapshot {
+        let mut bids = self
+            .bids
+            .iter()
+            .map(|(price, size)| RenderableBookLevel {
+                price: price.clone(),
+                size: size.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut asks = self
+            .asks
+            .iter()
+            .map(|(price, size)| RenderableBookLevel {
+                price: price.clone(),
+                size: size.clone(),
+            })
+            .collect::<Vec<_>>();
+        let price_order = |left: &RenderableBookLevel, right: &RenderableBookLevel| {
+            left.price
+                .parse::<f64>()
+                .ok()
+                .zip(right.price.parse::<f64>().ok())
+                .and_then(|(left, right)| left.partial_cmp(&right))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        bids.sort_by(|left, right| price_order(right, left));
+        asks.sort_by(price_order);
+        NautilusMarketSnapshot {
+            latest_quote: self.latest_quote.clone(),
+            recent_trades: self.recent_trades.iter().cloned().collect(),
+            bids,
+            asks,
+            account: self.account.clone(),
+            orders: self.orders.clone(),
+            positions: self.positions.clone(),
+            recent_fills: self.recent_fills.iter().cloned().collect(),
+            frame_count: self.frame_count,
+        }
+    }
+
     fn apply_frame(&mut self, frame: StreamFrame, cx: &mut Context<Self>) {
         if let Some(quote) = frame.quote {
             self.latest_quote = Some(quote);
@@ -594,15 +658,35 @@ impl NautilusStreamSource {
             }
         }
         self.trade_count = self.trade_count.saturating_add(frame.trades.len() as u64);
-        self.state_event_count = self
-            .state_event_count
-            .saturating_add(frame.state.len() as u64);
+        for trade in frame.trades {
+            if self.recent_trades.len() >= MARKET_SNAPSHOT_TRADE_CAPACITY {
+                self.recent_trades.pop_front();
+            }
+            self.recent_trades.push_back(trade);
+        }
+        let state_count = frame.state.len();
         for event in frame.state {
             if self.state.len() == STATE_SNAPSHOT_CAPACITY {
                 self.state.pop_front();
             }
-            self.state.push_back(event);
+            self.state.push_back(event.clone());
+            match event {
+                event @ StreamEvent::Account { .. } => self.account = Some(event),
+                StreamEvent::OrderState { orders, .. } => self.orders = orders,
+                StreamEvent::PositionState { positions, .. } => self.positions = positions,
+                event @ StreamEvent::Fill { .. } => {
+                    if self.recent_fills.len() >= MARKET_SNAPSHOT_FILL_CAPACITY {
+                        self.recent_fills.pop_front();
+                    }
+                    self.recent_fills.push_back(event);
+                }
+                StreamEvent::Order { .. } | StreamEvent::Position { .. } => {}
+                StreamEvent::Quote { .. }
+                | StreamEvent::Trade { .. }
+                | StreamEvent::Book { .. } => {}
+            }
         }
+        self.state_event_count = self.state_event_count.saturating_add(state_count as u64);
         self.frame_count = self.frame_count.saturating_add(1);
         cx.notify();
     }
@@ -1637,7 +1721,30 @@ mod tests {
                     quote: Some(quote(4, "64999.0")),
                     book: Some(book),
                     trades: Vec::new(),
-                    state: vec![order_state(6)],
+                    state: vec![
+                        serde_json::from_value(serde_json::json!({
+                            "type": "account",
+                            "schema": STREAM_SCHEMA,
+                            "generation": 3,
+                            "sequence": 6,
+                            "network": "testnet",
+                            "account_id": "HYPERLIQUID-001",
+                            "balances": [],
+                        }))
+                        .expect("valid account event"),
+                        order_state(7),
+                        serde_json::from_value(serde_json::json!({
+                            "type": "position_state",
+                            "schema": STREAM_SCHEMA,
+                            "generation": 3,
+                            "sequence": 8,
+                            "network": "testnet",
+                            "venue": "HYPERLIQUID",
+                            "positions": [{"instrument_id": "BTC-USD-PERP.HYPERLIQUID"}],
+                            "ts_init": 8,
+                        }))
+                        .expect("valid position state"),
+                    ],
                 },
                 cx,
             );
@@ -1653,8 +1760,12 @@ mod tests {
                 }]
             );
             assert!(asks.is_empty());
-            assert_eq!(source.counts(), (0, 1, 1));
+            assert_eq!(source.counts(), (0, 3, 1));
             assert!(source.latest_quote().is_some());
+            let snapshot = source.market_snapshot();
+            assert!(snapshot.account.is_some());
+            assert!(snapshot.orders.is_empty());
+            assert_eq!(snapshot.positions.len(), 1);
         });
     }
 

@@ -10623,3 +10623,23 @@ available.
 - **Enforced by:** `nautilus_governance`, `nautilus_sidecar`,
   `trading_mandate`, and `omega_deltas` tests, including
   `nautilus_governance_is_confirmed_mandated_reconciled_and_off_hot_loop`.
+
+### OMEGA-DELTA-0272 — Nautilus testnet state is the live market surface
+
+Omega's development-gated Markets panel renders Hyperliquid testnet candles,
+book depth, account collateral, orders, positions, fills, and portfolio context
+from the typed Nautilus stream projection. The sidecar remains the only NDJSON
+reader: it updates the UI at most once per GPUI frame while retaining a separate
+bounded, lossless state snapshot for governance. The panel neither scrapes
+lifecycle logs nor substitutes simulated balances for missing venue state.
+
+The shared order ticket derives its exact post-only probe, margin allocation,
+and liquidation preview from the current typed quote and account collateral.
+Review opens the shared exact confirmation component; confirmation writes one
+versioned command through the Nautilus channel. A timeout or transport loss is
+terminal `unknown — do not retry`, and cancellation is offered only after an
+accepted venue receipt. Mainnet remains unrepresentable on this surface.
+
+- **Enforced by:** `market_ui` and `nautilus_sidecar` unit and Hyperliquid
+  testnet lifecycle tests and
+  `nautilus_market_ui_is_live_confirmed_and_single_attempt` in `omega_deltas`.

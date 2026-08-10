@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +45,8 @@ fn hyperliquid_testnet_reaches_health_and_stops_cleanly() {
     let mut trades = 0;
     let mut books = 0;
     let mut accounts = 0;
+    let mut account_fields = BTreeSet::new();
+    let mut balance_fields = BTreeSet::new();
     let mut order_states = 0;
     while Instant::now() < deadline {
         let frame = supervisor.take_stream_frame().expect("stream frame");
@@ -52,7 +55,17 @@ fn hyperliquid_testnet_reaches_health_and_stops_cleanly() {
         trades += frame.trades.len();
         for event in frame.state {
             match event {
-                StreamEvent::Account { .. } => accounts += 1,
+                StreamEvent::Account { state, .. } => {
+                    accounts += 1;
+                    account_fields.extend(state.keys().cloned());
+                    if let Some(balances) =
+                        state.get("balances").and_then(serde_json::Value::as_array)
+                        && let Some(balance) =
+                            balances.first().and_then(serde_json::Value::as_object)
+                    {
+                        balance_fields.extend(balance.keys().cloned());
+                    }
+                }
                 StreamEvent::Order { .. } | StreamEvent::OrderState { .. } => order_states += 1,
                 _ => {}
             }
@@ -68,7 +81,7 @@ fn hyperliquid_testnet_reaches_health_and_stops_cleanly() {
     assert!(accounts > 0, "no testnet account state reached Omega");
     assert!(order_states > 0, "no testnet order state reached Omega");
     eprintln!(
-        "testnet stream evidence: quotes={quotes} trades={trades} books={books} accounts={accounts} order_states={order_states}"
+        "testnet stream evidence: quotes={quotes} trades={trades} books={books} accounts={accounts} order_states={order_states} account_fields={account_fields:?} balance_fields={balance_fields:?}"
     );
     supervisor.stop().expect("clean testnet shutdown");
 }

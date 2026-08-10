@@ -11,16 +11,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use async_tungstenite::async_std::connect_async;
 use async_tungstenite::tungstenite::Message;
+use command_center_ui::{CommandCenterHeader, PortfolioSummary};
 use futures::{AsyncReadExt as _, StreamExt as _};
 use gpui::{
     App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, Styled, Task, WeakEntity, Window, px,
+    ParentElement, Render, Styled, Subscription, Task, WeakEntity, Window, px,
 };
 use http_client::{AsyncBody, HttpClient, Request};
 use immortal_client::domain::{Event, MktEventIdAdmission, MktEventIdDeduplicator};
 use immortal_client::mkt_swp_client::ParticipantRole;
+use nautilus_sidecar::CommandOutcome;
 use trading_ledger::{LedgerEntry, LedgerStore};
-use ui::{Indicator, VizChip, VizChipTone, prelude::*};
+use ui::{
+    BookSource, CandleSource, CandlestickChart, Indicator, MarketBadge, MarketBadgeKind,
+    MarketEnvironment, OrderBookLadder, OrderConfirmDialog, OrderConfirmationAction, OrderTicket,
+    VizChip, VizChipTone, prelude::*,
+};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -39,8 +45,9 @@ use crate::session_flow::{
 };
 use crate::session_transport::{SessionInbox, SessionSocketEvent, run_session_socket};
 use crate::{
-    RECEIPT_EXPORT_DIRECTORY, ReceiptVerification, Reconnect, ToggleFocus, export_verified_receipt,
-    persist_verified_receipt,
+    NautilusBookSource, NautilusCandleSource, NautilusLiveSnapshot,
+    NautilusOrderConfirmationSource, NautilusOrderTicketSource, RECEIPT_EXPORT_DIRECTORY,
+    ReceiptVerification, Reconnect, ToggleFocus, export_verified_receipt, persist_verified_receipt,
 };
 
 const PANEL_KEY: &str = "market";
@@ -54,6 +61,10 @@ pub struct MarketPanel {
     session: Option<SessionState>,
     receipt_ledger: Option<LedgerStore>,
     receipt_ledger_error: Option<String>,
+    nautilus_stream: Option<Entity<nautilus_sidecar::NautilusStreamSource>>,
+    _nautilus_stream_subscription: Option<Subscription>,
+    live_order: crate::LiveOrderState,
+    _live_order_task: Option<Task<()>>,
     _connection_task: Option<Task<()>>,
 }
 
@@ -95,6 +106,10 @@ impl MarketPanel {
                 Some(format!("could not open settlement receipt ledger: {error}")),
             ),
         };
+        let nautilus_stream = nautilus_sidecar::NautilusStreamSource::try_global(cx);
+        let nautilus_stream_subscription = nautilus_stream
+            .as_ref()
+            .map(|source| cx.observe(source, |_, _, cx| cx.notify()));
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             config: MarketDiscoveryConfig::from_environment(),
@@ -103,10 +118,363 @@ impl MarketPanel {
             session: None,
             receipt_ledger,
             receipt_ledger_error,
+            nautilus_stream,
+            _nautilus_stream_subscription: nautilus_stream_subscription,
+            live_order: crate::LiveOrderState::Idle,
+            _live_order_task: None,
             _connection_task: None,
         };
         this.connect(cx);
         this
+    }
+
+    fn prepare_testnet_probe(&mut self, cx: &mut Context<Self>) {
+        let live = self
+            .nautilus_stream
+            .as_ref()
+            .map(|stream| NautilusLiveSnapshot::new(stream.read(cx).market_snapshot()));
+        let probe_input = live.as_ref().and_then(|live| {
+            live.latest_quote()
+                .map(|(bid, _)| bid)
+                .zip(live.account_summary().available_margin_cents)
+        });
+        self.live_order = probe_input
+            .and_then(|(bid, available_margin_cents)| {
+                crate::NautilusOrderIntent::testnet_probe(
+                    bid,
+                    available_margin_cents,
+                    unique_order_sequence(),
+                )
+            })
+            .map_or_else(
+                || crate::LiveOrderState::Failed {
+                    command_id: "pre-dispatch".to_owned(),
+                    detail: "typed testnet quote or collateral unavailable".to_owned(),
+                },
+                crate::LiveOrderState::Draft,
+            );
+        cx.notify();
+    }
+
+    fn confirm_testnet_probe(&mut self, cx: &mut Context<Self>) {
+        let crate::LiveOrderState::Review(intent) = &self.live_order else {
+            return;
+        };
+        let intent = intent.clone();
+        let command_id = intent.command_id.clone();
+        let Some(channel) = nautilus_sidecar::command_channel(cx) else {
+            self.live_order = crate::LiveOrderState::Failed {
+                command_id,
+                detail: "Nautilus command channel unavailable".to_owned(),
+            };
+            cx.notify();
+            return;
+        };
+        let request = intent.place_request();
+        self.live_order = crate::LiveOrderState::Sending {
+            command_id: command_id.clone(),
+        };
+        self._live_order_task = Some(cx.spawn(async move |this, cx| {
+            let result = channel.send(request).await;
+            this.update(cx, |this, cx| {
+                this.live_order = match result {
+                    Ok(receipt) => crate::LiveOrderState::Completed { intent, receipt },
+                    Err(error) => crate::LiveOrderState::Failed {
+                        command_id,
+                        detail: error.to_string(),
+                    },
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn discard_testnet_probe(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.live_order,
+            crate::LiveOrderState::Draft(_) | crate::LiveOrderState::Review(_)
+        ) {
+            self.live_order = crate::LiveOrderState::Idle;
+            cx.notify();
+        }
+    }
+
+    fn review_testnet_probe(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        let crate::LiveOrderState::Draft(intent) = &self.live_order else {
+            return;
+        };
+        if intent.command_id == command_id {
+            self.live_order = crate::LiveOrderState::Review(intent.clone());
+            cx.notify();
+        }
+    }
+
+    fn cancel_testnet_probe(&mut self, cx: &mut Context<Self>) {
+        let Some(intent) = self.live_order.accepted_intent().cloned() else {
+            return;
+        };
+        let request = intent.cancel_request(unique_order_sequence());
+        let command_id = request.command_id.clone();
+        let Some(channel) = nautilus_sidecar::command_channel(cx) else {
+            self.live_order = crate::LiveOrderState::Failed {
+                command_id,
+                detail: "Nautilus command channel unavailable".to_owned(),
+            };
+            cx.notify();
+            return;
+        };
+        self.live_order = crate::LiveOrderState::Sending {
+            command_id: command_id.clone(),
+        };
+        self._live_order_task = Some(cx.spawn(async move |this, cx| {
+            let result = channel.send(request).await;
+            this.update(cx, |this, cx| {
+                this.live_order = match result {
+                    Ok(receipt) => crate::LiveOrderState::Completed { intent, receipt },
+                    Err(error) => crate::LiveOrderState::Failed {
+                        command_id,
+                        detail: error.to_string(),
+                    },
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_nautilus(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let stream = self.nautilus_stream.as_ref()?;
+        let snapshot = stream.read(cx).market_snapshot();
+        let live = NautilusLiveSnapshot::new(snapshot.clone());
+        let account = live.account_summary();
+        let quote = live.latest_quote();
+        let candle_source = NautilusCandleSource::new(snapshot.clone());
+        let book_source = NautilusBookSource::new(snapshot);
+        let candles = candle_source.series();
+        let book = book_source.snapshot();
+        let has_market_data =
+            !candles.candles().is_empty() || !book.bids.is_empty() || !book.asks.is_empty();
+        let order_controls = match &self.live_order {
+            crate::LiveOrderState::Idle => h_flex()
+                .child(
+                    Button::new("nautilus-order-prepare", "Prepare testnet probe")
+                        .label_size(LabelSize::Small)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.prepare_testnet_probe(cx);
+                        })),
+                )
+                .into_any_element(),
+            crate::LiveOrderState::Draft(intent) => {
+                let panel = cx.weak_entity();
+                let expected_command_id = intent.command_id.clone();
+                OrderTicket::from_source(&NautilusOrderTicketSource::new(intent))
+                    .on_review(move |submitted, _window, cx| {
+                        if submitted.draft.venue.as_ref() != "Hyperliquid" {
+                            return;
+                        }
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.review_testnet_probe(&expected_command_id, cx);
+                            })
+                            .ok();
+                    })
+                    .into_any_element()
+            }
+            crate::LiveOrderState::Review(intent) => {
+                let panel = cx.weak_entity();
+                OrderConfirmDialog::from_source(&NautilusOrderConfirmationSource::new(intent))
+                    .on_action(move |action, _window, cx| {
+                        panel
+                            .update(cx, |panel, cx| match action {
+                                OrderConfirmationAction::Approve { .. } => {
+                                    panel.confirm_testnet_probe(cx);
+                                }
+                                OrderConfirmationAction::Reject { .. } => {
+                                    panel.discard_testnet_probe(cx);
+                                }
+                            })
+                            .ok();
+                    })
+                    .into_any_element()
+            }
+            crate::LiveOrderState::Sending { command_id } => h_flex()
+                .gap_1()
+                .items_center()
+                .child(Indicator::dot().color(Color::Warning))
+                .child(
+                    Label::new(format!("sending {command_id} once"))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
+            crate::LiveOrderState::Completed { receipt, .. } => h_flex()
+                .gap_1()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    VizChip::new(command_outcome_label(&receipt.outcome))
+                        .tone(
+                            if matches!(
+                                receipt.outcome,
+                                CommandOutcome::OrderAccepted { .. }
+                                    | CommandOutcome::OrderCanceled { .. }
+                            ) {
+                                VizChipTone::Ok
+                            } else {
+                                VizChipTone::Warn
+                            },
+                        )
+                        .scale(1.0),
+                )
+                .child(
+                    Label::new(format!(
+                        "ack {} · sent {}",
+                        receipt.acknowledged, receipt.sent,
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+                .when(self.live_order.accepted_intent().is_some(), |row| {
+                    row.child(
+                        Button::new("nautilus-order-cancel", "Cancel once")
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.cancel_testnet_probe(cx);
+                            })),
+                    )
+                })
+                .into_any_element(),
+            crate::LiveOrderState::Failed { command_id, detail } => v_flex()
+                .gap_1()
+                .child(
+                    Label::new(format!("{command_id} · {detail}"))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Error),
+                )
+                .child(
+                    Button::new("nautilus-order-new", "New intent")
+                        .label_size(LabelSize::Small)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.prepare_testnet_probe(cx);
+                        })),
+                )
+                .into_any_element(),
+        };
+        let ledger_header = match self.receipt_ledger.as_ref().map(|ledger| {
+            PortfolioSummary::from_ledger(
+                ledger,
+                &["hyperliquid"],
+                0,
+                i64::try_from(unique_order_sequence()).unwrap_or(i64::MAX),
+            )
+        }) {
+            Some(Ok(summary)) => CommandCenterHeader::new(summary).into_any_element(),
+            Some(Err(error)) => Label::new(format!("ledger unavailable · {error}"))
+                .size(LabelSize::XSmall)
+                .color(Color::Error)
+                .into_any_element(),
+            None => Label::new("ledger unavailable")
+                .size(LabelSize::XSmall)
+                .color(Color::Error)
+                .into_any_element(),
+        };
+
+        Some(
+            v_flex()
+                .id("market-nautilus-live")
+                .debug_selector(|| "market.nautilus.live".into())
+                .gap_2()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(Label::new("BTC-PERP").size(LabelSize::Small))
+                                .child(MarketBadge::new(MarketBadgeKind::Environment(
+                                    MarketEnvironment::Testnet,
+                                )))
+                                .child(MarketBadge::new(if has_market_data {
+                                    MarketBadgeKind::VenueConnected
+                                } else {
+                                    MarketBadgeKind::VenueDegraded
+                                })),
+                        )
+                        .when_some(quote, |row, (bid, ask)| {
+                            row.child(
+                                Label::new(format!("{bid:.2} / {ask:.2}"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .flex_wrap()
+                        .child(
+                            VizChip::new(if account.account_ready {
+                                "account live"
+                            } else {
+                                "account waiting"
+                            })
+                            .tone(if account.account_ready {
+                                VizChipTone::Ok
+                            } else {
+                                VizChipTone::Warn
+                            })
+                            .scale(1.0),
+                        )
+                        .when_some(account.account_id.clone(), |row, account_id| {
+                            row.child(VizChip::new(account_id).scale(1.0))
+                        })
+                        .child(
+                            VizChip::new(format!("{} balances", account.balance_count)).scale(1.0),
+                        )
+                        .when_some(account.available_margin_cents, |row, cents| {
+                            row.child(
+                                VizChip::new(format!(
+                                    "${:.2} {} free",
+                                    cents as f64 / 100.0,
+                                    account.collateral_currency.as_deref().unwrap_or("USD"),
+                                ))
+                                .tone(VizChipTone::Ok)
+                                .scale(1.0),
+                            )
+                        })
+                        .child(VizChip::new(format!("{} orders", account.order_count)).scale(1.0))
+                        .child(
+                            VizChip::new(format!("{} positions", account.position_count))
+                                .scale(1.0),
+                        )
+                        .child(VizChip::new(format!("{} fills", account.fill_count)).scale(1.0)),
+                )
+                .child(ledger_header)
+                .child(order_controls)
+                .when(!has_market_data, |section| {
+                    section.child(
+                        Label::new("Awaiting typed testnet stream")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                })
+                .when(!candles.candles().is_empty(), |section| {
+                    section.child(
+                        CandlestickChart::new(candles)
+                            .size(560.0, 260.0)
+                            .volume(true),
+                    )
+                })
+                .when(!book.bids.is_empty() || !book.asks.is_empty(), |section| {
+                    section.child(OrderBookLadder::new(book).width(560.0).depth(10))
+                })
+                .into_any_element(),
+        )
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
@@ -1155,6 +1523,25 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+fn unique_order_sequence() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn command_outcome_label(outcome: &CommandOutcome) -> &'static str {
+    match outcome {
+        CommandOutcome::OrderAccepted { .. } => "order accepted",
+        CommandOutcome::OrderCanceled { .. } => "order canceled",
+        CommandOutcome::StrategyStarted { .. } => "strategy started",
+        CommandOutcome::StrategyStopped { .. } => "strategy stopped",
+        CommandOutcome::StrategyParametersApplied { .. } => "parameters applied",
+        CommandOutcome::Refused { .. } => "refused",
+        CommandOutcome::Unknown { .. } => "unknown — do not retry",
+    }
+}
+
 async fn fetch_market_relay_gate(
     http_client: Arc<dyn HttpClient>,
     config: &MarketDiscoveryConfig,
@@ -1239,6 +1626,7 @@ impl Render for MarketPanel {
         let synced = matches!(self.discovery.connection(), ConnectionState::Live);
         let session_active = self.session.is_some();
         let session_section = self.render_session(cx);
+        let nautilus_section = self.render_nautilus(cx);
 
         v_flex()
             .id("market-panel")
@@ -1246,6 +1634,7 @@ impl Render for MarketPanel {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &Reconnect, _window, cx| this.connect(cx)))
             .size_full()
+            .overflow_y_scroll()
             .p_2()
             .gap_2()
             .child(
@@ -1296,6 +1685,7 @@ impl Render for MarketPanel {
                         .color(Color::Error),
                 )
             })
+            .children(nautilus_section)
             .child(
                 Label::new("Providers")
                     .size(LabelSize::Small)
@@ -1396,7 +1786,7 @@ impl Panel for MarketPanel {
     fn set_position(&mut self, _: DockPosition, _: &mut Window, _: &mut Context<Self>) {}
 
     fn default_size(&self, _: &Window, _: &App) -> gpui::Pixels {
-        px(360.)
+        px(600.)
     }
 
     fn icon(&self, _: &Window, _: &App) -> Option<IconName> {

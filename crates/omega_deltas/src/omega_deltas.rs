@@ -242,6 +242,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0269",
     "OMEGA-DELTA-0270",
     "OMEGA-DELTA-0271",
+    "OMEGA-DELTA-0272",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31115,6 +31116,55 @@ mod tests {
         assert!(
             !governance.contains("submit_order(") && !governance.contains("on_quote_tick"),
             "OMEGA-DELTA-0271: governance entered the venue hot loop"
+        );
+    }
+
+    #[test]
+    fn nautilus_market_ui_is_live_confirmed_and_single_attempt() {
+        let sidecar = without_comments(&read_repository_file(
+            "crates/nautilus_sidecar/src/nautilus_sidecar.rs",
+        ));
+        for required in [
+            "MARKET_SNAPSHOT_TRADE_CAPACITY",
+            "MARKET_SNAPSHOT_FILL_CAPACITY",
+            "pub fn state_snapshot",
+            "pub fn market_snapshot",
+            "background_executor.timer(FRAME_INTERVAL)",
+        ] {
+            assert!(
+                sidecar.contains(required),
+                "OMEGA-DELTA-0272: typed sidecar projection lost `{required}`"
+            );
+        }
+
+        let panel = without_comments(&read_repository_file("crates/market_ui/src/panel.rs"));
+        for required in [
+            "NautilusStreamSource::try_global",
+            "NautilusCandleSource",
+            "NautilusBookSource",
+            "OrderTicket::from_source",
+            "OrderConfirmDialog::from_source",
+            "nautilus_sidecar::command_channel",
+            "unknown — do not retry",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0272: live market panel lost `{required}`"
+            );
+        }
+
+        let order = without_comments(&read_repository_file(
+            "crates/market_ui/src/nautilus_order.rs",
+        ));
+        assert!(
+            order.contains("post_only: true")
+                && order.contains("available_margin_cents")
+                && order.contains("MarketEnvironment::Testnet"),
+            "OMEGA-DELTA-0272: order preview lost post-only, collateral, or testnet binding"
+        );
+        assert!(
+            !panel.contains("Network::Mainnet") && !order.contains("MarketEnvironment::Mainnet"),
+            "OMEGA-DELTA-0272: live market surface gained mainnet"
         );
     }
 }

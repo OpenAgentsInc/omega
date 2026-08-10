@@ -7,6 +7,8 @@
 //! registers when `OMEGA_MARKET_PANEL=1`.
 
 mod discovery;
+mod nautilus_live;
+mod nautilus_order;
 mod network_transport;
 mod panel;
 mod receipt_ledger;
@@ -21,6 +23,13 @@ pub use discovery::{
     MarketDiscoveryConfig, MarketRelayGate, NIP_MKT_EXTENSION, NIP11_ACCEPT_MEDIA_TYPE,
     OfferingListing, ProviderListing, RELAY_URL_ENVIRONMENT_VARIABLE, SUBSCRIPTION_ID,
     validate_market_relay_information,
+};
+pub use nautilus_live::{
+    NautilusAccountSummary, NautilusBookSource, NautilusCandleSource, NautilusLiveSnapshot,
+};
+pub use nautilus_order::{
+    LiveOrderState, NautilusOrderConfirmationSource, NautilusOrderIntent, NautilusOrderPreview,
+    NautilusOrderTicketSource,
 };
 pub use network_transport::{
     MultiRelayStatus, ProviderNetworkState, RelayAvailability, RelaySetPlan, fanout_exact_event,

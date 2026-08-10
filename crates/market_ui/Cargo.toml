@@ -19,11 +19,13 @@ async-tungstenite = { workspace = true, features = [
     "async-native-tls",
     "async-std-runtime",
 ] }
+command_center_ui.workspace = true
 futures.workspace = true
 gpui.workspace = true
 http_client.workspace = true
 immortal-client.workspace = true
 log.workspace = true
+nautilus_sidecar.workspace = true
 paths.workspace = true
 rand.workspace = true
 serde.workspace = true
