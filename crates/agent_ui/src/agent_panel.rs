@@ -2425,8 +2425,14 @@ pub fn init(cx: &mut App) {
                 .register_action(
                     |workspace, _: &omega_actions::OpenEmbeddedSettings, window, cx| {
                         if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                            panel.update(cx, |panel, cx| {
-                                panel.open_omega_settings(true, window, cx)
+                            // This action is running under Workspace's update lease, while
+                            // SettingsWindow construction reads the workspace collection to
+                            // populate project settings. End the lease before constructing
+                            // the embedded route; otherwise GPUI aborts on the nested read.
+                            window.defer(cx, move |window, cx| {
+                                panel.update(cx, |panel, cx| {
+                                    panel.open_omega_settings(true, window, cx)
+                                });
                             });
                         }
                     },
@@ -28056,6 +28062,33 @@ mod tests {
             settings_sidebar.visibility,
             gpui::DebugVisibility::FullyClipped,
             "the Settings navigation must collapse with the shell sidebar state"
+        );
+    }
+
+    /// The command palette and app menu dispatch this action through
+    /// Workspace. Settings construction reads all workspaces to populate its
+    /// project scopes, so constructing it inside the Workspace action update
+    /// used to panic with a nested entity read and terminate the application.
+    #[gpui::test]
+    async fn open_embedded_settings_action_waits_for_the_workspace_update(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let cx = &mut cx;
+
+        panel.update_in(cx, |panel, _window, _cx| {
+            panel.force_omega_primary_interface_for_tests = true;
+        });
+        cx.dispatch_action(omega_actions::OpenEmbeddedSettings);
+        cx.run_until_parked();
+
+        assert!(
+            panel.read_with(cx, |panel, _| panel.omega_settings.is_some()),
+            "the workspace action must leave the process alive with embedded Settings open"
+        );
+        assert!(
+            !cx.debug_render_snapshot()
+                .occurrences("omega.omega.settings-sidebar")
+                .is_empty(),
+            "the deferred Settings route must paint in the original window"
         );
     }
 
