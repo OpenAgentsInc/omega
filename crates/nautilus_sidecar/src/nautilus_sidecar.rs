@@ -1060,7 +1060,7 @@ struct BootstrapEnvelope<'a> {
     schema: &'static str,
     network: Network,
     private_key: &'a str,
-    owner_address: Option<&'a str>,
+    owner_address: &'a str,
     agent_address: Option<&'a str>,
     agent_name: Option<&'a str>,
 }
@@ -1121,6 +1121,14 @@ impl NautilusSupervisor {
         self.stream.clone()
     }
 
+    fn bootstrap_owner_address(&self) -> Result<String> {
+        if let Some(wallet) = &self.agent_wallet {
+            Ok(wallet.owner_address.clone())
+        } else {
+            self.private_key.ethereum_address()
+        }
+    }
+
     pub fn take_stream_frame(&self) -> Result<StreamFrame> {
         Ok(self
             .stream
@@ -1166,14 +1174,12 @@ impl NautilusSupervisor {
             .take()
             .ok_or_else(|| anyhow!("Nautilus sidecar stdin is unavailable"))?;
         let mut child_stdin = child_stdin;
+        let owner_address = self.bootstrap_owner_address()?;
         let bootstrap = BootstrapEnvelope {
             schema: BOOTSTRAP_SCHEMA,
             network: self.config.network,
             private_key: self.private_key.0.as_str(),
-            owner_address: self
-                .agent_wallet
-                .as_ref()
-                .map(|wallet| wallet.owner_address.as_str()),
+            owner_address: &owner_address,
             agent_address: self
                 .agent_wallet
                 .as_ref()
@@ -1964,6 +1970,39 @@ mod tests {
             health_timeout: Duration::from_secs(5),
         };
         assert!(NautilusSupervisor::new(config, private_key()).is_err());
+    }
+
+    #[test]
+    fn bootstrap_always_binds_an_owner_address() {
+        let key = private_key();
+        let derived_owner_address = key.ethereum_address().expect("owner address");
+        let config = NautilusConfig {
+            network: Network::Testnet,
+            python: PathBuf::from("python"),
+            engine: PathBuf::from("engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(5),
+        };
+        let supervisor = NautilusSupervisor::new(config.clone(), key).expect("owner supervisor");
+        assert_eq!(
+            supervisor
+                .bootstrap_owner_address()
+                .expect("bootstrap owner"),
+            derived_owner_address
+        );
+
+        let approved_owner = "0x2222222222222222222222222222222222222222";
+        let mut wallet =
+            StoredAgentWallet::generate(Network::Testnet, approved_owner, 1).expect("agent wallet");
+        wallet.approval = AgentApprovalStatus::Approved { valid_until_ms: 2 };
+        let supervisor =
+            NautilusSupervisor::with_agent_wallet(config, wallet).expect("agent supervisor");
+        assert_eq!(
+            supervisor
+                .bootstrap_owner_address()
+                .expect("agent bootstrap owner"),
+            approved_owner
+        );
     }
 
     #[test]

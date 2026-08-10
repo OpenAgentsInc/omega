@@ -31455,6 +31455,8 @@ mod tests {
             "write_all(&bootstrap)",
             "bootstrap.zeroize()",
             "NautilusSupervisor::with_agent_wallet",
+            "bootstrap_owner_address",
+            "owner_address: &'a str",
             "credential_halt_wakeup",
         ] {
             assert!(

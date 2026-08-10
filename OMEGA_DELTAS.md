@@ -10750,7 +10750,9 @@ states halt startup and create a typed credential wakeup. Mainnet approval
 probes, sidecar starts, and effects are refused before any network connection
 until the separate graduation gate passes. The approved owner address from the
 stdin bootstrap is the execution client's account address, while the generated
-agent key remains the signing authority. The UI states the bounded authority
+agent key remains the signing authority. The owner-key testnet conformance path
+derives that same account address from its supplied key, so the bootstrap owner
+address is never absent. The UI states the bounded authority
 literally: “Omega can trade on this account; Omega cannot withdraw.”
 
 - **Enforced by:** `nautilus_sidecar`, `nautilus_governance`,
