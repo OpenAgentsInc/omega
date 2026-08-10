@@ -31504,6 +31504,8 @@ mod tests {
             "omega.nautilus.bootstrap.v1",
             "sys.stdin.readline()",
             "HYPERLIQUID_TESTNET_PK",
+            "owner_address = bootstrap[\"owner_address\"]",
+            "account_address=owner_address",
         ] {
             assert!(
                 engine.contains(required),

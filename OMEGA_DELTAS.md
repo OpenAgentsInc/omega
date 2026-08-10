@@ -10747,7 +10747,9 @@ Testnet and mainnet records cannot substitute for one another. The
 operator portfolio panel. Expired, revoked, unknown-mode, and network-mismatch
 states halt startup and create a typed credential wakeup. Mainnet approval
 probes, sidecar starts, and effects are refused before any network connection
-until the separate graduation gate passes. The UI states the bounded authority
+until the separate graduation gate passes. The approved owner address from the
+stdin bootstrap is the execution client's account address, while the generated
+agent key remains the signing authority. The UI states the bounded authority
 literally: “Omega can trade on this account; Omega cannot withdraw.”
 
 - **Enforced by:** `nautilus_sidecar`, `nautilus_governance`,

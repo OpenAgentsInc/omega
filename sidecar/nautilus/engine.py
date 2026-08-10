@@ -108,6 +108,13 @@ def read_bootstrap(expected_network: str) -> dict[str, object]:
     private_key = bootstrap.get("private_key")
     if not isinstance(private_key, str) or not private_key.startswith("0x") or len(private_key) != 66:
         raise RuntimeError("Nautilus bootstrap private key is missing or malformed")
+    owner_address = bootstrap.get("owner_address")
+    if (
+        not isinstance(owner_address, str)
+        or not owner_address.startswith("0x")
+        or len(owner_address) != 42
+    ):
+        raise RuntimeError("Nautilus bootstrap owner address is missing or malformed")
     return bootstrap
 
 
@@ -115,6 +122,7 @@ def main() -> None:
     args = parse_args()
     bootstrap = read_bootstrap(args.network)
     private_key = bootstrap["private_key"]
+    owner_address = bootstrap["owner_address"]
     os.environ["HYPERLIQUID_TESTNET_PK"] = private_key
 
     from nautilus_trader.adapters.hyperliquid import HyperliquidDataClientConfig
@@ -158,7 +166,10 @@ def main() -> None:
             HyperliquidExecFactoryConfig(
                 trader_id,
                 account_id,
-                HyperliquidExecClientConfig(environment=HyperliquidEnvironment.TESTNET),
+                HyperliquidExecClientConfig(
+                    account_address=owner_address,
+                    environment=HyperliquidEnvironment.TESTNET,
+                ),
             ),
         )
     )
