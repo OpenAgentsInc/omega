@@ -783,6 +783,37 @@ pub(crate) fn initialize_panels(
             }
         }
 
+        // OMEGA-DELTA-0275: the three trading-workspace docks are registered
+        // only when the typed Nautilus testnet stream exists. Each panel
+        // observes the same frame-batched source; no panel reads NDJSON.
+        if cx.update(|_, cx| trading_workspace_ui::enabled(cx))? {
+            let portfolio = trading_workspace_ui::PortfolioWorkspacePanel::load(
+                workspace_handle.clone(),
+                cx.clone(),
+            )
+            .await
+            .context("failed to load the Portfolio panel")?;
+            let trading = trading_workspace_ui::TradingWorkspacePanel::load(
+                workspace_handle.clone(),
+                cx.clone(),
+            )
+            .await
+            .context("failed to load the Trading panel")?;
+            let analytics = trading_workspace_ui::AnalyticsWorkspacePanel::load(
+                workspace_handle.clone(),
+                cx.clone(),
+            )
+            .await
+            .context("failed to load the Analytics panel")?;
+            workspace_handle
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.add_panel(portfolio, window, cx);
+                    workspace.add_panel(trading, window, cx);
+                    workspace.add_panel(analytics, window, cx);
+                })
+                .context("failed to register the trading workspace panels")?;
+        }
+
         // Plugin-contributed dock panels load after the built-in workbench
         // panels. Each registered loader owns its whole flow, so a failing
         // plugin panel is logged without blocking the rest of startup.

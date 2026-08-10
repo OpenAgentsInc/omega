@@ -755,6 +755,9 @@ fn main() {
         market_ui::init(cx);
         // OMEGA-DELTA-0268: the optional testnet-only execution engine is app-owned.
         nautilus_sidecar::init(cx);
+        // OMEGA-DELTA-0275: live trading docks exist only with the typed
+        // Nautilus testnet stream capability.
+        trading_workspace_ui::init(cx);
         zed::telemetry_log::init(cx);
         zed::remote_debug::init(cx);
         web_search::init(cx);

@@ -218,6 +218,7 @@ members = [
     "crates/terminal_view",
     "crates/trading_ledger",
     "crates/trading_mandate",
+    "crates/trading_workspace_ui",
     "crates/text",
     "crates/theme",
     "crates/theme_extension",
@@ -496,6 +497,7 @@ terminal = { path = "crates/terminal" }
 terminal_view = { path = "crates/terminal_view" }
 trading_ledger = { path = "crates/trading_ledger" }
 trading_mandate = { path = "crates/trading_mandate" }
+trading_workspace_ui = { path = "crates/trading_workspace_ui" }
 text = { path = "crates/text" }
 theme = { path = "crates/theme" }
 theme_extension = { path = "crates/theme_extension" }

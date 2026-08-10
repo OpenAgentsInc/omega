@@ -374,6 +374,11 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     // panel buttons, so its palette toggle is the panel's only entry point.
     "market::Reconnect",
     "market::ToggleFocus",
+    // OMEGA-DELTA-0275. These actions register only when the typed Nautilus
+    // testnet stream exists; the sealed shell has no dock status buttons.
+    "trading_workspace::TogglePortfolioPanel",
+    "trading_workspace::ToggleTradingPanel",
+    "trading_workspace::ToggleAnalyticsPanel",
     // OMEGA-DELTA-0234. The Workbench Search surface and the thread search
     // bar draw controls that dispatch these; a drawn control the gate refuses
     // is a defect, so the full drawn set is admitted.

@@ -11501,6 +11501,7 @@ dependencies = [
  "time_format",
  "title_bar",
  "tracing",
+ "trading_workspace_ui",
  "tree-sitter",
  "tree-sitter-json",
  "ui",
@@ -18083,6 +18084,26 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "trading_ledger",
+]
+
+[[package]]
+name = "trading_workspace_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "command_center_ui",
+ "component",
+ "gpui",
+ "market_ui",
+ "nautilus_sidecar",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "trading_ledger",
+ "trading_mandate",
+ "ui",
+ "workspace",
 ]
 
 [[package]]

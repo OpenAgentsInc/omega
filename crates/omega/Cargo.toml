@@ -191,6 +191,7 @@ theme.workspace = true
 tree-sitter.workspace = true
 tree-sitter-json.workspace = true
 theme_settings.workspace = true
+trading_workspace_ui.workspace = true
 theme_extension.workspace = true
 time.workspace = true
 time_format.workspace = true

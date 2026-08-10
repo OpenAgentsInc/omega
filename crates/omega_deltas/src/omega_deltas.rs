@@ -243,6 +243,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0270",
     "OMEGA-DELTA-0271",
     "OMEGA-DELTA-0272",
+    "OMEGA-DELTA-0275",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31212,5 +31213,78 @@ mod tests {
             !panel.contains("Network::Mainnet") && !order.contains("MarketEnvironment::Mainnet"),
             "OMEGA-DELTA-0272: live market surface gained mainnet"
         );
+    }
+
+    #[test]
+    fn trading_workspace_panels_are_capability_gated_live_and_virtualized() {
+        let root = without_comments(&read_repository_file(
+            "crates/trading_workspace_ui/src/trading_workspace_ui.rs",
+        ));
+        for required in [
+            "NautilusStreamSource::try_global",
+            "TogglePortfolioPanel",
+            "ToggleTradingPanel",
+            "ToggleAnalyticsPanel",
+        ] {
+            assert!(
+                root.contains(required),
+                "OMEGA-DELTA-0275: capability-gated panel root lost `{required}`"
+            );
+        }
+
+        let panels = without_comments(&read_repository_file(
+            "crates/trading_workspace_ui/src/panels.rs",
+        ));
+        for required in [
+            "PortfolioWorkspacePanel",
+            "TradingWorkspacePanel",
+            "AnalyticsWorkspacePanel",
+            "NautilusStreamSource::try_global",
+            "cx.observe",
+            "market_snapshot",
+            "LedgerStore::open_default",
+            "MandateStore::open_default",
+            "uniform_list",
+            "RegisterComponent",
+            "grayscale()",
+        ] {
+            assert!(
+                panels.contains(required),
+                "OMEGA-DELTA-0275: trading workspace lost `{required}`"
+            );
+        }
+        assert!(
+            !panels.contains("OMEGA_NAUTILUS_STREAM") && !panels.contains("read_line"),
+            "OMEGA-DELTA-0275: a panel gained a competing raw stream reader"
+        );
+
+        let startup = without_comments(&read_repository_file("crates/omega/src/zed.rs"));
+        for required in [
+            "trading_workspace_ui::PortfolioWorkspacePanel::load",
+            "trading_workspace_ui::TradingWorkspacePanel::load",
+            "trading_workspace_ui::AnalyticsWorkspacePanel::load",
+            "workspace.add_panel(portfolio",
+            "workspace.add_panel(trading",
+            "workspace.add_panel(analytics",
+        ] {
+            assert!(
+                startup.contains(required),
+                "OMEGA-DELTA-0275: startup lost `{required}`"
+            );
+        }
+
+        let admitted = without_comments(&read_repository_file(
+            "crates/omega_zero_base/src/omega_zero_base.rs",
+        ));
+        for action in [
+            "trading_workspace::TogglePortfolioPanel",
+            "trading_workspace::ToggleTradingPanel",
+            "trading_workspace::ToggleAnalyticsPanel",
+        ] {
+            assert!(
+                admitted.contains(action),
+                "OMEGA-DELTA-0275: a drawn panel lost its palette route `{action}`"
+            );
+        }
     }
 }

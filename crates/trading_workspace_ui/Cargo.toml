@@ -1,0 +1,32 @@
+[package]
+name = "trading_workspace_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/trading_workspace_ui.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+command_center_ui.workspace = true
+component.workspace = true
+gpui.workspace = true
+market_ui.workspace = true
+nautilus_sidecar.workspace = true
+serde_json.workspace = true
+trading_ledger.workspace = true
+trading_mandate.workspace = true
+ui.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+theme.workspace = true
+theme_settings.workspace = true

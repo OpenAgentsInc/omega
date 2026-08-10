@@ -10653,3 +10653,27 @@ accepted venue receipt. Mainnet remains unrepresentable on this surface.
 - **Enforced by:** `market_ui` and `nautilus_sidecar` unit and Hyperliquid
   testnet lifecycle tests and
   `nautilus_market_ui_is_live_confirmed_and_single_attempt` in `omega_deltas`.
+
+### OMEGA-DELTA-0275 — Trading docks are capability-derived live projections
+
+Omega adds three movable workspace panels for the market lane: a portfolio
+command center, a focused trading surface, and an analytics tearsheet. They
+register only when the typed Nautilus testnet stream global exists. Without
+that capability their actions and panels are absent, so fixture-only
+destinations never enter the production navigation. The sealed shell has no
+dock status buttons, so the three capability-gated toggle actions are admitted
+as their command-palette routes.
+
+Every panel observes the same frame-batched `NautilusStreamSource`; no panel
+parses NDJSON or creates a competing stream reader. The portfolio panel also
+projects the venue-neutral ledger and the testnet mandate store. The trading
+panel adapts the live stream into the shared instrument, candle, book, ticket,
+and open-order components. The analytics panel derives overlays, oscillators,
+statistics, a tearsheet, fill markers, and ledger-linked trade rows from that
+typed snapshot. Their component-library compositions use deterministic demo
+values, normal and grayscale previews, and virtualized section lists; demos
+never substitute for missing live production state.
+
+- **Enforced by:** `trading_workspace_ui` GPUI paint tests and
+  `trading_workspace_panels_are_capability_gated_live_and_virtualized` in
+  `omega_deltas`.
