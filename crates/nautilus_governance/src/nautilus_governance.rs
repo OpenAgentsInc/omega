@@ -79,6 +79,8 @@ struct GovernanceState {
     #[serde(skip)]
     processed_venue_fill_ids: HashSet<String>,
     #[serde(skip)]
+    processed_fill_ids: HashSet<String>,
+    #[serde(skip)]
     claimed_sessions: HashSet<String>,
     pending_wakeup: Option<String>,
     pending_credential_wakeup: Option<plugin_api::WakeupSource>,
@@ -185,7 +187,11 @@ impl GovernanceRuntime {
                     sequence,
                     ..
                 } => {
-                    self.record_fill(*generation, *sequence, state)?;
+                    let identity = fill_identity(*generation, *sequence, state);
+                    if !self.state.lock().processed_fill_ids.contains(&identity) {
+                        self.record_fill(*generation, *sequence, state)?;
+                        self.state.lock().processed_fill_ids.insert(identity);
+                    }
                 }
                 StreamEvent::StrategyState { halted_reason, .. } => {
                     self.state.lock().strategy = Some(serde_json::to_value(event)?);
@@ -295,8 +301,7 @@ impl GovernanceRuntime {
             role: "requester".into(),
             participant: STRATEGY_ID.into(),
         };
-        let fill_identity = find_string(&value, &["trade_id", "venue_order_id", "client_order_id"])
-            .unwrap_or_else(|| format!("{generation}-{sequence}"));
+        let fill_identity = fill_identity(generation, sequence, state);
         let mut draft = LedgerEntryDraft::new(
             format!("nautilus-fill-{fill_identity}"),
             unix_ms()?,
@@ -318,7 +323,7 @@ impl GovernanceRuntime {
             ),
         ];
         draft.metadata = json!({"schema":"omega.nautilus.ledger.fill.v1","generation":generation,"stream_sequence":sequence,"fill":value});
-        self.ledger.append(draft)?;
+        self.append_economically_idempotent(draft)?;
         if let Some(commission) = find_string(&Value::Object(state.clone()), &["commission", "fee"])
         {
             let mut parts = commission.split_whitespace();
@@ -354,9 +359,31 @@ impl GovernanceRuntime {
                     ),
                 ];
                 fee_draft.metadata = json!({"schema":"omega.nautilus.ledger.fee.v1","generation":generation,"stream_sequence":sequence});
-                self.ledger.append(fee_draft)?;
+                self.append_economically_idempotent(fee_draft)?;
             }
         }
+        Ok(())
+    }
+
+    fn append_economically_idempotent(&self, draft: LedgerEntryDraft) -> Result<()> {
+        if let Some(existing) = self
+            .ledger
+            .entries(&LedgerQuery::default())?
+            .into_iter()
+            .find(|entry| entry.event_id == draft.event_id)
+        {
+            if existing.strategy_id == draft.strategy_id
+                && existing.kind == draft.kind
+                && existing.postings == draft.postings
+            {
+                return Ok(());
+            }
+            bail!(
+                "ledger event ID {:?} already names different economic content",
+                draft.event_id
+            );
+        }
+        self.ledger.append(draft)?;
         Ok(())
     }
 
@@ -1759,6 +1786,14 @@ fn find_decimal(value: &Value, keys: &[&str]) -> Option<String> {
     find_string(value, keys)
 }
 
+fn fill_identity(generation: u64, sequence: u64, state: &serde_json::Map<String, Value>) -> String {
+    find_string(
+        &Value::Object(state.clone()),
+        &["trade_id", "venue_order_id", "client_order_id"],
+    )
+    .unwrap_or_else(|| format!("{generation}-{sequence}"))
+}
+
 fn reconciled_fill_state(order: &Value) -> Option<(String, serde_json::Map<String, Value>)> {
     if !find_string(order, &["status"])?.eq_ignore_ascii_case("FILLED") {
         return None;
@@ -2362,6 +2397,59 @@ mod tests {
                 .filter(|entry| entry.kind == LedgerEntryKind::Fee)
                 .count(),
             1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replayed_fill_identity_is_idempotent_across_stream_generations() -> Result<()> {
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let make_fill = |generation, sequence, quantity: &str| StreamEvent::Fill {
+            schema: "omega.nautilus.stream.v1".into(),
+            generation,
+            sequence,
+            network: nautilus_sidecar::Network::Testnet,
+            state: serde_json::from_value(json!({
+                "trade_id":"TESTNET-TRADE-305",
+                "venue_order_id":"TESTNET-ORDER-305",
+                "instrument_id":"BTC-USD-PERP.HYPERLIQUID",
+                "client_order_id":"O-305-REPLAY",
+                "order_side":"BUY",
+                "liquidity_side":"TAKER",
+                "last_qty":quantity,
+                "last_px":"65000",
+                "commission":"0.02925 USDC",
+            }))
+            .expect("valid replay fill state"),
+        };
+
+        runtime.ingest(&[make_fill(1, 7, "0.001")])?;
+        *runtime.state.lock() = GovernanceState::default();
+        runtime.ingest(&[make_fill(2, 99, "0.001")])?;
+        let entries = runtime.ledger.entries(&LedgerQuery::default())?;
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == LedgerEntryKind::Fill)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == LedgerEntryKind::Fee)
+                .count(),
+            1
+        );
+
+        *runtime.state.lock() = GovernanceState::default();
+        let error = runtime
+            .ingest(&[make_fill(3, 101, "0.002")])
+            .expect_err("one trade identity cannot name different economics");
+        assert!(
+            error
+                .to_string()
+                .contains("already names different economic content")
         );
         Ok(())
     }
@@ -3080,13 +3168,36 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires explicit authorization to close the observed testnet-only 0.0002 BTC exposure"]
+    #[ignore = "requires the testnet key and public read-only venue access"]
+    fn confirmed_testnet_cost_floor_official_state_is_zero() -> Result<()> {
+        let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
+            .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let private_key = nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?;
+        let owner_address = private_key.ethereum_address()?;
+        let official = official_testnet_state(&owner_address)?;
+        println!(
+            "cost_floor_official_state=open_orders:{:?} positions:{:?}",
+            official
+                .open_orders
+                .iter()
+                .map(|order| order.oid)
+                .collect::<Vec<_>>(),
+            official.positions,
+        );
+        if !official.is_zero_exposure() {
+            bail!("official testnet state is not zero exposure");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires explicit authorization to close the observed testnet-only 0.00023 BTC exposure"]
     fn confirmed_testnet_cost_floor_closes_exact_observed_exposure_once() -> Result<()> {
         if std::env::var("OMEGA_NAUTILUS_COST_CLEANUP_CONFIRM").as_deref()
-            != Ok("close-exact-observed-0.0002")
+            != Ok("close-exact-observed-0.00023")
         {
             bail!(
-                "set OMEGA_NAUTILUS_COST_CLEANUP_CONFIRM=close-exact-observed-0.0002 after explicit authorization"
+                "set OMEGA_NAUTILUS_COST_CLEANUP_CONFIRM=close-exact-observed-0.00023 after explicit authorization"
             );
         }
         let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
@@ -3098,11 +3209,11 @@ mod tests {
             || official_before.positions
                 != vec![nautilus_sidecar::OfficialPosition {
                     coin: "BTC".into(),
-                    size: "0.0002".into(),
+                    size: "0.00023".into(),
                 }]
         {
             bail!(
-                "cleanup refused: expected no open orders and exact BTC 0.0002 exposure, got open_order_ids={:?} positions={:?}",
+                "cleanup refused: expected no open orders and exact BTC 0.00023 exposure, got open_order_ids={:?} positions={:?}",
                 official_before
                     .open_orders
                     .iter()
@@ -3134,7 +3245,7 @@ mod tests {
                 client_order_id: client_order_id.clone(),
                 instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
                 side: OrderSide::Sell,
-                quantity: "0.0002".into(),
+                quantity: "0.00023".into(),
                 price: quote_price(&quote, OrderSide::Sell, true)?,
                 time_in_force: OrderTimeInForce::Ioc,
                 post_only: false,
@@ -3148,7 +3259,20 @@ mod tests {
         let mut official_after = official_testnet_state(&owner_address)?;
         while std::time::Instant::now() < deadline {
             let frame = supervisor.take_stream_frame()?;
-            runtime.ingest(&frame.state)?;
+            let cleanup_fills = frame
+                .state
+                .iter()
+                .filter(|event| {
+                    if let StreamEvent::Fill { state, .. } = event {
+                        find_string(&Value::Object(state.clone()), &["client_order_id"]).as_deref()
+                            == Some(client_order_id.as_str())
+                    } else {
+                        false
+                    }
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            runtime.ingest(&cleanup_fills)?;
             for event in &frame.state {
                 if let StreamEvent::Fill {
                     generation,

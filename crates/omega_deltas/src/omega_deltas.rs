@@ -31536,6 +31536,9 @@ mod tests {
             "reduce_only: true",
             "open_orders=0",
             "processed_venue_fill_ids",
+            "processed_fill_ids",
+            "append_economically_idempotent",
+            "already names different economic content",
         ] {
             assert!(
                 governance.contains(required),

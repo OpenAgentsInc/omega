@@ -10799,6 +10799,12 @@ occur before dispatch. The Rust receiver also maps legacy post-dispatch
 refusal reasons to `Unknown` so callback ordering cannot falsely prove that no
 venue effect occurred.
 
+Direct fill replay is idempotent by the venue trade identity, including across
+sidecar generations. Generation, stream sequence, and first-observed time are
+transport evidence, so a replay may differ in those fields without creating a
+second economic entry. Reusing one trade identity for different postings still
+fails closed as conflicting economic content.
+
 - **Enforced by:** `nautilus_governance`, `nautilus_sidecar`, and
   `omega_deltas` tests, including
   `nautilus_cost_floor_is_typed_stable_and_testnet_only`.
