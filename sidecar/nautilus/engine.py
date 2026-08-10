@@ -11,6 +11,7 @@ import command_bridge
 
 
 EVENT_SCHEMA = "omega.nautilus.lifecycle.v1"
+BOOTSTRAP_SCHEMA = "omega.nautilus.bootstrap.v1"
 HYPERLIQUID = "HYPERLIQUID"
 event_file_descriptor = sys.stdout.fileno()
 
@@ -90,11 +91,31 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def read_bootstrap(expected_network: str) -> dict[str, object]:
+    line = sys.stdin.readline()
+    if not line:
+        raise RuntimeError("Nautilus bootstrap is missing")
+    try:
+        bootstrap = json.loads(line)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Nautilus bootstrap is malformed") from error
+    if not isinstance(bootstrap, dict):
+        raise RuntimeError("Nautilus bootstrap is not an object")
+    if bootstrap.get("schema") != BOOTSTRAP_SCHEMA:
+        raise RuntimeError("Nautilus bootstrap schema is unsupported")
+    if bootstrap.get("network") != expected_network:
+        raise RuntimeError("Nautilus bootstrap network does not match")
+    private_key = bootstrap.get("private_key")
+    if not isinstance(private_key, str) or not private_key.startswith("0x") or len(private_key) != 66:
+        raise RuntimeError("Nautilus bootstrap private key is missing or malformed")
+    return bootstrap
+
+
 def main() -> None:
     args = parse_args()
-    private_key = os.environ.get("HYPERLIQUID_TESTNET_PK", "")
-    if not private_key.startswith("0x") or len(private_key) != 66:
-        raise RuntimeError("HYPERLIQUID_TESTNET_PK is missing or malformed")
+    bootstrap = read_bootstrap(args.network)
+    private_key = bootstrap["private_key"]
+    os.environ["HYPERLIQUID_TESTNET_PK"] = private_key
 
     from nautilus_trader.adapters.hyperliquid import HyperliquidDataClientConfig
     from nautilus_trader.adapters.hyperliquid import HyperliquidDataClientFactory

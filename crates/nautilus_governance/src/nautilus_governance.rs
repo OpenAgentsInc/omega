@@ -14,7 +14,7 @@ use gpui::{App, Task};
 use language_model::LanguageModelToolResultContent;
 use nautilus_sidecar::{
     CommandReceipt, CommandRequest, NautilusCommand, NautilusCommandChannel, NautilusStreamSource,
-    OrderSide, StrategyParameters, StreamEvent,
+    OrderSide, StrategyParameters, StreamEvent, credential_state,
 };
 use parking_lot::Mutex;
 use plugin_api::{
@@ -77,6 +77,7 @@ struct GovernanceState {
     #[serde(skip)]
     claimed_sessions: HashSet<String>,
     pending_wakeup: Option<String>,
+    pending_credential_wakeup: Option<plugin_api::WakeupSource>,
 }
 
 #[derive(Clone)]
@@ -338,6 +339,10 @@ impl GovernanceRuntime {
         let mut state = self.state.lock();
         state.pending_wakeup = Some(reason.clone());
         state.halted_reason = Some(reason);
+    }
+
+    fn set_credential_wakeup(&self, wakeup: Option<plugin_api::WakeupSource>) {
+        self.state.lock().pending_credential_wakeup = wakeup;
     }
 
     fn reconcile_account(&self, generation: u64, sequence: u64, account: &Value) -> Result<()> {
@@ -610,6 +615,7 @@ impl plugin_api::OmegaPlugin for NautilusGovernancePlugin {
     }
 
     fn register(&self, registry: &mut PluginRegistry, cx: &mut App) {
+        registry.add_settings_page(trading_workspace_ui::settings_page_registration());
         let runtime = match GovernanceRuntime::open_default(registry.venue_capabilities()) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -624,6 +630,14 @@ impl plugin_api::OmegaPlugin for NautilusGovernancePlugin {
                 if let Err(error) = observed_runtime.ingest(&events) {
                     observed_runtime.halt(format!("stream ingestion failed: {error:#}"));
                 }
+            })
+            .detach();
+        }
+        if let Some(state) = credential_state(cx) {
+            let observed_runtime = runtime.clone();
+            observed_runtime.set_credential_wakeup(state.read(cx).snapshot().wakeup);
+            cx.observe(&state, move |state, cx| {
+                observed_runtime.set_credential_wakeup(state.read(cx).snapshot().wakeup);
             })
             .detach();
         }
@@ -745,6 +759,13 @@ impl SessionReviewDriver for GovernanceReviewDriver {
         if !state.claimed_sessions.contains(session_id) {
             return None;
         }
+        if let Some(source) = state.pending_credential_wakeup.clone() {
+            return Some((
+                source,
+                "Hyperliquid agent-wallet authority halted fail-closed. Inspect the named network, extraAgents approval, and validUntil before resuming; do not increase risk."
+                    .to_owned(),
+            ));
+        }
         state.pending_wakeup.as_ref().map(|reason| (
             plugin_api::WakeupSource::StrategyHalt { strategy: STRATEGY_ID.into(), reason: reason.clone() },
             format!("Nautilus governance halted fail-closed: {reason}. Read account, ledger, and engine state; do not increase risk."),
@@ -775,12 +796,21 @@ impl SessionReviewDriver for GovernanceReviewDriver {
     fn acknowledge_wakeup(
         &self,
         session_id: &str,
-        _source: &plugin_api::WakeupSource,
+        source: &plugin_api::WakeupSource,
         instruction: &str,
         _cx: &App,
     ) -> bool {
         let mut state = self.runtime.state.lock();
-        if !state.claimed_sessions.contains(session_id) || state.pending_wakeup.is_none() {
+        if !state.claimed_sessions.contains(session_id) {
+            return false;
+        }
+        if state.pending_credential_wakeup.as_ref() == Some(source)
+            && instruction.contains("agent-wallet authority halted")
+        {
+            state.pending_credential_wakeup = None;
+            return true;
+        }
+        if state.pending_wakeup.is_none() {
             return false;
         }
         if !instruction.contains("Nautilus governance halted") {

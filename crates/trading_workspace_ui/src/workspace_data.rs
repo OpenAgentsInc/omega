@@ -9,7 +9,10 @@ use gpui::SharedString;
 use market_ui::{
     NautilusBookSource, NautilusCandleSource, NautilusLiveSnapshot, NautilusOrderIntent,
 };
-use nautilus_sidecar::{NautilusMarketSnapshot, StreamEvent};
+use nautilus_sidecar::{
+    AgentApprovalStatus, AgentWalletSummary, NautilusCredentialSnapshot, NautilusMarketSnapshot,
+    Network, StreamEvent,
+};
 use trading_ledger::{Counterparty, LedgerStore};
 use trading_mandate::{AssetId, ReviewCadence, TradingMandate, TradingNetwork};
 use ui::{
@@ -42,6 +45,7 @@ pub struct PortfolioPanelData {
     pub activity: Vec<ActivityEvent>,
     pub mandate: Option<MandateCardData>,
     pub approvals: Vec<PendingApproval>,
+    pub credential: NautilusCredentialSnapshot,
     pub error: Option<SharedString>,
 }
 
@@ -135,6 +139,23 @@ impl PortfolioPanelData {
                     },
                 },
             ],
+            credential: NautilusCredentialSnapshot {
+                selected_network: Network::Testnet,
+                testnet: Some(AgentWalletSummary {
+                    network: Network::Testnet,
+                    owner_address: "0x71c4…8e12".to_owned(),
+                    agent_address: "0xa021…0f73".to_owned(),
+                    agent_name: "omega-testnet".to_owned(),
+                    approval: AgentApprovalStatus::Approved {
+                        valid_until_ms: 1_781_000_000_000,
+                    },
+                }),
+                mainnet: None,
+                halt: None,
+                wakeup: None,
+                error: None,
+                loading: false,
+            },
             error: None,
         }
     }
@@ -145,6 +166,7 @@ impl PortfolioPanelData {
         mandate: Option<(TradingMandate, u64)>,
         now_ms: i64,
         store_error: Option<&str>,
+        credential: NautilusCredentialSnapshot,
     ) -> Self {
         let live = NautilusLiveSnapshot::new(market.clone());
         let account = live.account_summary();
@@ -207,6 +229,7 @@ impl PortfolioPanelData {
                 now_ms,
             }),
             approvals: Vec::new(),
+            credential,
             error: store_error.map(Into::into),
         }
     }

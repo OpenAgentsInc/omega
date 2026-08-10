@@ -10728,3 +10728,29 @@ points, and never retries an ambiguous venue mutation.
 - **Enforced by:** `nautilus_sidecar`, `nautilus_governance`, and
   `omega_deltas` tests plus the ignored Hyperliquid testnet lifecycle proof and
   `nautilus_tick_strategy_is_in_engine_mandate_bounded_and_testnet_only`.
+
+### OMEGA-DELTA-0276 — Nautilus agent wallets stay local, named, and fail closed
+
+Omega generates a separate Hyperliquid agent wallet for each named network
+and stores its private key only in the release-channel-namespaced platform
+credential store. The person's master wallet never enters Omega. Ordinary
+runtime credentials remain in their existing owner-only local file; the
+platform credential provider is exposed only through the dedicated
+agent-wallet constructor. The private key is redacted in memory diagnostics,
+zeroized from transient serialized buffers, never rendered, and injected into
+the supervised Nautilus child through a versioned stdin bootstrap rather than
+an environment variable, argument, configuration, or plaintext disk file.
+
+Stored records and startup validate the exact network and fixed agent name.
+Testnet and mainnet records cannot substitute for one another. The
+`extraAgents` response and `validUntil` are projected into Settings and the
+operator portfolio panel. Expired, revoked, unknown-mode, and network-mismatch
+states halt startup and create a typed credential wakeup. Mainnet approval
+probes, sidecar starts, and effects are refused before any network connection
+until the separate graduation gate passes. The UI states the bounded authority
+literally: “Omega can trade on this account; Omega cannot withdraw.”
+
+- **Enforced by:** `nautilus_sidecar`, `nautilus_governance`,
+  `trading_workspace_ui`, the runtime credential-storage contract, and
+  `nautilus_agent_wallet_custody_is_named_platform_only_and_fail_closed` in
+  `omega_deltas`.

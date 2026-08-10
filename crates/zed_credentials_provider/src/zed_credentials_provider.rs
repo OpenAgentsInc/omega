@@ -39,6 +39,17 @@ pub fn local_credentials(cx: &App) -> Arc<dyn CredentialsProvider> {
     new(cx)
 }
 
+/// Returns the channel-namespaced platform store used only for agent-wallet
+/// custody. Callers must keep ordinary runtime credentials on [`global`].
+pub fn agent_wallet_credentials(cx: &App) -> Arc<dyn CredentialsProvider> {
+    let release_channel =
+        ReleaseChannel::try_global(cx).unwrap_or(*release_channel::RELEASE_CHANNEL);
+    Arc::new(NamespacedCredentialsProvider {
+        namespace: release_channel.credential_namespace(),
+        inner: Arc::new(PlatformCredentialsProvider),
+    })
+}
+
 fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
     let release_channel =
         ReleaseChannel::try_global(cx).unwrap_or(*release_channel::RELEASE_CHANNEL);
@@ -98,6 +109,40 @@ impl CredentialsProvider for NamespacedCredentialsProvider {
             self.inner.delete_credentials(&key, cx).await
         }
         .boxed_local()
+    }
+}
+
+struct PlatformCredentialsProvider;
+
+impl CredentialsProvider for PlatformCredentialsProvider {
+    fn read_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        cx: &'a AsyncApp,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
+        async move { cx.update(|cx| cx.read_credentials(url)).await }.boxed_local()
+    }
+
+    fn write_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        username: &'a str,
+        password: &'a [u8],
+        cx: &'a AsyncApp,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        async move {
+            cx.update(move |cx| cx.write_credentials(url, username, password))
+                .await
+        }
+        .boxed_local()
+    }
+
+    fn delete_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        cx: &'a AsyncApp,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        async move { cx.update(move |cx| cx.delete_credentials(url)).await }.boxed_local()
     }
 }
 

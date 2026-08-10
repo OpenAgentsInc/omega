@@ -17,7 +17,14 @@ use cocoa::{
         NSArray, NSAutoreleasePool, NSBundle, NSInteger, NSProcessInfo, NSString, NSUInteger, NSURL,
     },
 };
-use core_foundation::{base::CFRelease, runloop::CFRunLoopRun, string::CFStringRef};
+use core_foundation::{
+    base::{CFRelease, CFType, CFTypeRef, OSStatus, TCFType},
+    boolean::CFBoolean,
+    data::CFData,
+    dictionary::{CFDictionary, CFDictionaryRef, CFMutableDictionary},
+    runloop::CFRunLoopRun,
+    string::{CFString, CFStringRef},
+};
 use ctor::ctor;
 use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
@@ -53,6 +60,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use zeroize::Zeroizing;
 
 #[allow(non_upper_case_globals)]
 const NSUTF8StringEncoding: NSUInteger = 4;
@@ -1126,22 +1134,99 @@ impl Platform for MacPlatform {
         state.find_pasteboard.write(item);
     }
 
-    fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
-        Task::ready(Err(anyhow!(
-            "platform credential storage is disabled; use the application credentials provider"
-        )))
+    fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
+        let url = url.to_string();
+        let username = username.to_string();
+        let password = Zeroizing::new(password.to_vec());
+        self.background_executor().spawn(async move {
+            unsafe {
+                use security::*;
+
+                let url = CFString::from(url.as_str());
+                let username = CFString::from(username.as_str());
+                let password = CFData::from_buffer(&password);
+                let mut query_attrs = CFMutableDictionary::with_capacity(2);
+                query_attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                query_attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+                let mut attrs = CFMutableDictionary::with_capacity(4);
+                attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+                attrs.set(kSecAttrAccount as *const _, username.as_CFTypeRef());
+                attrs.set(kSecValueData as *const _, password.as_CFTypeRef());
+                let mut status = SecItemUpdate(
+                    query_attrs.as_concrete_TypeRef(),
+                    attrs.as_concrete_TypeRef(),
+                );
+                if status == ERR_SEC_ITEM_NOT_FOUND {
+                    status = SecItemAdd(attrs.as_concrete_TypeRef(), ptr::null_mut());
+                }
+                anyhow::ensure!(
+                    status == ERR_SEC_SUCCESS,
+                    "storing credential failed: {status}"
+                );
+            }
+            Ok(())
+        })
     }
 
-    fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        Task::ready(Err(anyhow!(
-            "platform credential storage is disabled; use the application credentials provider"
-        )))
+    fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
+        let url = url.to_string();
+        self.background_executor().spawn(async move {
+            let url = CFString::from(url.as_str());
+            let cf_true = CFBoolean::true_value().as_CFTypeRef();
+            unsafe {
+                use security::*;
+
+                let mut attrs = CFMutableDictionary::with_capacity(5);
+                attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+                attrs.set(kSecReturnAttributes as *const _, cf_true);
+                attrs.set(kSecReturnData as *const _, cf_true);
+                let mut result = CFTypeRef::from(ptr::null());
+                let status = SecItemCopyMatching(attrs.as_concrete_TypeRef(), &mut result);
+                match status {
+                    ERR_SEC_SUCCESS => {}
+                    ERR_SEC_ITEM_NOT_FOUND | ERR_SEC_USER_CANCELED => return Ok(None),
+                    _ => anyhow::bail!("reading credential failed: {status}"),
+                }
+                let result = CFType::wrap_under_create_rule(result)
+                    .downcast::<CFDictionary>()
+                    .context("credential item was not a dictionary")?;
+                let username = result
+                    .find(kSecAttrAccount as *const _)
+                    .context("credential account was missing")?;
+                let username = CFType::wrap_under_get_rule(*username)
+                    .downcast::<CFString>()
+                    .context("credential account was not a string")?;
+                let password = result
+                    .find(kSecValueData as *const _)
+                    .context("credential bytes were missing")?;
+                let password = CFType::wrap_under_get_rule(*password)
+                    .downcast::<CFData>()
+                    .context("credential bytes were not data")?;
+                Ok(Some((username.to_string(), password.bytes().to_vec())))
+            }
+        })
     }
 
-    fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
-        Task::ready(Err(anyhow!(
-            "platform credential storage is disabled; use the application credentials provider"
-        )))
+    fn delete_credentials(&self, url: &str) -> Task<Result<()>> {
+        let url = url.to_string();
+        self.background_executor().spawn(async move {
+            unsafe {
+                use security::*;
+
+                let url = CFString::from(url.as_str());
+                let mut query_attrs = CFMutableDictionary::with_capacity(2);
+                query_attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                query_attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+                let status = SecItemDelete(query_attrs.as_concrete_TypeRef());
+                anyhow::ensure!(
+                    matches!(status, ERR_SEC_SUCCESS | ERR_SEC_ITEM_NOT_FOUND),
+                    "deleting credential failed: {status}"
+                );
+            }
+            Ok(())
+        })
     }
 }
 
@@ -1439,4 +1524,29 @@ unsafe extern "C" {
     pub(super) static kTISPropertyInputSourceIsASCIICapable: CFStringRef;
     pub(super) static kTISPropertyInputSourceType: CFStringRef;
     pub(super) static kTISTypeKeyboardInputMode: CFStringRef;
+}
+
+mod security {
+    #![allow(non_upper_case_globals)]
+    use super::*;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        pub static kSecClass: CFStringRef;
+        pub static kSecClassInternetPassword: CFStringRef;
+        pub static kSecAttrServer: CFStringRef;
+        pub static kSecAttrAccount: CFStringRef;
+        pub static kSecValueData: CFStringRef;
+        pub static kSecReturnAttributes: CFStringRef;
+        pub static kSecReturnData: CFStringRef;
+
+        pub fn SecItemAdd(attributes: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
+        pub fn SecItemUpdate(query: CFDictionaryRef, attributes: CFDictionaryRef) -> OSStatus;
+        pub fn SecItemDelete(query: CFDictionaryRef) -> OSStatus;
+        pub fn SecItemCopyMatching(query: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
+    }
+
+    pub const ERR_SEC_SUCCESS: OSStatus = 0;
+    pub const ERR_SEC_USER_CANCELED: OSStatus = -128;
+    pub const ERR_SEC_ITEM_NOT_FOUND: OSStatus = -25300;
 }

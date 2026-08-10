@@ -4,14 +4,21 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, TaskExt as _};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
-pub const CREDENTIAL_KEY: &str = "omega://nautilus/hyperliquid-testnet-private-key";
+mod agent_wallet;
+
+pub use agent_wallet::{
+    AGENT_WALLET_AUTHORITY_COPY, AgentApprovalStatus, AgentWalletHaltReason, AgentWalletSummary,
+    StoredAgentWallet, credential_key, evaluate_extra_agents, generate_and_store_agent_wallet,
+    load_agent_wallet, refresh_agent_wallet_approval,
+};
+
 pub const ENABLE_ENVIRONMENT_VARIABLE: &str = "OMEGA_NAUTILUS_SIDECAR";
 pub const NETWORK_ENVIRONMENT_VARIABLE: &str = "OMEGA_NAUTILUS_NETWORK";
 const EVENT_PREFIX: &str = "OMEGA_NAUTILUS_EVENT ";
@@ -35,14 +42,22 @@ const MARKET_SNAPSHOT_FILL_CAPACITY: usize = 1_024;
 #[serde(rename_all = "snake_case")]
 pub enum Network {
     Testnet,
+    Mainnet,
 }
 
 impl Network {
-    fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "testnet" => Ok(Self::Testnet),
-            "mainnet" => bail!("Nautilus mainnet is disabled; only testnet is permitted"),
+            "mainnet" => Ok(Self::Mainnet),
             _ => bail!("unsupported Nautilus network {value:?}"),
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Testnet => "Testnet",
+            Self::Mainnet => "Mainnet",
         }
     }
 }
@@ -64,6 +79,9 @@ impl NautilusConfig {
         let network = Network::parse(
             &std::env::var(NETWORK_ENVIRONMENT_VARIABLE).unwrap_or_else(|_| "testnet".into()),
         )?;
+        if network == Network::Mainnet {
+            bail!("Nautilus mainnet is disabled until the mainnet graduation gate passes");
+        }
         let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
@@ -992,9 +1010,22 @@ struct CommandEnvelope<'a> {
     command: &'a NautilusCommand,
 }
 
+#[derive(Serialize)]
+struct BootstrapEnvelope<'a> {
+    schema: &'static str,
+    network: Network,
+    private_key: &'a str,
+    owner_address: Option<&'a str>,
+    agent_address: Option<&'a str>,
+    agent_name: Option<&'a str>,
+}
+
+const BOOTSTRAP_SCHEMA: &str = "omega.nautilus.bootstrap.v1";
+
 pub struct NautilusSupervisor {
     config: NautilusConfig,
     private_key: PrivateKey,
+    agent_wallet: Option<AgentWalletSummary>,
     child: Option<Child>,
     child_stdin: Option<ChildStdin>,
     events: Option<mpsc::Receiver<Result<SidecarEvent>>>,
@@ -1011,6 +1042,7 @@ impl NautilusSupervisor {
         Ok(Self {
             config,
             private_key,
+            agent_wallet: None,
             child: None,
             child_stdin: None,
             events: None,
@@ -1018,6 +1050,22 @@ impl NautilusSupervisor {
             last_health: None,
             stream: Arc::new(Mutex::new(StreamBuffer::default())),
         })
+    }
+
+    pub fn with_agent_wallet(config: NautilusConfig, wallet: StoredAgentWallet) -> Result<Self> {
+        if config.network != wallet.network {
+            bail!("Nautilus configuration and agent-wallet networks do not match");
+        }
+        if let Some(halt) = wallet.summary().halt_reason(config.network) {
+            bail!("Hyperliquid agent wallet is halted: {}", halt.code());
+        }
+        if !matches!(wallet.approval, AgentApprovalStatus::Approved { .. }) {
+            bail!("Hyperliquid agent wallet has not been approved by its owner");
+        }
+        let private_key = PrivateKey::new(wallet.private_key_bytes())?;
+        let mut supervisor = Self::new(config, private_key)?;
+        supervisor.agent_wallet = Some(wallet.summary());
+        Ok(supervisor)
     }
 
     pub fn generation(&self) -> u64 {
@@ -1054,7 +1102,6 @@ impl NautilusSupervisor {
             .arg(self.generation.to_string())
             .arg("--reconciliation-lookback-minutes")
             .arg(self.config.reconciliation_lookback_minutes.to_string())
-            .env("HYPERLIQUID_TESTNET_PK", self.private_key.0.as_str())
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1073,6 +1120,31 @@ impl NautilusSupervisor {
             .stdin
             .take()
             .ok_or_else(|| anyhow!("Nautilus sidecar stdin is unavailable"))?;
+        let mut child_stdin = child_stdin;
+        let bootstrap = BootstrapEnvelope {
+            schema: BOOTSTRAP_SCHEMA,
+            network: self.config.network,
+            private_key: self.private_key.0.as_str(),
+            owner_address: self
+                .agent_wallet
+                .as_ref()
+                .map(|wallet| wallet.owner_address.as_str()),
+            agent_address: self
+                .agent_wallet
+                .as_ref()
+                .map(|wallet| wallet.agent_address.as_str()),
+            agent_name: self
+                .agent_wallet
+                .as_ref()
+                .map(|wallet| wallet.agent_name.as_str()),
+        };
+        let mut bootstrap = serde_json::to_vec(&bootstrap).context("encode Nautilus bootstrap")?;
+        let write_result = child_stdin
+            .write_all(&bootstrap)
+            .and_then(|()| child_stdin.write_all(b"\n"))
+            .and_then(|()| child_stdin.flush());
+        bootstrap.zeroize();
+        write_result.context("inject Nautilus bootstrap through stdin")?;
         let stderr = child
             .stderr
             .take()
@@ -1522,17 +1594,147 @@ struct NautilusLifecycle {
 
 impl Global for NautilusLifecycle {}
 
+#[derive(Clone, Debug)]
+pub struct NautilusCredentialSnapshot {
+    pub selected_network: Network,
+    pub testnet: Option<AgentWalletSummary>,
+    pub mainnet: Option<AgentWalletSummary>,
+    pub halt: Option<AgentWalletHaltReason>,
+    pub wakeup: Option<agent_wakeup::WakeupSource>,
+    pub error: Option<String>,
+    pub loading: bool,
+}
+
+impl Default for NautilusCredentialSnapshot {
+    fn default() -> Self {
+        Self {
+            selected_network: Network::Testnet,
+            testnet: None,
+            mainnet: None,
+            halt: None,
+            wakeup: None,
+            error: None,
+            loading: true,
+        }
+    }
+}
+
+pub struct NautilusCredentialState {
+    snapshot: NautilusCredentialSnapshot,
+}
+
+impl NautilusCredentialState {
+    pub fn snapshot(&self) -> NautilusCredentialSnapshot {
+        self.snapshot.clone()
+    }
+
+    fn replace(&mut self, snapshot: NautilusCredentialSnapshot, cx: &mut Context<Self>) {
+        self.snapshot = snapshot;
+        cx.notify();
+    }
+
+    pub fn apply_wallet(&mut self, wallet: AgentWalletSummary, cx: &mut Context<Self>) {
+        let network = wallet.network;
+        let halt = wallet.halt_reason(network);
+        match wallet.network {
+            Network::Testnet => self.snapshot.testnet = Some(wallet),
+            Network::Mainnet => self.snapshot.mainnet = Some(wallet),
+        }
+        if self.snapshot.selected_network == network {
+            self.snapshot.wakeup = halt
+                .as_ref()
+                .map(|halt| credential_halt_wakeup(network, halt));
+            self.snapshot.halt = halt;
+        }
+        self.snapshot.error = None;
+        self.snapshot.loading = false;
+        cx.notify();
+    }
+
+    pub fn apply_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.snapshot.error = Some(error);
+        self.snapshot.loading = false;
+        cx.notify();
+    }
+}
+
+struct GlobalNautilusCredentialState(Entity<NautilusCredentialState>);
+
+impl Global for GlobalNautilusCredentialState {}
+
+pub fn credential_state(cx: &App) -> Option<Entity<NautilusCredentialState>> {
+    cx.try_global::<GlobalNautilusCredentialState>()
+        .map(|state| state.0.clone())
+}
+
+fn now_ms() -> Result<i64> {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis();
+    i64::try_from(milliseconds).context("system timestamp exceeds i64")
+}
+
+fn credential_halt_wakeup(
+    network: Network,
+    halt: &AgentWalletHaltReason,
+) -> agent_wakeup::WakeupSource {
+    agent_wakeup::WakeupSource::CredentialHalt {
+        venue: "hyperliquid".to_owned(),
+        network: network.label().to_ascii_lowercase(),
+        reason_code: halt.code().to_owned(),
+    }
+}
+
 pub fn command_channel(cx: &App) -> Option<NautilusCommandChannel> {
     cx.try_global::<NautilusLifecycle>()
         .map(|lifecycle| lifecycle.command_channel.clone())
 }
 
 pub fn init(cx: &mut App) {
+    let credential_state = cx.new(|_| NautilusCredentialState {
+        snapshot: NautilusCredentialSnapshot::default(),
+    });
+    cx.set_global(GlobalNautilusCredentialState(credential_state.clone()));
+    let credentials = zed_credentials_provider::agent_wallet_credentials(cx);
     let config = match NautilusConfig::from_process_environment() {
         Ok(Some(config)) => config,
-        Ok(None) => return,
+        Ok(None) => {
+            cx.spawn(async move |cx| {
+                let testnet = load_agent_wallet(&credentials, Network::Testnet, cx)
+                    .await?
+                    .map(|wallet| wallet.summary());
+                let mainnet = load_agent_wallet(&credentials, Network::Mainnet, cx)
+                    .await?
+                    .map(|wallet| wallet.summary());
+                credential_state.update(cx, |state, cx| {
+                    state.replace(
+                        NautilusCredentialSnapshot {
+                            testnet,
+                            mainnet,
+                            loading: false,
+                            ..NautilusCredentialSnapshot::default()
+                        },
+                        cx,
+                    );
+                });
+                Ok::<(), anyhow::Error>(())
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
         Err(error) => {
             log::error!("Refusing Nautilus sidecar configuration: {error:#}");
+            credential_state.update(cx, |state, cx| {
+                state.replace(
+                    NautilusCredentialSnapshot {
+                        error: Some(error.to_string()),
+                        loading: false,
+                        ..NautilusCredentialSnapshot::default()
+                    },
+                    cx,
+                );
+            });
             return;
         }
     };
@@ -1569,14 +1771,72 @@ pub fn init(cx: &mut App) {
         },
         _quit_subscription: quit_subscription,
     });
-    let credentials = zed_credentials_provider::local_credentials(cx);
+    let http_client = cx.http_client();
     let background_executor = cx.background_executor().clone();
     cx.spawn(async move |cx| {
-        let (_, private_key) = credentials
-            .read_credentials(CREDENTIAL_KEY, cx)
+        let selected_network = config.network;
+        let testnet_wallet = load_agent_wallet(&credentials, Network::Testnet, cx).await?;
+        let mainnet_wallet = load_agent_wallet(&credentials, Network::Mainnet, cx).await?;
+        let selected_configured = match selected_network {
+            Network::Testnet => testnet_wallet.is_some(),
+            Network::Mainnet => mainnet_wallet.is_some(),
+        };
+        if !selected_configured {
+            credential_state.update(cx, |state, cx| {
+                state.replace(
+                    NautilusCredentialSnapshot {
+                        selected_network,
+                        testnet: None,
+                        mainnet: None,
+                        error: Some(format!(
+                            "Hyperliquid {} agent wallet is not configured",
+                            selected_network.label().to_ascii_lowercase()
+                        )),
+                        loading: false,
+                        halt: None,
+                        wakeup: None,
+                    },
+                    cx,
+                );
+            });
+            return Ok::<(), anyhow::Error>(());
+        }
+        let refreshed = refresh_agent_wallet_approval(
+            http_client,
+            &credentials,
+            selected_network,
+            now_ms()?,
+            cx,
+        )
+        .await?;
+        let halt = refreshed.halt_reason(selected_network);
+        credential_state.update(cx, |state, cx| {
+            state.replace(
+                NautilusCredentialSnapshot {
+                    selected_network,
+                    testnet: (selected_network == Network::Testnet)
+                        .then_some(refreshed.clone())
+                        .or_else(|| testnet_wallet.as_ref().map(StoredAgentWallet::summary)),
+                    mainnet: (selected_network == Network::Mainnet)
+                        .then_some(refreshed.clone())
+                        .or_else(|| mainnet_wallet.as_ref().map(StoredAgentWallet::summary)),
+                    wakeup: halt
+                        .as_ref()
+                        .map(|halt| credential_halt_wakeup(selected_network, halt)),
+                    halt: halt.clone(),
+                    error: None,
+                    loading: false,
+                },
+                cx,
+            );
+        });
+        if halt.is_some() {
+            return Ok::<(), anyhow::Error>(());
+        }
+        let selected_wallet = load_agent_wallet(&credentials, selected_network, cx)
             .await?
-            .ok_or_else(|| anyhow!("Hyperliquid testnet credential is not configured"))?;
-        let sidecar = NautilusSupervisor::new(config, PrivateKey::new(private_key)?)?;
+            .ok_or_else(|| anyhow!("Hyperliquid agent wallet disappeared after approval probe"))?;
+        let sidecar = NautilusSupervisor::with_agent_wallet(config, selected_wallet)?;
         let stream = sidecar.stream();
         {
             let supervisor = supervisor.clone();
@@ -1637,8 +1897,37 @@ mod tests {
 
     #[test]
     fn mainnet_is_hard_refused() {
-        assert!(Network::parse("mainnet").is_err());
+        assert_eq!(
+            Network::parse("mainnet").expect("named mainnet"),
+            Network::Mainnet
+        );
         assert!(Network::parse("testnet").is_ok());
+        let config = NautilusConfig {
+            network: Network::Mainnet,
+            python: PathBuf::from("python"),
+            engine: PathBuf::from("engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(5),
+        };
+        assert!(NautilusSupervisor::new(config, private_key()).is_err());
+    }
+
+    #[test]
+    fn expired_agent_wallet_emits_typed_credential_wakeup() {
+        let source = credential_halt_wakeup(
+            Network::Testnet,
+            &AgentWalletHaltReason::Expired {
+                valid_until_ms: 1_000,
+            },
+        );
+        assert_eq!(
+            source,
+            agent_wakeup::WakeupSource::CredentialHalt {
+                venue: "hyperliquid".to_owned(),
+                network: "testnet".to_owned(),
+                reason_code: "agent_wallet_expired".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -1706,7 +1995,9 @@ mod tests {
             "ts_event": 1,
             "ts_init": 1,
         });
-        assert!(serde_json::from_value::<StreamEvent>(mainnet).is_err());
+        let mainnet = serde_json::from_value::<StreamEvent>(mainnet)
+            .expect("mainnet remains a named network for strict mismatch diagnostics");
+        assert!(mainnet.validate(3).is_err());
     }
 
     #[test]

@@ -31,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 trading_ledger.workspace = true
 trading_mandate.workspace = true
+trading_workspace_ui.workspace = true
 ui.workspace = true
 
 [dev-dependencies]

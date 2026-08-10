@@ -7075,6 +7075,7 @@ dependencies = [
  "strum 0.27.2",
  "uuid",
  "zed-font-kit",
+ "zeroize",
 ]
 
 [[package]]
@@ -8590,6 +8591,15 @@ dependencies = [
  "serde_json",
  "signature",
  "simple_asn1",
+]
+
+[[package]]
+name = "keccak"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb26cec98cce3a3d96cbb7bced3c4b16e3d13f27ec56dbd62cbc8f39cfb9d653"
+dependencies = [
+ "cpufeatures 0.2.17",
 ]
 
 [[package]]
@@ -10470,6 +10480,7 @@ dependencies = [
  "theme_settings",
  "trading_ledger",
  "trading_mandate",
+ "trading_workspace_ui",
  "ui",
 ]
 
@@ -10477,13 +10488,20 @@ dependencies = [
 name = "nautilus_sidecar"
 version = "0.1.0"
 dependencies = [
+ "agent_wakeup",
  "anyhow",
  "credentials_provider",
+ "futures 0.3.32",
  "gpui",
+ "hex",
+ "http_client",
  "libc",
  "log",
+ "rand 0.9.4",
+ "secp256k1 0.31.1",
  "serde",
  "serde_json",
+ "sha3",
  "smol",
  "tempfile",
  "thiserror 2.0.17",
@@ -16102,6 +16120,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha3"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
+dependencies = [
+ "digest 0.10.7",
+ "keccak",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18098,9 +18126,12 @@ dependencies = [
  "anyhow",
  "command_center_ui",
  "component",
+ "credentials_provider",
+ "editor",
  "gpui",
  "market_ui",
  "nautilus_sidecar",
+ "plugin_api",
  "serde_json",
  "settings",
  "theme",
@@ -18108,7 +18139,9 @@ dependencies = [
  "trading_ledger",
  "trading_mandate",
  "ui",
+ "util",
  "workspace",
+ "zed_credentials_provider",
 ]
 
 [[package]]

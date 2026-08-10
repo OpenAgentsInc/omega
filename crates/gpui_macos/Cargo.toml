@@ -63,6 +63,7 @@ semver.workspace = true
 smallvec.workspace = true
 strum.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 cbindgen.workspace = true

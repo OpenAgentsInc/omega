@@ -1,12 +1,15 @@
 //! Capability-gated portfolio, trading, and analytics dock panels.
 
+mod agent_wallet_ui;
 mod panels;
 mod workspace_data;
 
-use gpui::{App, actions};
+use gpui::{App, AppContext as _, actions};
 use nautilus_sidecar::NautilusStreamSource;
+use plugin_api::SettingsPageRegistration;
 use workspace::Workspace;
 
+pub use agent_wallet_ui::{AgentWalletAuthorityCard, NautilusAgentWalletSettingsPage};
 pub use panels::{
     AnalyticsWorkspacePanel, AnalyticsWorkspaceSurface, PortfolioWorkspacePanel,
     PortfolioWorkspaceSurface, TradingWorkspacePanel, TradingWorkspaceSurface,
@@ -29,6 +32,27 @@ actions!(
 
 pub fn enabled(cx: &App) -> bool {
     NautilusStreamSource::try_global(cx).is_some()
+}
+
+pub fn settings_page_registration() -> SettingsPageRegistration {
+    SettingsPageRegistration {
+        plugin_id: "nautilus_governance",
+        section: "Trading",
+        title: "Hyperliquid agent wallet",
+        description: "Generate, approve, inspect, and rotate network-scoped agent authority.",
+        search_aliases: &["Nautilus", "Hyperliquid", "agent wallet", "API wallet"],
+        page_key: "nautilus_agent_wallet",
+        build: std::rc::Rc::new(|window, cx| {
+            cx.new(|cx| {
+                NautilusAgentWalletSettingsPage::new(
+                    zed_credentials_provider::agent_wallet_credentials(cx),
+                    window,
+                    cx,
+                )
+            })
+            .into()
+        }),
+    }
 }
 
 pub fn init(cx: &mut App) {

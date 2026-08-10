@@ -246,6 +246,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0273",
     "OMEGA-DELTA-0274",
     "OMEGA-DELTA-0275",
+    "OMEGA-DELTA-0276",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -19890,7 +19891,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_runtime_has_no_keychain_credential_calls() {
+    fn macos_keychain_access_is_narrow_agent_wallet_custody() {
         let provider =
             read_repository_file("crates/zed_credentials_provider/src/zed_credentials_provider.rs");
         for required in [
@@ -19906,8 +19907,6 @@ mod tests {
         }
         for forbidden in [
             "KeychainCredentialsProvider",
-            "read_credentials(url)",
-            "write_credentials(url",
             "ZED_DEVELOPMENT_USE_KEYCHAIN",
         ] {
             assert!(
@@ -19916,8 +19915,20 @@ mod tests {
             );
         }
 
+        for required in [
+            "pub fn agent_wallet_credentials",
+            "inner: Arc::new(PlatformCredentialsProvider)",
+            "fn new(cx: &App)",
+            "Arc::new(LocalCredentialsProvider::new())",
+        ] {
+            assert!(
+                provider.contains(required),
+                "Omega's narrow agent-wallet credential boundary lost `{required}`."
+            );
+        }
+
         let platform = read_repository_file("crates/gpui_macos/src/platform.rs");
-        for forbidden in [
+        for required in [
             "SecItemAdd",
             "SecItemUpdate",
             "SecItemDelete",
@@ -19925,8 +19936,8 @@ mod tests {
             "kSecClass",
         ] {
             assert!(
-                !platform.contains(forbidden),
-                "The macOS platform regained Security.framework credential call `{forbidden}`."
+                platform.contains(required),
+                "The agent-wallet platform credential path lost `{required}`."
             );
         }
     }
@@ -30924,8 +30935,9 @@ mod tests {
         }
     }
 
-    /// Omega owns one versioned testnet sidecar lifecycle and refuses any
-    /// configuration that could aim the execution engine at mainnet.
+    /// Omega owns one versioned testnet sidecar lifecycle. Mainnet remains a
+    /// named configuration so mismatches are explicit, but is refused before
+    /// the execution engine or an approval request can start.
     #[test]
     fn nautilus_lifecycle_is_app_owned_versioned_and_testnet_only() {
         let lifecycle = without_comments(&read_repository_file(
@@ -30934,7 +30946,9 @@ mod tests {
         for required in [
             "pub enum Network",
             "Testnet",
+            "Mainnet",
             "mainnet is disabled; only testnet is permitted",
+            "if config.network != Network::Testnet",
             "EVENT_SCHEMA",
             "ensure_healthy(",
             "pub fn stop(",
@@ -30944,11 +30958,6 @@ mod tests {
                 "OMEGA-DELTA-0268: Nautilus lifecycle lost `{required}`"
             );
         }
-        assert!(
-            !lifecycle.contains("Network::Mainnet"),
-            "OMEGA-DELTA-0268: Nautilus lifecycle gained a mainnet path"
-        );
-
         let engine = without_comments(&read_repository_file("sidecar/nautilus/engine.py"));
         for required in [
             "HyperliquidEnvironment.TESTNET",
@@ -31047,10 +31056,16 @@ mod tests {
                 "OMEGA-DELTA-0270: command channel lost `{required}`"
             );
         }
-        assert!(
-            !channel.contains("Network::Mainnet"),
-            "OMEGA-DELTA-0270: command channel gained a mainnet path"
-        );
+        for required in [
+            "network: Network::Testnet",
+            "if config.network != Network::Testnet",
+            "Nautilus mainnet is disabled; only testnet is permitted",
+        ] {
+            assert!(
+                channel.contains(required),
+                "OMEGA-DELTA-0270: command channel lost mainnet refusal `{required}`"
+            );
+        }
 
         let engine = without_comments(&read_repository_file("sidecar/nautilus/engine.py"));
         for required in [
@@ -31418,6 +31433,118 @@ mod tests {
             assert!(
                 !hardcoded.contains(schema),
                 "OMEGA-DELTA-0274: `{schema}` entered the hardcoded market card path"
+            );
+        }
+    }
+
+    #[test]
+    fn nautilus_agent_wallet_custody_is_named_platform_only_and_fail_closed() {
+        let wallet = without_comments(&read_repository_file(
+            "crates/nautilus_sidecar/src/agent_wallet.rs",
+        ));
+        for required in [
+            "omega://nautilus/hyperliquid/testnet/agent-wallet-v1",
+            "omega://nautilus/hyperliquid/mainnet/agent-wallet-v1",
+            "omega-testnet",
+            "omega-mainnet",
+            "extraAgents",
+            "validUntil",
+            "Network::Mainnet => bail!",
+            "AgentWalletHaltReason::NetworkMismatch",
+            "Omega can trade on this account; Omega cannot withdraw.",
+            "[REDACTED]",
+            "encoded.zeroize()",
+        ] {
+            assert!(
+                wallet.contains(required),
+                "OMEGA-DELTA-0276: wallet custody lost `{required}`"
+            );
+        }
+
+        let provider = without_comments(&read_repository_file(
+            "crates/zed_credentials_provider/src/zed_credentials_provider.rs",
+        ));
+        for required in [
+            "pub fn agent_wallet_credentials",
+            "inner: Arc::new(PlatformCredentialsProvider)",
+            "fn new(cx: &App)",
+            "Arc::new(LocalCredentialsProvider::new())",
+        ] {
+            assert!(
+                provider.contains(required),
+                "OMEGA-DELTA-0276: credential boundary lost `{required}`"
+            );
+        }
+
+        let sidecar = without_comments(&read_repository_file(
+            "crates/nautilus_sidecar/src/nautilus_sidecar.rs",
+        ));
+        for required in [
+            "omega.nautilus.bootstrap.v1",
+            "write_all(&bootstrap)",
+            "bootstrap.zeroize()",
+            "NautilusSupervisor::with_agent_wallet",
+            "credential_halt_wakeup",
+        ] {
+            assert!(
+                sidecar.contains(required),
+                "OMEGA-DELTA-0276: supervised injection lost `{required}`"
+            );
+        }
+        assert!(
+            !sidecar.contains("env(\"HYPERLIQUID_TESTNET_PK\""),
+            "OMEGA-DELTA-0276: the parent process injected the wallet through its environment"
+        );
+
+        let engine = without_comments(&read_repository_file("sidecar/nautilus/engine.py"));
+        for required in [
+            "omega.nautilus.bootstrap.v1",
+            "sys.stdin.readline()",
+            "HYPERLIQUID_TESTNET_PK",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0276: child bootstrap lost `{required}`"
+            );
+        }
+
+        let governance = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ));
+        for required in ["pending_credential_wakeup", "add_settings_page"] {
+            assert!(
+                governance.contains(required),
+                "OMEGA-DELTA-0276: typed operator halt lost `{required}`"
+            );
+        }
+
+        let ui = without_comments(&read_repository_file(
+            "crates/trading_workspace_ui/src/agent_wallet_ui.rs",
+        ));
+        for required in [
+            "AGENT_WALLET_AUTHORITY_COPY",
+            "valid until",
+            "Grayscale audit",
+            "nautilus.agent_wallet_authority",
+        ] {
+            assert!(
+                ui.contains(required),
+                "OMEGA-DELTA-0276: authority UI lost `{required}`"
+            );
+        }
+
+        let documentation = read_repository_file("docs/omega/runtime-credential-storage.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required in [
+            "platform credential store",
+            "never written to the ordinary credential file",
+            "Omega can trade on this account; Omega cannot withdraw.",
+        ] {
+            assert!(
+                documentation.contains(required),
+                "OMEGA-DELTA-0276: storage contract lost `{required}`"
             );
         }
     }

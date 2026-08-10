@@ -13,11 +13,14 @@ See the platform-specific instructions for building Zed from source:
 
 ## Local credential storage
 
-Omega never stores runtime credentials in the macOS Keychain. Provider keys,
-OAuth sessions, native-session tokens, and the Nostr identity secret use
+Omega keeps ordinary runtime credentials out of the macOS Keychain. Provider
+keys, OAuth sessions, native-session tokens, and the Nostr identity secret use
 owner-only local files in the channel's application data directory. Credential
 writes are atomic; the credentials directory is mode `0700` and its files are
-mode `0600` on Unix.
+mode `0600` on Unix. Hyperliquid agent-wallet keys are the narrow exception:
+they are generated locally and stored in separate, network-bound platform
+credential-store records, never in a plaintext configuration file. See the
+[runtime credential storage contract](../omega/runtime-credential-storage.md).
 
 The files are not encrypted at rest. Protect the operating-system account and
 application data directory as you would other local developer credentials.

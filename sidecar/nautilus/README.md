@@ -6,11 +6,14 @@ Nautilus. Omega supplies its mandate envelope and start, parameter, and stop
 commands above the tick loop.
 
 Install the pinned runtime with `./setup.sh`. Omega starts it only when
-`OMEGA_NAUTILUS_SIDECAR=1`; `OMEGA_NAUTILUS_NETWORK` defaults to `testnet` and
-any other value is refused. The Hyperliquid private key is read from Omega's
-private local credential store under
-`omega://nautilus/hyperliquid-testnet-private-key`. It is passed to the child
-only as `HYPERLIQUID_TESTNET_PK` and is never included in lifecycle events.
+`OMEGA_NAUTILUS_SIDECAR=1`; `OMEGA_NAUTILUS_NETWORK` defaults to `testnet`.
+`mainnet` is a named configuration but is refused before any connection or
+sidecar effect until graduation. Omega generates separate testnet and mainnet
+Hyperliquid agent wallets and keeps their private keys in separate
+release-channel-namespaced platform credential-store records. At spawn, the
+selected testnet key and public wallet binding enter the supervised child as
+one `omega.nautilus.bootstrap.v1` record over stdin. The parent environment,
+arguments, configuration files, lifecycle events, and UI never contain it.
 
 The lifecycle protocol is newline-framed typed JSON prefixed by
 `OMEGA_NAUTILUS_EVENT`. Version 1 reports `starting`, `healthy`, and `stopped`.
@@ -21,5 +24,6 @@ The app writes `omega.nautilus.command.v1` JSON envelopes to the child stdin.
 Place, cancel, strategy start, strategy stop, and typed strategy-parameter
 commands return acknowledgements and outcomes on the same versioned stdout
 event stream. Effectful commands are single-attempt: a lost or ambiguous
-outcome becomes `unknown` and is never retried by the channel. Mainnet remains
-unrepresentable in the Rust command types and refused by the Python entrypoint.
+outcome becomes `unknown` and is never retried by the channel. Command
+envelopes remain pinned to testnet; both the Rust supervisor and Python
+entrypoint refuse mainnet before execution.

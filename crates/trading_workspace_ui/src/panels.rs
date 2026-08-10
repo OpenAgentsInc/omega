@@ -9,7 +9,7 @@ use gpui::{
     Window, px, uniform_list,
 };
 use market_ui::NautilusOrderTicketSource;
-use nautilus_sidecar::NautilusStreamSource;
+use nautilus_sidecar::{NautilusStreamSource, credential_state};
 use trading_ledger::LedgerStore;
 use trading_mandate::{MandateStore, TradingNetwork};
 use ui::{
@@ -24,7 +24,9 @@ use workspace::{
 };
 
 use crate::workspace_data::{AnalyticsPanelData, PortfolioPanelData, TradingPanelData};
-use crate::{ToggleAnalyticsPanel, TogglePortfolioPanel, ToggleTradingPanel};
+use crate::{
+    AgentWalletAuthorityCard, ToggleAnalyticsPanel, TogglePortfolioPanel, ToggleTradingPanel,
+};
 
 const HYPERLIQUID_VENUE: &str = "hyperliquid";
 
@@ -93,7 +95,7 @@ impl RenderOnce for PortfolioWorkspaceSurface {
             .size_full()
             .child(uniform_list(
                 "trading-workspace-portfolio-sections",
-                7,
+                8,
                 move |range, _window, _cx| {
                     range
                         .map(|index| match index {
@@ -137,6 +139,21 @@ impl RenderOnce for PortfolioWorkspaceSurface {
                                             .color(Color::Muted)
                                             .into_any_element()
                                     }),
+                            ),
+                            6 => panel_section(
+                                AgentWalletAuthorityCard::new(
+                                    match data.credential.selected_network {
+                                        nautilus_sidecar::Network::Testnet => {
+                                            data.credential.testnet.clone()
+                                        }
+                                        nautilus_sidecar::Network::Mainnet => {
+                                            data.credential.mainnet.clone()
+                                        }
+                                    },
+                                    data.credential.halt.clone(),
+                                )
+                                .tokens(tokens)
+                                .into_any_element(),
                             ),
                             _ => panel_section(
                                 ApprovalQueue::new(data.approvals.clone())
@@ -417,6 +434,7 @@ impl Component for AnalyticsWorkspaceSurface {
 struct PanelLiveState {
     stream: Option<Entity<NautilusStreamSource>>,
     _subscription: Option<Subscription>,
+    _credential_subscription: Option<Subscription>,
 }
 
 impl PanelLiveState {
@@ -425,9 +443,12 @@ impl PanelLiveState {
         let subscription = stream
             .as_ref()
             .map(|stream| cx.observe(stream, |_, _, cx| cx.notify()));
+        let credential_subscription =
+            credential_state(cx).map(|state| cx.observe(&state, |_, _, cx| cx.notify()));
         Self {
             stream,
             _subscription: subscription,
+            _credential_subscription: credential_subscription,
         }
     }
 
@@ -489,6 +510,7 @@ impl PortfolioWorkspacePanel {
             live: PanelLiveState {
                 stream: None,
                 _subscription: None,
+                _credential_subscription: None,
             },
             ledger: None,
             mandate: None,
@@ -519,6 +541,9 @@ impl PortfolioWorkspacePanel {
             mandate,
             command_center_ui::unix_now_ms(),
             self.store_error.as_deref(),
+            credential_state(cx)
+                .map(|state| state.read(cx).snapshot())
+                .unwrap_or_default(),
         )
     }
 }
@@ -559,6 +584,7 @@ impl TradingWorkspacePanel {
             live: PanelLiveState {
                 stream: None,
                 _subscription: None,
+                _credential_subscription: None,
             },
             demo: true,
             grayscale,
@@ -602,6 +628,7 @@ impl AnalyticsWorkspacePanel {
             live: PanelLiveState {
                 stream: None,
                 _subscription: None,
+                _credential_subscription: None,
             },
             demo: true,
             grayscale,

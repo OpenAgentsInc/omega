@@ -62,15 +62,46 @@ impl WakeupSettings {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WakeupSource {
-    ScheduledReview { cadence: String },
-    FundingSignFlip { previous_bps: i64, current_bps: i64 },
-    DrawdownLimitApproach { drawdown_sats: u64, limit_sats: u64 },
-    LiquidationDistanceBreach { distance_bps: u32, limit_bps: u32 },
-    VolatilityRegimeChange { previous: String, current: String },
-    StrategyHalt { strategy: String, reason: String },
-    DepositSeen { amount_sats: u64, reference: String },
-    WithdrawalSeen { amount_sats: u64, reference: String },
-    External { event_type: String, summary: String },
+    ScheduledReview {
+        cadence: String,
+    },
+    FundingSignFlip {
+        previous_bps: i64,
+        current_bps: i64,
+    },
+    DrawdownLimitApproach {
+        drawdown_sats: u64,
+        limit_sats: u64,
+    },
+    LiquidationDistanceBreach {
+        distance_bps: u32,
+        limit_bps: u32,
+    },
+    VolatilityRegimeChange {
+        previous: String,
+        current: String,
+    },
+    StrategyHalt {
+        strategy: String,
+        reason: String,
+    },
+    CredentialHalt {
+        venue: String,
+        network: String,
+        reason_code: String,
+    },
+    DepositSeen {
+        amount_sats: u64,
+        reference: String,
+    },
+    WithdrawalSeen {
+        amount_sats: u64,
+        reference: String,
+    },
+    External {
+        event_type: String,
+        summary: String,
+    },
 }
 
 impl WakeupSource {
@@ -84,6 +115,9 @@ impl WakeupSource {
             }
             Self::VolatilityRegimeChange { .. } => "event: volatility regime change".to_string(),
             Self::StrategyHalt { strategy, .. } => format!("event: {strategy} strategy halt"),
+            Self::CredentialHalt { venue, .. } => {
+                format!("event: {venue} credential halt")
+            }
             Self::DepositSeen { .. } => "event: deposit seen".to_string(),
             Self::WithdrawalSeen { .. } => "event: withdrawal seen".to_string(),
             Self::External { event_type, .. } => format!("event: {event_type}"),

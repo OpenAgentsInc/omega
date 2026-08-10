@@ -1,6 +1,10 @@
 # Runtime credential storage
 
-Omega does not access the macOS Keychain for application runtime credentials.
+Omega keeps ordinary application runtime credentials out of the macOS
+Keychain. Hyperliquid agent-wallet private keys are the single narrow
+exception: Omega generates those trading-only keys locally and stores them in
+the platform credential store. They are never written to the ordinary
+credential file.
 
 The shared credentials provider stores provider API keys, OAuth sessions,
 OpenAgents native-session access and refresh tokens, and similar byte credentials in
@@ -8,6 +12,24 @@ OpenAgents native-session access and refresh tokens, and similar byte credential
 directory. Records remain release-channel namespaced. Writes use an atomic
 replacement, the directory is mode `0700`, and the file is mode `0600` on
 Unix.
+
+Hyperliquid testnet and mainnet agent wallets have separate, versioned,
+release-channel-namespaced credential keys and separate fixed agent names.
+Loading a record validates both the named network and agent name. The selected
+wallet is passed to the supervised Nautilus process in one typed bootstrap
+record over its inherited stdin; it is not placed in the parent environment,
+command line, configuration, or a plaintext disk file. Omega surfaces the
+owner, agent address, network, `extraAgents` approval, and `validUntil`, but
+never the private key. Expired, revoked, unknown-mode, or network-mismatched
+approval halts startup and emits a typed credential wakeup. Hyperliquid
+mainnet connections remain refused before any request or sidecar effect until
+the separate graduation gate passes.
+
+This exception grants trading authority only: **Omega can trade on this
+account; Omega cannot withdraw.** The person's Hyperliquid master wallet is
+never held by Omega. The existing `global` and `local_credentials` providers
+continue to use the owner-only file above; they do not read, migrate, or prompt
+for Keychain entries.
 
 The Nostr signing secret is stored separately as
 `identity/identity.secret` below the channel-specific application data
@@ -80,9 +102,10 @@ pairing secret is deleted after acknowledgement. Rejection, revocation, and
 **Disconnect signer** delete and read back the disposable client secret. The
 person's root `nsec` remains in the external signer and never enters Omega.
 
-These packets do not enable or
-probe the macOS Keychain, Secure Enclave, Windows credential vault, Linux
-secret service, Android keystore, or another native key-vault integration.
+These packets do not enable or probe the Secure Enclave, Windows credential
+vault, Linux secret service, Android keystore, or another native key-vault
+integration. The platform credential-store exception described above is
+limited to Hyperliquid agent-wallet custody.
 
 AUTH-05 keeps hosted access and refresh tokens in the same unencrypted,
 owner-only `credentials/credentials.json` file. A schema-versioned record
