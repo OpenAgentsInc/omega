@@ -201,6 +201,20 @@ The GGUF repository contains four runtime files:
 | `dflash-kquant.gguf`                   |  1,631,205,312 |          1.63 GB | Quantized speculative drafter           |
 | `mmproj-kquant.gguf`                   |  1,400,328,928 |          1.40 GB | Quantized perception encoder for images |
 
+For the first Omega bring-up, download this three-file set:
+
+1. `muse-glimmer-30B-kquant-17gb.gguf` as the required language-model target.
+2. `dflash-kquant.gguf` as the recommended speculative drafter.
+3. `mmproj-kquant.gguf` for the later vision test; omit it from the server command
+   until text and tool calling pass.
+
+Do not also download `muse-glimmer-30B-kquant-dynamic.gguf` for the first run. It
+is an alternative language-model target, not an add-on to the 17 GB target. It
+uses about 2.90 GB more storage and has lower reported average quantization
+degradation, but Meta's published M5 Max DFlash result uses the 17 GB target.
+Evaluate the dynamic target as a follow-up A/B test after the Omega integration
+works.
+
 The target GGUF files are text-only on their own. Add `mmproj-kquant.gguf` for
 image input. Add `dflash-kquant.gguf` for DFlash.
 
@@ -331,7 +345,8 @@ containing that merge. Record `llama-server --version` with every result.
 ### 7.2 Download the assets
 
 Install the Hugging Face CLI, authenticate if the repository requests it, and
-download explicit files:
+download the recommended three-file set. The dynamic target is intentionally
+absent from this command:
 
 ```sh
 python3 -m pip install huggingface_hub
