@@ -8,6 +8,7 @@
 //! grayscale and color-vision deficiencies. See omega#247.
 
 mod market_kit;
+mod plot;
 mod viz_chip;
 mod viz_cloud_provision;
 mod viz_edge;
@@ -23,6 +24,7 @@ mod viz_swap;
 mod viz_zone;
 
 pub use market_kit::*;
+pub use plot::*;
 pub use viz_chip::*;
 pub use viz_cloud_provision::*;
 pub use viz_edge::*;
@@ -404,6 +406,7 @@ mod tests {
                 .child(MarketKit::preview(window, cx))
                 .child(RfqComparisonCard::preview(window, cx))
                 .child(WhereShouldTheMoneySit::preview(window, cx))
+                .child(Plot::preview(window, cx))
         }
     }
 
