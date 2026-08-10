@@ -5497,32 +5497,11 @@ async fn test_plugin_registered_tools_reach_the_basic_profile(cx: &mut TestAppCo
         registry.add_extension(crate::tools::PluginAgentTools {
             plugin_id: "test_plugin",
             tool_names: &[EchoTool::NAME],
+            default_enabled_profiles: &[agent_settings::builtin_profiles::BASIC],
             build: Rc::new(|_context, _cx| vec![EchoTool.erase()]),
         });
         plugin_api::init_global(registry, cx);
     });
-
-    fs.insert_file(
-        paths::settings_file(),
-        json!({
-            "agent": {
-                "default_profile": "basic",
-                "profiles": {
-                    "basic": {
-                        "name": "Basic",
-                        "enable_all_context_servers": false,
-                        "tools": {
-                            "echo": true,
-                        },
-                    },
-                },
-            },
-        })
-        .to_string()
-        .into_bytes(),
-    )
-    .await;
-    cx.run_until_parked();
 
     let environment = Rc::new(cx.update(|cx| {
         FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
@@ -5543,6 +5522,68 @@ async fn test_plugin_registered_tools_reach_the_basic_profile(cx: &mut TestAppCo
     );
 
     fake_model.send_last_completion_stream_text_chunk("Plugin tool turn complete.");
+    fake_model.end_last_completion_stream();
+    assert_eq!(
+        stop_events(events.collect::<Vec<_>>().await),
+        vec![acp::StopReason::EndTurn]
+    );
+
+    let events = thread.update(cx, |thread, cx| {
+        thread.set_profile(
+            AgentProfileId(agent_settings::builtin_profiles::ASK.into()),
+            cx,
+        );
+        thread
+            .send(ClientUserMessageId::new(), ["Use the ask tools"], cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+    let completion = fake_model.pending_completions().pop().unwrap();
+    assert!(
+        !tool_names_for_completion(&completion).contains(&"echo".to_string()),
+        "a plugin default escaped into the restrictive ask profile"
+    );
+    fake_model.send_last_completion_stream_text_chunk("Ask turn complete.");
+    fake_model.end_last_completion_stream();
+    assert_eq!(
+        stop_events(events.collect::<Vec<_>>().await),
+        vec![acp::StopReason::EndTurn]
+    );
+
+    fs.insert_file(
+        paths::settings_file(),
+        json!({
+            "agent": {
+                "profiles": {
+                    "basic": {
+                        "name": "Basic",
+                        "tools": { "echo": false },
+                    },
+                },
+            },
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .await;
+    cx.run_until_parked();
+
+    let events = thread.update(cx, |thread, cx| {
+        thread.set_profile(
+            AgentProfileId(agent_settings::builtin_profiles::BASIC.into()),
+            cx,
+        );
+        thread
+            .send(ClientUserMessageId::new(), ["Respect my tool override"], cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+    let completion = fake_model.pending_completions().pop().unwrap();
+    assert!(
+        !tool_names_for_completion(&completion).contains(&"echo".to_string()),
+        "the plugin default overrode an explicit user disable"
+    );
+    fake_model.send_last_completion_stream_text_chunk("Override turn complete.");
     fake_model.end_last_completion_stream();
     assert_eq!(
         stop_events(events.collect::<Vec<_>>().await),

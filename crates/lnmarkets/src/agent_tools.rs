@@ -1629,6 +1629,7 @@ pub fn agent_tools_registration() -> agent::PluginAgentTools {
             LnMarketsStrategyTool::NAME,
             LnMarketsMandateTool::NAME,
         ],
+        default_enabled_profiles: &["basic", "editor"],
         build: std::rc::Rc::new(|context, cx| {
             let venue_capabilities = crate::venue_capability_store(cx).unwrap_or_default();
             let (account, market_data, swap, features, ledger, prediction, strategy, mandate) =

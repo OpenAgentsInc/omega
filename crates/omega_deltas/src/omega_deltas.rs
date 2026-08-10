@@ -248,6 +248,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0275",
     "OMEGA-DELTA-0276",
     "OMEGA-DELTA-0277",
+    "OMEGA-DELTA-0278",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -19070,23 +19071,11 @@ mod tests {
             "bash",
             "delegate",
             "edit",
-            "lnmarkets_account",
-            "lnmarkets_features",
-            "lnmarkets_ledger",
-            "lnmarkets_mandate",
-            "lnmarkets_market_data",
-            "lnmarkets_strategy",
-            "lnmarkets_swap",
             "market_execute_swap",
             "market_network_status",
             "market_provision_cloud",
             "market_swap_quote",
             "market_swap_status",
-            "nautilus_account",
-            "nautilus_order",
-            "nautilus_prediction",
-            "nautilus_risk",
-            "nautilus_strategy",
             "read",
             "resume_thread",
             "write",
@@ -19096,8 +19085,8 @@ mod tests {
         assert_eq!(
             actual, expected,
             "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
-             the six coding tools plus the five built-in market tools and the \
-             registered LN Markets and Nautilus governance tools."
+             the six coding tools plus the five built-in market tools; plugin \
+             defaults are registered under OMEGA-DELTA-0278."
         );
         assert!(
             !actual.contains("search_web"),
@@ -31156,34 +31145,13 @@ mod tests {
                 "OMEGA-DELTA-0271: fresh capability evidence lost `{required}`"
             );
         }
-        let defaults = read_repository_file("assets/settings/default.json");
-        for profile_name in ["basic", "editor"] {
-            let profile_settings = defaults
-                .split(&format!("\"{profile_name}\": {{"))
-                .nth(1)
-                .unwrap_or_else(|| {
-                    panic!("OMEGA-DELTA-0271: shipped settings lost the {profile_name} profile")
-                });
-            let profile_settings =
-                profile_settings
-                    .split("\n      },")
-                    .next()
-                    .unwrap_or_else(|| {
-                        panic!("OMEGA-DELTA-0271: could not bound the {profile_name} profile")
-                    });
-            for tool in [
-                "nautilus_account",
-                "nautilus_prediction",
-                "nautilus_strategy",
-                "nautilus_order",
-                "nautilus_risk",
-            ] {
-                assert!(
-                    profile_settings.contains(&format!("\"{tool}\": true")),
-                    "OMEGA-DELTA-0271: the {profile_name} profile hides `{tool}`"
-                );
-            }
-        }
+        let registration = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ));
+        assert!(
+            registration.contains("default_enabled_profiles: &[\"basic\", \"editor\"]"),
+            "OMEGA-DELTA-0271: Nautilus governance lost its Basic/Editor profile defaults"
+        );
     }
 
     #[test]
@@ -31676,6 +31644,61 @@ mod tests {
             assert!(
                 stream.contains(required),
                 "OMEGA-DELTA-0277: reconciled live-state filter lost `{required}`"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_tools_contribute_profile_defaults_without_data_patches() {
+        let tools = without_comments(&read_repository_file("crates/agent/src/tools.rs"));
+        for required in [
+            "default_enabled_profiles",
+            "registered_plugin_tool_default_enabled",
+        ] {
+            assert!(
+                tools.contains(required),
+                "OMEGA-DELTA-0278: plugin tool defaults lost `{required}`"
+            );
+        }
+
+        let thread = without_comments(&read_repository_file("crates/agent/src/thread.rs"));
+        for required in [
+            "raw_user_settings()",
+            "explicit_user_setting.unwrap_or_else",
+            "registered_plugin_tool_default_enabled",
+        ] {
+            assert!(
+                thread.contains(required),
+                "OMEGA-DELTA-0278: effective profile resolution lost `{required}`"
+            );
+        }
+
+        let picker = without_comments(&read_repository_file(
+            "crates/agent_ui/src/agent_configuration/manage_profiles_modal.rs",
+        ));
+        assert!(
+            picker.contains("default_enabled_profiles")
+                && picker.contains("profile.tools.entry")
+                && picker.contains("or_insert(true)"),
+            "OMEGA-DELTA-0278: profile UI stopped reflecting plugin defaults"
+        );
+
+        let defaults = read_repository_file(DEFAULT_SETTINGS_PATH);
+        for forbidden in ["lnmarkets_", "nautilus_"] {
+            assert!(
+                !defaults.contains(forbidden),
+                "OMEGA-DELTA-0278: shipped profile data regained plugin identifier `{forbidden}`"
+            );
+        }
+
+        for registration in [
+            "crates/lnmarkets/src/agent_tools.rs",
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ] {
+            let registration = without_comments(&read_repository_file(registration));
+            assert!(
+                registration.contains("default_enabled_profiles: &[\"basic\", \"editor\"]"),
+                "OMEGA-DELTA-0278: in-tree plugin lost Basic/Editor defaults"
             );
         }
     }

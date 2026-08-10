@@ -298,6 +298,10 @@ pub struct PluginAgentTools {
     /// filtering (including the basic profile's pass-through) and the profile
     /// configuration UI can see plugin tools without instantiating them.
     pub tool_names: &'static [&'static str],
+    /// `OMEGA-DELTA-0278`. Built-in profiles that expose these tools unless the user explicitly
+    /// overrides the individual tool. Restrictive profiles stay restrictive
+    /// because plugins must opt into each profile by name.
+    pub default_enabled_profiles: &'static [&'static str],
     pub build: std::rc::Rc<
         dyn Fn(&PluginToolContext, &mut App) -> Vec<std::sync::Arc<dyn crate::AnyAgentTool>>,
     >,
@@ -312,6 +316,21 @@ pub fn registered_plugin_tool_name(tool_name: &str, cx: &App) -> Option<&'static
         .iter()
         .flat_map(|tools| tools.tool_names.iter().copied())
         .find(|name| *name == tool_name)
+}
+
+/// Whether the plugin that registered `tool_name` enables it by default for
+/// the named built-in profile.
+pub fn registered_plugin_tool_default_enabled(tool_name: &str, profile_id: &str, cx: &App) -> bool {
+    let Some(registry) = plugin_api::registry(cx) else {
+        return false;
+    };
+    registry
+        .extensions::<PluginAgentTools>()
+        .iter()
+        .any(|tools| {
+            tools.tool_names.contains(&tool_name)
+                && tools.default_enabled_profiles.contains(&profile_id)
+        })
 }
 
 /// Some built-in tools are gated behind a feature flag and only become usable

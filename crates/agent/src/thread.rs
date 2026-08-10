@@ -12,8 +12,8 @@ use crate::{
     ThreadForkOrigin, ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock,
     TranscriptEntry, TranscriptRole, TranscriptWindowRequest,
     ValidateCandidateDiffApplicabilityTool, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings, market_demo_tools, registered_plugin_tool_name,
-    tool_result_artifact_source,
+    decide_permission_from_settings, market_demo_tools, registered_plugin_tool_default_enabled,
+    registered_plugin_tool_name, tool_result_artifact_source,
     tools::{PluginAgentTools, PluginToolContext},
 };
 use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
@@ -4988,8 +4988,26 @@ impl Thread {
                     tool_name.as_ref()
                 };
 
+                // OMEGA-DELTA-0278. Plugin defaults fill absent shipped-profile
+                // entries, while a user's per-tool choice remains authoritative.
+                let explicit_user_setting = SettingsStore::global(cx)
+                    .raw_user_settings()
+                    .and_then(|settings| settings.content.agent.as_ref())
+                    .and_then(|agent| agent.profiles.as_ref())
+                    .and_then(|profiles| profiles.get(self.profile_id.as_str()))
+                    .and_then(|profile| profile.tools.get(exposed_tool_name))
+                    .copied();
+                let profile_enables_tool = explicit_user_setting.unwrap_or_else(|| {
+                    profile.is_tool_enabled(exposed_tool_name)
+                        || registered_plugin_tool_default_enabled(
+                            tool_name.as_ref(),
+                            self.profile_id.as_str(),
+                            cx,
+                        )
+                });
+
                 if tool.supports_provider(&model.provider_id())
-                    && profile.is_tool_enabled(exposed_tool_name)
+                    && profile_enables_tool
                     && crate::tools::tool_feature_flag_enabled(tool_name, cx)
                 {
                     match (tool_name.as_ref(), use_sandboxed_terminal) {

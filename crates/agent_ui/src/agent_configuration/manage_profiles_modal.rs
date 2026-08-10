@@ -366,22 +366,29 @@ impl ManageProfilesModal {
             is_builtin = builtin_profiles::is_builtin(&profile_id)
         );
         let settings = AgentSettings::get_global(cx);
-        let Some(profile) = settings.profiles.get(&profile_id).cloned() else {
+        let Some(mut profile) = settings.profiles.get(&profile_id).cloned() else {
             return;
         };
 
         let provider = self.active_model.as_ref().map(|model| model.provider_id());
         // Plugin-registered tools are offered under their declared names; the
         // per-instance provider check still applies at request time.
-        let plugin_tool_names = plugin_api::registry(cx)
-            .map(|registry| {
-                registry
-                    .extensions::<agent::PluginAgentTools>()
-                    .iter()
-                    .flat_map(|tools| tools.tool_names.iter().copied())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        // OMEGA-DELTA-0278. Reflect resolved plugin defaults in the picker;
+        // inserting only absent names preserves explicit false values.
+        let mut plugin_tool_names = Vec::new();
+        if let Some(registry) = plugin_api::registry(cx) {
+            for tools in registry.extensions::<agent::PluginAgentTools>() {
+                let enabled_by_default = tools
+                    .default_enabled_profiles
+                    .contains(&profile_id.as_str());
+                for &tool_name in tools.tool_names {
+                    if enabled_by_default {
+                        profile.tools.entry(Arc::from(tool_name)).or_insert(true);
+                    }
+                    plugin_tool_names.push(tool_name);
+                }
+            }
+        }
         let tool_names: Vec<Arc<str>> = agent::ALL_TOOL_NAMES
             .iter()
             .copied()

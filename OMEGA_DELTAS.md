@@ -6535,11 +6535,12 @@ thread now starts on `basic`, whose model-visible surface contains the six
 coding tools (`read`, `write`, `edit`, `bash`, `delegate`, and `resume_thread`)
 and five built-in market tools (`market_network_status`, `market_swap_quote`,
 `market_execute_swap`, `market_swap_status`, and `market_provision_cloud`).
-OMEGA-DELTA-0241 adds the three first-party LN Markets tools to this closed
-surface; its later governance additions bring that registered set to seven.
-OMEGA-DELTA-0271 adds the five registered Nautilus governance tools:
+OMEGA-DELTA-0241 adds the first-party LN Markets tools to the effective closed
+surface, and OMEGA-DELTA-0271 adds the five Nautilus governance tools:
 `nautilus_account`, `nautilus_prediction`, `nautilus_strategy`,
-`nautilus_order`, and `nautilus_risk`.
+`nautilus_order`, and `nautilus_risk`. OMEGA-DELTA-0278 moves those plugin
+defaults out of shipped profile data and into their registrations; the
+effective surface is unchanged.
 Context-server tools are off, so an MCP installation cannot silently add
 another tool. `search_web` is absent; every provider Omega ships refuses it.
 
@@ -10801,3 +10802,23 @@ venue effect occurred.
 - **Enforced by:** `nautilus_governance`, `nautilus_sidecar`, and
   `omega_deltas` tests, including
   `nautilus_cost_floor_is_typed_stable_and_testnet_only`.
+
+### OMEGA-DELTA-0278 — Plugin tools own their built-in profile defaults
+
+Plugin tool registrations declare the built-in profiles that expose their
+tools by default. Profile resolution unions those declarations with the
+shipped profile without requiring a plugin identifier in
+`assets/settings/default.json`. The Basic and Editor profiles accept the
+in-tree market-governance tools; Ask and Minimal remain restrictive unless a
+plugin explicitly names them.
+
+An explicit user value for an individual tool remains authoritative, including
+`false`. Changing another profile field does not silently remove a plugin
+default. The profile tool picker uses the same declarations, so its checked
+state agrees with the tool surface the model receives. In-tree plugin tool
+identifiers are absent from the shipped profile data, preserving registry
+inversion for an out-of-tree plugin.
+
+- **Enforced by:** `agent` behavioral tests and
+  `plugin_tools_contribute_profile_defaults_without_data_patches` in
+  `omega_deltas`.

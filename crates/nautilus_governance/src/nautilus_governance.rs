@@ -941,6 +941,7 @@ fn agent_tools_registration(runtime: GovernanceRuntime) -> agent::PluginAgentToo
             OrderTool::NAME,
             RiskTool::NAME,
         ],
+        default_enabled_profiles: &["basic", "editor"],
         build: std::rc::Rc::new(move |context, cx| {
             runtime.claim_session(context.session_id.clone());
             let channel = nautilus_sidecar::command_channel(cx);
