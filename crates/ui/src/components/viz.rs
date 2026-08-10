@@ -8,10 +8,17 @@
 //! grayscale and color-vision deficiencies. See omega#247.
 
 mod badges;
+mod calibration;
 mod candles;
 mod countdown;
+mod depth_chart;
+mod equity_curve;
+mod funding_chart;
 mod gauge;
+mod heatmap;
 mod high_frequency;
+mod histogram;
+mod line_chart;
 mod market_kit;
 mod order_book;
 mod plot;
@@ -32,10 +39,17 @@ mod viz_swap;
 mod viz_zone;
 
 pub use badges::*;
+pub use calibration::*;
 pub use candles::*;
 pub use countdown::*;
+pub use depth_chart::*;
+pub use equity_curve::*;
+pub use funding_chart::*;
 pub use gauge::*;
+pub use heatmap::*;
 pub use high_frequency::*;
+pub use histogram::*;
+pub use line_chart::*;
 pub use market_kit::*;
 pub use order_book::*;
 pub use plot::*;
@@ -431,6 +445,13 @@ mod tests {
                 .child(Sparkline::preview(window, cx))
                 .child(MarketBadge::preview(window, cx))
                 .child(HighFrequencyUpdateDemo::preview(window, cx))
+                .child(LineChart::preview(window, cx))
+                .child(DepthChart::preview(window, cx))
+                .child(FundingChart::preview(window, cx))
+                .child(EquityCurve::preview(window, cx))
+                .child(ReturnsHistogram::preview(window, cx))
+                .child(CalibrationChart::preview(window, cx))
+                .child(Heatmap::preview(window, cx))
         }
     }
 
@@ -457,6 +478,13 @@ mod tests {
             "market.sparkline",
             "market.badge",
             "market.high_frequency_batch",
+            "market.line_chart",
+            "market.depth_chart",
+            "market.funding_chart",
+            "market.equity_curve",
+            "market.returns_histogram",
+            "market.calibration_chart",
+            "market.heatmap",
         ] {
             assert!(
                 !rendered.occurrences(selector).is_empty(),

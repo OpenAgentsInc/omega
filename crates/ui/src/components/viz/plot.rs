@@ -1,7 +1,7 @@
 //! The shared canvas plot kernel (omega#284).
 //!
 //! One plot base generalized from the viz geometry so every chart is a
-//! configuration, not a fork: margin layout, linear time (ms) and value
+//! configuration, not a fork: margin layout, linear numeric/time and value
 //! scales, 1-2-5 and natural-boundary tick generation, axis labels, a
 //! crosshair with axis readout chips, and a layer system that draws through
 //! the data→pixel transforms with `PathBuilder`. Rendering laws apply: GPUI
@@ -256,6 +256,12 @@ impl PlotFrame {
 type PlotLayer = Box<dyn Fn(&PlotFrame, &mut Window, &mut App) + 'static>;
 type ValueFormatter = Box<dyn Fn(f64) -> String + 'static>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlotXAxis {
+    TimeMillis,
+    Numeric { decimals: usize },
+}
+
 /// The canvas plot base: axes, grid, tick labels, transforms, crosshair, and
 /// caller-supplied layers drawn through the frame. Fixed window with
 /// caller-computed domains; charts autoscale by choosing the domains.
@@ -270,6 +276,7 @@ pub struct Plot {
     x_tick_target: usize,
     y_tick_target: usize,
     crosshair: bool,
+    x_axis: PlotXAxis,
     value_formatter: Option<ValueFormatter>,
     layers: Vec<PlotLayer>,
     tokens: Option<MarketTokens>,
@@ -290,6 +297,7 @@ impl Plot {
             x_tick_target: 6,
             y_tick_target: 5,
             crosshair: true,
+            x_axis: PlotXAxis::TimeMillis,
             value_formatter: None,
             layers: Vec::new(),
             tokens: None,
@@ -323,6 +331,14 @@ impl Plot {
 
     pub fn crosshair(mut self, crosshair: bool) -> Self {
         self.crosshair = crosshair;
+        self
+    }
+
+    /// Uses 1-2-5 numeric ticks on the horizontal axis instead of the default
+    /// millisecond time ticks. Depth, histogram, calibration, and heatmap
+    /// clients share this path rather than forking the kernel.
+    pub fn numeric_x_axis(mut self, decimals: usize) -> Self {
+        self.x_axis = PlotXAxis::Numeric { decimals };
         self
     }
 
@@ -367,6 +383,42 @@ pub(crate) fn stroke_polyline(
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
     }
+}
+
+pub(crate) fn fill_polygon(window: &mut Window, points: &[Point<Pixels>], color: gpui::Hsla) {
+    if points.len() < 3 {
+        return;
+    }
+    let mut builder = PathBuilder::fill();
+    let mut points = points.iter();
+    if let Some(first) = points.next() {
+        builder.move_to(*first);
+    }
+    for point in points {
+        builder.line_to(*point);
+    }
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+pub(crate) fn fill_rectangle(
+    window: &mut Window,
+    top_left: Point<Pixels>,
+    bottom_right: Point<Pixels>,
+    color: gpui::Hsla,
+) {
+    fill_polygon(
+        window,
+        &[
+            top_left,
+            point(bottom_right.x, top_left.y),
+            bottom_right,
+            point(top_left.x, bottom_right.y),
+        ],
+        color,
+    );
 }
 
 /// A small filled chip with right- or center-anchored text, used for axis
@@ -438,6 +490,7 @@ impl RenderOnce for Plot {
         let x_tick_target = self.x_tick_target;
         let y_tick_target = self.y_tick_target;
         let crosshair = self.crosshair;
+        let x_axis = self.x_axis;
         let value_formatter = self.value_formatter;
         let layers = self.layers;
 
@@ -516,8 +569,22 @@ impl RenderOnce for Plot {
                             Some(formatter) => formatter(value),
                             None => format_with_decimals(value, y_decimals),
                         };
-                        let (x_ticks, x_step) =
-                            time_ticks(x_domain.0 as i64, x_domain.1 as i64, x_tick_target);
+                        let x_ticks: Vec<(f64, String)> = match x_axis {
+                            PlotXAxis::TimeMillis => {
+                                let (ticks, step) =
+                                    time_ticks(x_domain.0 as i64, x_domain.1 as i64, x_tick_target);
+                                ticks
+                                    .into_iter()
+                                    .map(|tick| (tick as f64, time_tick_label(tick, step)))
+                                    .collect()
+                            }
+                            PlotXAxis::Numeric { decimals } => {
+                                nice_ticks(x_domain.0, x_domain.1, x_tick_target)
+                                    .into_iter()
+                                    .map(|tick| (tick, format_with_decimals(tick, decimals)))
+                                    .collect()
+                            }
+                        };
 
                         // Grid under everything.
                         for tick in &y_ticks {
@@ -529,8 +596,8 @@ impl RenderOnce for Plot {
                                 tokens.grid,
                             );
                         }
-                        for tick in &x_ticks {
-                            let x = frame.x_at(*tick as f64);
+                        for (tick, _) in &x_ticks {
+                            let x = frame.x_at(*tick);
                             stroke_polyline(
                                 window,
                                 &[point(x, plot_top), point(x, plot_bottom)],
@@ -550,18 +617,14 @@ impl RenderOnce for Plot {
                                 point(plot_right + px(6.), frame.y_at(*tick)),
                             );
                         }
-                        for tick in &x_ticks {
+                        for (tick, label) in &x_ticks {
                             let mut text = SceneText::new(px(10.));
-                            text.push(
-                                &time_tick_label(*tick, x_step),
-                                number_font.clone(),
-                                tokens.muted,
-                            );
+                            text.push(label, number_font.clone(), tokens.muted);
                             text.paint(
                                 window,
                                 cx,
                                 SceneTextAnchor::Center,
-                                point(frame.x_at(*tick as f64), plot_bottom + px(10.)),
+                                point(frame.x_at(*tick), plot_bottom + px(10.)),
                             );
                         }
 
@@ -600,7 +663,14 @@ impl RenderOnce for Plot {
                             paint_axis_chip(
                                 window,
                                 cx,
-                                time_readout_label(hover.time_ms as i64),
+                                match x_axis {
+                                    PlotXAxis::TimeMillis => {
+                                        time_readout_label(hover.time_ms as i64)
+                                    }
+                                    PlotXAxis::Numeric { decimals } => {
+                                        format_with_decimals(hover.time_ms, decimals)
+                                    }
+                                },
                                 number_font.clone(),
                                 point(hover.position.x, plot_bottom + px(10.)),
                                 true,
