@@ -3694,18 +3694,24 @@ impl SettingsWindow {
         let hover_background = colors.ghost_element_hover;
         let text = colors.text;
         let text_muted = colors.text_muted;
-        let root_entries = self
+        let active_sub_page = self
+            .sub_page_stack
+            .last()
+            .and_then(|sub_page| sub_page.link.json_path);
+        let mut navigation_entries = Vec::new();
+        for (entry_index, entry) in self
             .navbar_entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.is_root)
-            .map(|(entry_index, entry)| {
-                let title = entry.title;
-                let selected = entry.page_index == self.current_page_index();
-                let icon = match title {
-                    "API Keys" => IconName::Lock,
-                    _ => IconName::Settings,
-                };
+        {
+            let title = entry.title;
+            let selected = entry.page_index == self.current_page_index();
+            let icon = match title {
+                "API Keys" => IconName::Lock,
+                _ => IconName::Settings,
+            };
+            navigation_entries.push(
                 h_flex()
                     .id(("omega-settings-nav-entry", entry_index))
                     .debug_selector(move || format!("omega.settings.nav.{title}"))
@@ -3732,14 +3738,75 @@ impl SettingsWindow {
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_and_scroll_to_navbar_entry(entry_index, None, true, window, cx);
-                        if title == "API Keys" {
-                            this.navigate_to_sub_page("llm_providers", window, cx);
-                        }
                     }))
                     .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
                     .child(title)
-            })
-            .collect::<Vec<_>>();
+                    .into_any_element(),
+            );
+
+            for item in &self.pages[entry.page_index].items {
+                match item {
+                    SettingsPageItem::SectionHeader(section_title) => {
+                        let section_title = *section_title;
+                        navigation_entries.push(
+                            div()
+                                .debug_selector(move || {
+                                    format!("omega.settings.section.{section_title}")
+                                })
+                                .px_2()
+                                .pt_2()
+                                .pb_0p5()
+                                .text_size(px(11.))
+                                .text_color(text_muted)
+                                .child(section_title)
+                                .into_any_element(),
+                        );
+                    }
+                    SettingsPageItem::SubPageLink(sub_page_link) => {
+                        let Some(page_key) = sub_page_link.json_path else {
+                            continue;
+                        };
+                        let title = sub_page_link.title.clone();
+                        let selected = active_sub_page == Some(page_key);
+                        navigation_entries.push(
+                            h_flex()
+                                .id(page_key)
+                                .debug_selector(move || {
+                                    format!("omega.settings.subpage.{page_key}")
+                                })
+                                .w_full()
+                                .pl_7()
+                                .pr_2()
+                                .py_1p5()
+                                .rounded(px(8.))
+                                .text_size(px(13.))
+                                .text_color(if selected { text } else { text_muted })
+                                .font_weight(if selected {
+                                    gpui::FontWeight::MEDIUM
+                                } else {
+                                    gpui::FontWeight::NORMAL
+                                })
+                                .cursor_pointer()
+                                .tab_index(0isize)
+                                .role(Role::Button)
+                                .aria_label(title.clone())
+                                .when(selected, |row| row.bg(selected_background))
+                                .when(!selected, |row| {
+                                    row.hover(move |style| {
+                                        style.bg(hover_background).text_color(text)
+                                    })
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.navigate_to_sub_page(page_key, window, cx);
+                                }))
+                                .child(title)
+                                .into_any_element(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         let sidebar_target = if self.embedded_sidebar_open {
             OMEGA_SETTINGS_SIDEBAR_WIDTH
@@ -3803,9 +3870,10 @@ impl SettingsWindow {
                     .aria_label("Settings")
                     .flex_1()
                     .min_h_0()
+                    .overflow_y_scroll()
                     .gap_0p5()
                     .px_2()
-                    .children(root_entries),
+                    .children(navigation_entries),
             )
             .child(
                 div().px_2().pb_3().child(

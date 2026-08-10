@@ -3032,9 +3032,8 @@ mod tests {
     }
 
     /// Production initializes the plugin registry before Settings snapshots
-    /// the API Keys page inventory. Exercise that order with the actual
-    /// Hyperliquid registration and require its embedded page to paint, rather
-    /// than proving only that a registry entry exists.
+    /// the API Keys page inventory. Exercise that order and the same visible
+    /// navigation control a user clicks before requiring the page to paint.
     #[gpui::test]
     fn hyperliquid_plugin_page_paints_in_production_settings_order(cx: &mut TestAppContext) {
         let startup = include_str!("main.rs");
@@ -3051,22 +3050,31 @@ mod tests {
 
         init_test(cx);
         cx.update(|cx| {
-            let mut registry =
-                plugin_api::PluginRegistry::new(PathBuf::from("/tmp/omega-settings-order-test"));
-            registry.add_settings_page(trading_workspace_ui::settings_page_registration());
-            plugin_api::init_global(registry, cx);
+            crate::plugins::init(cx);
             settings_ui::init(cx);
         });
 
-        let (settings, cx) = cx.add_window_view(|window, cx| {
+        let (_settings, cx) = cx.add_window_view(|window, cx| {
             settings_ui::SettingsWindow::new_embedded_omega(None, true, window, cx)
         });
-        settings.update_in(cx, |settings, window, cx| {
-            assert!(
-                settings.navigate_to_sub_page("nautilus_agent_wallet", window, cx),
-                "Trading / Hyperliquid agent wallet must be present in API Keys"
-            );
-        });
+        cx.run_until_parked();
+
+        let snapshot = cx.debug_render_snapshot();
+        assert!(
+            !snapshot
+                .occurrences("omega.settings.section.Trading")
+                .is_empty(),
+            "the production API Keys navigation must expose the registered Trading section"
+        );
+        assert!(
+            !snapshot
+                .occurrences("omega.settings.subpage.nautilus_agent_wallet")
+                .is_empty(),
+            "the production API Keys navigation must expose Hyperliquid agent wallet"
+        );
+
+        cx.simulate_click_selector("omega.settings.subpage.nautilus_agent_wallet")
+            .expect("the visible Hyperliquid agent-wallet navigation row should accept a click");
         cx.run_until_parked();
 
         assert!(
