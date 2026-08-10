@@ -52,6 +52,8 @@ const CAPABILITY_MAX_AGE_MS: i64 = 30_000;
 const USDC_SCALE: u32 = 6;
 const BTC_SCALE: u32 = 8;
 const GOVERNANCE_STATE_CAPACITY: usize = 2_048;
+pub const COST_FLOOR_SCHEMA: &str = "omega.nautilus.cost_floor.v1";
+pub const BASIS_POINT_MICROS: i64 = 1_000_000;
 
 pub const MANIFEST: PluginManifest = PluginManifest {
     id: "nautilus_governance",
@@ -74,6 +76,8 @@ struct GovernanceState {
     processed_event_keys: HashSet<String>,
     #[serde(skip)]
     processed_event_order: VecDeque<String>,
+    #[serde(skip)]
+    processed_venue_fill_ids: HashSet<String>,
     #[serde(skip)]
     claimed_sessions: HashSet<String>,
     pending_wakeup: Option<String>,
@@ -143,8 +147,27 @@ impl GovernanceRuntime {
                     }
                     projection.orders.push(Value::Object(state.clone()));
                 }
-                StreamEvent::OrderState { orders, .. } => {
+                StreamEvent::OrderState {
+                    orders,
+                    generation,
+                    sequence,
+                    ..
+                } => {
                     self.state.lock().orders = bounded_latest(orders);
+                    for order in orders {
+                        let Some((venue_order_id, fill_state)) = reconciled_fill_state(order)
+                        else {
+                            continue;
+                        };
+                        if self
+                            .state
+                            .lock()
+                            .processed_venue_fill_ids
+                            .insert(venue_order_id)
+                        {
+                            self.record_fill(*generation, *sequence, &fill_state)?;
+                        }
+                    }
                 }
                 StreamEvent::Position { state, .. } => {
                     let mut projection = self.state.lock();
@@ -272,8 +295,10 @@ impl GovernanceRuntime {
             role: "requester".into(),
             participant: STRATEGY_ID.into(),
         };
+        let fill_identity = find_string(&value, &["trade_id", "venue_order_id", "client_order_id"])
+            .unwrap_or_else(|| format!("{generation}-{sequence}"));
         let mut draft = LedgerEntryDraft::new(
-            format!("nautilus-fill-{generation}-{sequence}"),
+            format!("nautilus-fill-{fill_identity}"),
             unix_ms()?,
             STRATEGY_ID,
             LedgerEntryKind::Fill,
@@ -313,7 +338,7 @@ impl GovernanceRuntime {
             if fee != 0 {
                 let fee = i64::try_from(fee).context("fill commission exceeds ledger range")?;
                 let mut fee_draft = LedgerEntryDraft::new(
-                    format!("nautilus-fee-{generation}-{sequence}"),
+                    format!("nautilus-fee-{fill_identity}"),
                     unix_ms()?,
                     STRATEGY_ID,
                     LedgerEntryKind::Fee,
@@ -593,6 +618,245 @@ impl GovernanceRuntime {
 struct RiskSnapshot {
     venue_balance_micros: u64,
     position_notional_usd: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostPath {
+    TakerTaker,
+    MakerTaker,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillLiquidity {
+    Maker,
+    Taker,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostLegObservation {
+    pub quote_generation: u64,
+    pub quote_sequence: u64,
+    pub fill_generation: u64,
+    pub fill_sequence: u64,
+    pub client_order_id: String,
+    pub side: OrderSide,
+    pub liquidity: FillLiquidity,
+    pub quantity: String,
+    pub pre_trade_mid: String,
+    pub fill_price: String,
+    pub fee_usd: String,
+    pub signed_adverse_slippage_micros_usd: i64,
+    pub reference_notional_micros_usd: u64,
+}
+
+impl CostLegObservation {
+    pub fn from_events(quote: &StreamEvent, fill: &StreamEvent) -> Result<Self> {
+        let StreamEvent::Quote {
+            generation: quote_generation,
+            sequence: quote_sequence,
+            bid_price,
+            ask_price,
+            ..
+        } = quote
+        else {
+            bail!("cost observation requires a typed quote event");
+        };
+        let StreamEvent::Fill {
+            generation: fill_generation,
+            sequence: fill_sequence,
+            state,
+            ..
+        } = fill
+        else {
+            bail!("cost observation requires a typed fill event");
+        };
+        let fill = Value::Object(state.clone());
+        let client_order_id =
+            find_string(&fill, &["client_order_id"]).context("fill has no client order ID")?;
+        let side = match find_string(&fill, &["order_side", "side"])
+            .context("fill has no side")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "buy" => OrderSide::Buy,
+            "sell" => OrderSide::Sell,
+            side => bail!("fill has unsupported side {side:?}"),
+        };
+        let liquidity = match find_string(&fill, &["liquidity_side"])
+            .context("fill has no liquidity side")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "maker" => FillLiquidity::Maker,
+            "taker" => FillLiquidity::Taker,
+            liquidity => bail!("fill has unsupported liquidity {liquidity:?}"),
+        };
+        let quantity = find_string(&fill, &["last_qty", "quantity", "size"])
+            .context("fill has no quantity")?;
+        let fill_price = find_string(&fill, &["last_px", "price"]).context("fill has no price")?;
+        let fee = find_string(&fill, &["commission", "fee"]).unwrap_or_else(|| "0 USDC".into());
+        let fee_usd = fee.split_whitespace().next().context("fill fee is empty")?;
+        let bid_units = i128::from(decimal_to_units(bid_price, 8)?);
+        let ask_units = i128::from(decimal_to_units(ask_price, 8)?);
+        let mid_units = bid_units
+            .checked_add(ask_units)
+            .context("quote mid overflowed")?
+            / 2;
+        let fill_units = i128::from(decimal_to_units(&fill_price, 8)?);
+        let quantity_units = i128::from(decimal_to_units(&quantity, 8)?);
+        let signed_price_delta = match side {
+            OrderSide::Buy => fill_units.checked_sub(mid_units),
+            OrderSide::Sell => mid_units.checked_sub(fill_units),
+        }
+        .context("slippage price delta overflowed")?;
+        let signed_adverse_slippage_micros_usd = signed_price_delta
+            .checked_mul(quantity_units)
+            .context("slippage notional overflowed")?
+            / 10_i128.pow(10);
+        let reference_notional_micros_usd = mid_units
+            .checked_mul(quantity_units)
+            .context("reference notional overflowed")?
+            / 10_i128.pow(10);
+        Ok(Self {
+            quote_generation: *quote_generation,
+            quote_sequence: *quote_sequence,
+            fill_generation: *fill_generation,
+            fill_sequence: *fill_sequence,
+            client_order_id,
+            side,
+            liquidity,
+            quantity,
+            pre_trade_mid: format_decimal_units(mid_units, 8)?,
+            fill_price,
+            fee_usd: fee_usd.into(),
+            signed_adverse_slippage_micros_usd: i64::try_from(signed_adverse_slippage_micros_usd)?,
+            reference_notional_micros_usd: u64::try_from(reference_notional_micros_usd)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostFloorSample {
+    pub schema: String,
+    pub network: TradingNetwork,
+    pub path: CostPath,
+    pub requested_notional_usd: u64,
+    pub entry: CostLegObservation,
+    pub exit: CostLegObservation,
+    pub total_fee_micros_usd: i64,
+    pub total_signed_adverse_slippage_micros_usd: i64,
+    pub round_trip_cost_micros_bps: i64,
+}
+
+impl CostFloorSample {
+    pub fn from_legs(
+        requested_notional_usd: u64,
+        entry: CostLegObservation,
+        exit: CostLegObservation,
+    ) -> Result<Self> {
+        if entry.side == exit.side
+            || decimal_to_units(&entry.quantity, 8)? != decimal_to_units(&exit.quantity, 8)?
+        {
+            bail!("cost sample requires opposite equal-sized legs");
+        }
+        if exit.liquidity != FillLiquidity::Taker {
+            bail!("cost sample exit must be taker");
+        }
+        let path = match entry.liquidity {
+            FillLiquidity::Maker => CostPath::MakerTaker,
+            FillLiquidity::Taker => CostPath::TakerTaker,
+        };
+        let total_fee_micros_usd = decimal_to_units(&entry.fee_usd, USDC_SCALE)?
+            .checked_add(decimal_to_units(&exit.fee_usd, USDC_SCALE)?)
+            .context("cost sample fees overflowed")?;
+        let total_signed_adverse_slippage_micros_usd = entry
+            .signed_adverse_slippage_micros_usd
+            .checked_add(exit.signed_adverse_slippage_micros_usd)
+            .context("cost sample slippage overflowed")?;
+        let total_cost = total_fee_micros_usd
+            .checked_add(total_signed_adverse_slippage_micros_usd)
+            .context("cost sample total overflowed")?;
+        let reference = entry
+            .reference_notional_micros_usd
+            .checked_add(exit.reference_notional_micros_usd)
+            .context("cost sample reference overflowed")?
+            / 2;
+        if reference == 0 {
+            bail!("cost sample reference notional is zero");
+        }
+        let round_trip_cost_micros_bps = i128::from(total_cost)
+            .checked_mul(i128::from(10_000 * BASIS_POINT_MICROS))
+            .context("cost basis points overflowed")?
+            / i128::from(reference);
+        Ok(Self {
+            schema: COST_FLOOR_SCHEMA.into(),
+            network: TradingNetwork::Testnet,
+            path,
+            requested_notional_usd,
+            entry,
+            exit,
+            total_fee_micros_usd,
+            total_signed_adverse_slippage_micros_usd,
+            round_trip_cost_micros_bps: i64::try_from(round_trip_cost_micros_bps)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostFloorSummary {
+    pub schema: String,
+    pub network: TradingNetwork,
+    pub path: CostPath,
+    pub requested_notional_usd: u64,
+    pub sample_count: usize,
+    pub median_cost_micros_bps: i64,
+    pub margin_bps: u32,
+    pub admission_floor_bps: u32,
+}
+
+impl CostFloorSummary {
+    pub fn stable(samples: &[CostFloorSample], margin_bps: u32) -> Result<Self> {
+        let first = samples.first().context("cost floor has no samples")?;
+        if samples.len() < 5 {
+            bail!("stable cost floor requires at least five completed samples");
+        }
+        if samples.iter().any(|sample| {
+            sample.network != TradingNetwork::Testnet
+                || sample.path != first.path
+                || sample.requested_notional_usd != first.requested_notional_usd
+        }) {
+            bail!("cost floor samples do not describe one testnet configuration");
+        }
+        let mut costs = samples
+            .iter()
+            .map(|sample| sample.round_trip_cost_micros_bps)
+            .collect::<Vec<_>>();
+        costs.sort_unstable();
+        let median_cost_micros_bps = costs[costs.len() / 2];
+        let measured_ceiling_bps = median_cost_micros_bps
+            .max(0)
+            .checked_add(BASIS_POINT_MICROS - 1)
+            .context("cost floor ceiling overflowed")?
+            / BASIS_POINT_MICROS;
+        let admission_floor_bps = u32::try_from(measured_ceiling_bps)?
+            .checked_add(margin_bps)
+            .context("admission floor overflowed")?;
+        Ok(Self {
+            schema: COST_FLOOR_SCHEMA.into(),
+            network: TradingNetwork::Testnet,
+            path: first.path,
+            requested_notional_usd: first.requested_notional_usd,
+            sample_count: samples.len(),
+            median_cost_micros_bps,
+            margin_bps,
+            admission_floor_bps,
+        })
+    }
 }
 
 pub struct NautilusGovernancePlugin;
@@ -1494,6 +1758,36 @@ fn find_decimal(value: &Value, keys: &[&str]) -> Option<String> {
     find_string(value, keys)
 }
 
+fn reconciled_fill_state(order: &Value) -> Option<(String, serde_json::Map<String, Value>)> {
+    if !find_string(order, &["status"])?.eq_ignore_ascii_case("FILLED") {
+        return None;
+    }
+    let venue_order_id = find_string(order, &["venue_order_id"])?;
+    let commission = order
+        .get("commissions")
+        .and_then(Value::as_array)
+        .and_then(|commissions| commissions.first())
+        .and_then(Value::as_str)
+        .unwrap_or("0 USDC");
+    let mut fill = serde_json::Map::new();
+    for (target, sources) in [
+        ("instrument_id", &["instrument_id"][..]),
+        ("client_order_id", &["client_order_id"][..]),
+        ("order_side", &["side", "order_side"][..]),
+        ("last_qty", &["filled_qty", "quantity"][..]),
+        ("last_px", &["avg_px", "price"][..]),
+        ("liquidity_side", &["liquidity_side"][..]),
+    ] {
+        fill.insert(target.into(), Value::String(find_string(order, sources)?));
+    }
+    fill.insert(
+        "venue_order_id".into(),
+        Value::String(venue_order_id.clone()),
+    );
+    fill.insert("commission".into(), Value::String(commission.into()));
+    Some((venue_order_id, fill))
+}
+
 fn find_account_balance(value: &Value) -> Option<String> {
     let object = value.as_object()?;
     for key in ["account_value", "equity", "total_balance"] {
@@ -1588,6 +1882,18 @@ fn decimal_to_units(value: &str, scale: u32) -> Result<i64> {
     i64::try_from(signed).context("decimal exceeds ledger integer range")
 }
 
+fn format_decimal_units(value: i128, scale: u32) -> Result<String> {
+    let factor = 10_i128
+        .checked_pow(scale)
+        .context("decimal format scale overflowed")?;
+    let sign = if value < 0 { "-" } else { "" };
+    let value = value.abs();
+    let whole = value / factor;
+    let fraction = value % factor;
+    let width = usize::try_from(scale).context("decimal format scale exceeds usize")?;
+    Ok(format!("{sign}{whole}.{fraction:0>width$}"))
+}
+
 fn decimal_product_to_units(left: &str, right: &str, scale: u32) -> Result<i64> {
     let left_units = decimal_to_units(left, 8)? as i128;
     let right_units = decimal_to_units(right, 8)? as i128;
@@ -1620,6 +1926,297 @@ mod tests {
     use super::*;
     use std::{collections::BTreeSet, path::PathBuf, time::Duration};
     use trading_mandate::TradingMandate;
+
+    fn cost_quote(sequence: u64, bid: &str, ask: &str) -> StreamEvent {
+        StreamEvent::Quote {
+            schema: "omega.nautilus.stream.v1".into(),
+            generation: 1,
+            sequence,
+            network: nautilus_sidecar::Network::Testnet,
+            instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+            bid_price: bid.into(),
+            ask_price: ask.into(),
+            bid_size: "1".into(),
+            ask_size: "1".into(),
+            ts_event: sequence,
+            ts_init: sequence,
+        }
+    }
+
+    fn cost_fill(
+        sequence: u64,
+        client_order_id: &str,
+        side: &str,
+        liquidity: &str,
+        price: &str,
+        fee: &str,
+    ) -> StreamEvent {
+        StreamEvent::Fill {
+            schema: "omega.nautilus.stream.v1".into(),
+            generation: 1,
+            sequence,
+            network: nautilus_sidecar::Network::Testnet,
+            state: serde_json::from_value(json!({
+                "instrument_id":"BTC-USD-PERP.HYPERLIQUID",
+                "client_order_id":client_order_id,
+                "order_side":side,
+                "liquidity_side":liquidity,
+                "last_qty":"1",
+                "last_px":price,
+                "commission":format!("{fee} USDC"),
+            }))
+            .expect("valid fill state"),
+        }
+    }
+
+    fn next_testnet_quote(
+        supervisor: &nautilus_sidecar::NautilusSupervisor,
+        timeout: Duration,
+    ) -> Result<StreamEvent> {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            let frame = supervisor.take_stream_frame()?;
+            if let Some(quote) = frame.quote {
+                return Ok(quote);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        bail!("no typed testnet quote arrived before the measurement deadline")
+    }
+
+    fn quote_price(quote: &StreamEvent, side: OrderSide, taker: bool) -> Result<String> {
+        let StreamEvent::Quote {
+            bid_price,
+            ask_price,
+            ..
+        } = quote
+        else {
+            bail!("measurement price requires a quote event");
+        };
+        let (raw, numerator) = match (side, taker) {
+            (OrderSide::Sell, true) => (bid_price, 100_i128),
+            (OrderSide::Buy, true) => (ask_price, 100_i128),
+            (OrderSide::Sell, false) => (ask_price, 100_i128),
+            (OrderSide::Buy, false) => (bid_price, 100_i128),
+        };
+        let scaled = i128::from(decimal_to_units(raw, 8)?)
+            .checked_mul(numerator)
+            .context("measurement limit overflowed")?
+            / 100;
+        let tick_units = 10_000_000_i128;
+        let ticked = match side {
+            OrderSide::Sell => scaled / tick_units * tick_units,
+            OrderSide::Buy => (scaled + tick_units - 1) / tick_units * tick_units,
+        };
+        format_decimal_units(ticked / tick_units, 1)
+    }
+
+    fn wait_for_measurement_fill(
+        supervisor: &nautilus_sidecar::NautilusSupervisor,
+        runtime: &GovernanceRuntime,
+        client_order_id: &str,
+        requested_quantity: &str,
+        timeout: Duration,
+    ) -> Result<(Option<StreamEvent>, Option<StreamEvent>)> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut latest_quote = None;
+        let target_quantity_units = i128::from(decimal_to_units(requested_quantity, 8)?);
+        let mut quantity_units = 0_i128;
+        let mut quote_value_units = 0_i128;
+        let mut fee_micros = 0_i128;
+        let mut aggregate = None;
+        while std::time::Instant::now() < deadline {
+            let frame = supervisor.take_stream_frame()?;
+            if frame.quote.is_some() {
+                latest_quote = frame.quote;
+            }
+            let matching = frame.state.iter().filter(|event| {
+                if let StreamEvent::Fill { state, .. } = event {
+                    find_string(&Value::Object(state.clone()), &["client_order_id"]).as_deref()
+                        == Some(client_order_id)
+                } else {
+                    false
+                }
+            });
+            let fills = frame
+                .state
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::Fill { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            runtime.ingest(&fills)?;
+            for fill in matching {
+                let StreamEvent::Fill { state, .. } = fill else {
+                    continue;
+                };
+                let state_value = Value::Object(state.clone());
+                let fill_quantity = find_string(&state_value, &["last_qty", "quantity", "size"])
+                    .context("measurement fill has no quantity")?;
+                let fill_price = find_string(&state_value, &["last_px", "price"])
+                    .context("measurement fill has no price")?;
+                let commission = find_string(&state_value, &["commission", "fee"])
+                    .unwrap_or_else(|| "0 USDC".into());
+                let fill_quantity_units = i128::from(decimal_to_units(&fill_quantity, 8)?);
+                quantity_units = quantity_units
+                    .checked_add(fill_quantity_units)
+                    .context("aggregate fill quantity overflowed")?;
+                quote_value_units = quote_value_units
+                    .checked_add(
+                        fill_quantity_units
+                            .checked_mul(i128::from(decimal_to_units(&fill_price, 8)?))
+                            .context("aggregate fill value overflowed")?,
+                    )
+                    .context("aggregate fill value overflowed")?;
+                fee_micros = fee_micros
+                    .checked_add(i128::from(decimal_to_units(
+                        commission
+                            .split_whitespace()
+                            .next()
+                            .context("measurement commission is empty")?,
+                        USDC_SCALE,
+                    )?))
+                    .context("aggregate fill commission overflowed")?;
+                let mut combined = fill.clone();
+                if let StreamEvent::Fill { state, .. } = &mut combined {
+                    state.insert(
+                        "last_qty".into(),
+                        Value::String(format_decimal_units(quantity_units, 8)?),
+                    );
+                    state.insert(
+                        "last_px".into(),
+                        Value::String(format_decimal_units(quote_value_units / quantity_units, 8)?),
+                    );
+                    state.insert(
+                        "commission".into(),
+                        Value::String(format!(
+                            "{} USDC",
+                            format_decimal_units(fee_micros, USDC_SCALE)?
+                        )),
+                    );
+                }
+                aggregate = Some(combined);
+            }
+            if quantity_units >= target_quantity_units {
+                return Ok((aggregate, latest_quote));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok((aggregate, latest_quote))
+    }
+
+    fn submit_measurement_order(
+        supervisor: &mut nautilus_sidecar::NautilusSupervisor,
+        client_order_id: String,
+        side: OrderSide,
+        quantity: &str,
+        price: String,
+        post_only: bool,
+        reduce_only: bool,
+    ) -> Result<()> {
+        let receipt = supervisor.send_command(CommandRequest {
+            command_id: format!("cost-floor-command-{}", unix_ms()?),
+            command: NautilusCommand::PlaceOrder {
+                client_order_id,
+                instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                side,
+                quantity: quantity.into(),
+                price,
+                post_only,
+                reduce_only,
+            },
+        })?;
+        if !matches!(
+            receipt.outcome,
+            nautilus_sidecar::CommandOutcome::OrderAccepted { .. }
+        ) {
+            bail!("measurement order was not accepted: {:?}", receipt.outcome);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cost_floor_uses_signed_mid_slippage_fees_and_a_stable_median() -> Result<()> {
+        let entry = CostLegObservation::from_events(
+            &cost_quote(1, "99", "101"),
+            &cost_fill(2, "O-COST-ENTRY", "SELL", "MAKER", "100.1", "0.015"),
+        )?;
+        let mut exit = CostLegObservation::from_events(
+            &cost_quote(3, "99", "101"),
+            &cost_fill(4, "O-COST-EXIT", "BUY", "TAKER", "100.1", "0.045"),
+        )?;
+        exit.quantity = "1.00000000".into();
+        assert!(entry.signed_adverse_slippage_micros_usd < 0);
+        assert!(exit.signed_adverse_slippage_micros_usd > 0);
+        let sample = CostFloorSample::from_legs(100, entry, exit)?;
+        assert_eq!(sample.path, CostPath::MakerTaker);
+        assert_eq!(sample.round_trip_cost_micros_bps, 6 * BASIS_POINT_MICROS);
+        let summary = CostFloorSummary::stable(&vec![sample; 5], 3)?;
+        assert_eq!(summary.sample_count, 5);
+        assert_eq!(summary.admission_floor_bps, 9);
+        assert_eq!(summary.schema, COST_FLOOR_SCHEMA);
+        Ok(())
+    }
+
+    #[test]
+    fn cost_floor_refuses_an_unstable_or_mixed_sample_set() -> Result<()> {
+        let entry = CostLegObservation::from_events(
+            &cost_quote(1, "99", "101"),
+            &cost_fill(2, "O-COST-ENTRY", "BUY", "TAKER", "100.1", "0.045"),
+        )?;
+        let exit = CostLegObservation::from_events(
+            &cost_quote(3, "99", "101"),
+            &cost_fill(4, "O-COST-EXIT", "SELL", "TAKER", "99.9", "0.045"),
+        )?;
+        let sample = CostFloorSample::from_legs(100, entry, exit)?;
+        assert!(CostFloorSummary::stable(&vec![sample.clone(); 4], 3).is_err());
+        let mut mixed = vec![sample; 5];
+        mixed[4].requested_notional_usd = 10;
+        assert!(CostFloorSummary::stable(&mixed, 3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reconciled_filled_orders_enter_the_ledger_once() -> Result<()> {
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let orders = vec![json!({
+            "instrument_id":"BTC-USD-PERP.HYPERLIQUID",
+            "client_order_id":"O-RECONCILED-1",
+            "venue_order_id":"12345",
+            "side":"BUY",
+            "status":"FILLED",
+            "filled_qty":"0.001",
+            "avg_px":"65000",
+            "liquidity_side":"MAKER",
+            "commissions":["0.00975 USDC"]
+        })];
+        for sequence in [7, 8] {
+            runtime.ingest(&[StreamEvent::OrderState {
+                schema: "omega.nautilus.stream.v1".into(),
+                generation: 1,
+                sequence,
+                network: nautilus_sidecar::Network::Testnet,
+                venue: "HYPERLIQUID".into(),
+                orders: orders.clone(),
+                ts_init: sequence,
+            }])?;
+        }
+        let entries = runtime.ledger.entries(&LedgerQuery::default())?;
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == LedgerEntryKind::Fill)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == LedgerEntryKind::Fee)
+                .count(),
+            1
+        );
+        Ok(())
+    }
 
     #[test]
     fn balanced_fill_posts_both_assets_once() -> Result<()> {
@@ -1908,7 +2505,389 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires explicit confirmation, testnet key, and a bounded live fill window"]
+    #[ignore = "requires explicit confirmation, testnet key, and a safe reduce-only sell price"]
+    fn confirmed_testnet_known_long_is_flattened_once_and_recorded() -> Result<()> {
+        if std::env::var("OMEGA_NAUTILUS_TEST_CONFIRMED").as_deref() != Ok("YES") {
+            bail!("set OMEGA_NAUTILUS_TEST_CONFIRMED=YES after confirming the risk reduction");
+        }
+        let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
+            .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let price = std::env::var("OMEGA_NAUTILUS_TEST_PRICE")
+            .context("OMEGA_NAUTILUS_TEST_PRICE must be configured")?;
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .context("repository root")?
+            .to_path_buf();
+        let config = nautilus_sidecar::NautilusConfig {
+            network: nautilus_sidecar::Network::Testnet,
+            python: repository_root.join("sidecar/nautilus/.venv/bin/python"),
+            engine: repository_root.join("sidecar/nautilus/engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(40),
+        };
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(
+            config,
+            nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?,
+        )?;
+        supervisor.start()?;
+        let client_order_id = format!("O-305-RISK-REDUCE-{}", unix_ms()?);
+        let receipt = supervisor.send_command(CommandRequest {
+            command_id: "testnet-risk-reduce-305".into(),
+            command: NautilusCommand::PlaceOrder {
+                client_order_id: client_order_id.clone(),
+                instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                side: OrderSide::Sell,
+                quantity: "0.001".into(),
+                price,
+                post_only: false,
+                reduce_only: true,
+            },
+        })?;
+        if !matches!(
+            receipt.outcome,
+            nautilus_sidecar::CommandOutcome::OrderAccepted { .. }
+        ) {
+            bail!("risk reduction was not accepted: {:?}", receipt.outcome);
+        }
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut fill_key = None;
+        while std::time::Instant::now() < deadline {
+            let frame = supervisor.take_stream_frame()?;
+            for event in &frame.state {
+                if let StreamEvent::Fill {
+                    generation,
+                    sequence,
+                    state,
+                    ..
+                } = event
+                    && find_string(&Value::Object(state.clone()), &["client_order_id"]).as_deref()
+                        == Some(client_order_id.as_str())
+                {
+                    fill_key = Some((*generation, *sequence));
+                }
+            }
+            let fills = frame
+                .state
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::Fill { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            runtime.ingest(&fills)?;
+            if fill_key.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (generation, sequence) = fill_key.context("risk-reducing fill did not arrive")?;
+        let entries = runtime.ledger.entries(&LedgerQuery::default())?;
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.kind == LedgerEntryKind::Fill
+                    && entry.metadata["generation"] == generation
+                    && entry.metadata["stream_sequence"] == sequence
+            })
+            .context("risk-reducing fill did not reach the ledger")?;
+        println!(
+            "testnet risk reduction evidence: generation={generation} stream_sequence={sequence} ledger_event_id={}",
+            entry.event_id
+        );
+        supervisor.stop()?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the testnet key and public read-only reconciliation access"]
+    fn confirmed_testnet_flat_reconciliation_records_known_fills() -> Result<()> {
+        let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
+            .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .context("repository root")?
+            .to_path_buf();
+        let config = nautilus_sidecar::NautilusConfig {
+            network: nautilus_sidecar::Network::Testnet,
+            python: repository_root.join("sidecar/nautilus/.venv/bin/python"),
+            engine: repository_root.join("sidecar/nautilus/engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(40),
+        };
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(
+            config,
+            nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?,
+        )?;
+        supervisor.start()?;
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut flat_account = false;
+        let mut open_orders = None;
+        while std::time::Instant::now() < deadline {
+            let frame = supervisor.take_stream_frame()?;
+            for event in &frame.state {
+                if let StreamEvent::PositionState { positions, .. } = event {
+                    flat_account = positions.is_empty();
+                }
+                if let StreamEvent::Account { state, .. } = event {
+                    flat_account = state
+                        .get("margins")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty);
+                }
+                if let StreamEvent::OrderState { orders, .. } = event {
+                    open_orders = Some(
+                        orders
+                            .iter()
+                            .filter(|order| {
+                                find_string(order, &["status"]).is_some_and(|status| {
+                                    matches!(
+                                        status.to_ascii_uppercase().as_str(),
+                                        "INITIALIZED"
+                                            | "SUBMITTED"
+                                            | "ACCEPTED"
+                                            | "TRIGGERED"
+                                            | "PENDING_UPDATE"
+                                            | "PENDING_CANCEL"
+                                            | "PARTIALLY_FILLED"
+                                    )
+                                })
+                            })
+                            .filter_map(|order| find_string(order, &["client_order_id"]))
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            runtime.ingest(&frame.state)?;
+            if flat_account
+                && open_orders.as_ref().is_some_and(Vec::is_empty)
+                && runtime
+                    .ledger
+                    .entries(&LedgerQuery::default())?
+                    .iter()
+                    .filter(|entry| entry.kind == LedgerEntryKind::Fill)
+                    .count()
+                    >= 2
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let entries = runtime.ledger.entries(&LedgerQuery::default())?;
+        let fills = entries
+            .iter()
+            .filter(|entry| entry.kind == LedgerEntryKind::Fill)
+            .collect::<Vec<_>>();
+        if !flat_account {
+            bail!("testnet reconciliation still reports an open position");
+        }
+        let open_orders =
+            open_orders.context("testnet reconciliation did not report order state")?;
+        if !open_orders.is_empty() {
+            bail!("testnet reconciliation reports open orders: {open_orders:?}");
+        }
+        if fills.len() < 2 {
+            bail!("testnet reconciliation did not record both known fills");
+        }
+        println!(
+            "testnet flat reconciliation evidence: positions=0 open_orders=0 fill_entries={} fee_entries={}",
+            fills.len(),
+            entries
+                .iter()
+                .filter(|entry| entry.kind == LedgerEntryKind::Fee)
+                .count()
+        );
+        supervisor.stop()?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires explicit testnet-only cost-floor confirmation, key, and public venue access"]
+    fn confirmed_testnet_nautilus_cost_floor_samples_are_stable_and_ledger_backed() -> Result<()> {
+        if std::env::var("OMEGA_NAUTILUS_COST_FLOOR_CONFIRM").as_deref()
+            != Ok("execute-testnet-only")
+        {
+            bail!(
+                "set OMEGA_NAUTILUS_COST_FLOOR_CONFIRM=execute-testnet-only to authorize bounded testnet samples"
+            );
+        }
+        let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
+            .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .context("repository root")?
+            .to_path_buf();
+        let config = nautilus_sidecar::NautilusConfig {
+            network: nautilus_sidecar::Network::Testnet,
+            python: repository_root.join("sidecar/nautilus/.venv/bin/python"),
+            engine: repository_root.join("sidecar/nautilus/engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(40),
+        };
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(
+            config,
+            nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?,
+        )?;
+        supervisor.start()?;
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let configurations = [(65_u64, "0.001"), (325, "0.005"), (650, "0.01")];
+        let mut summaries = Vec::new();
+        let mut incomplete_maker_attempts = Vec::new();
+        for (requested_notional_usd, quantity) in configurations {
+            for path in [CostPath::TakerTaker, CostPath::MakerTaker] {
+                let mut samples = Vec::new();
+                let max_attempts = if path == CostPath::MakerTaker { 15 } else { 10 };
+                for attempt in 1..=max_attempts {
+                    if samples.len() == 5 {
+                        break;
+                    }
+                    let entry_quote = next_testnet_quote(&supervisor, Duration::from_secs(60))?;
+                    let entry_id = format!(
+                        "O-305-{}-{requested_notional_usd}-{attempt}-{}",
+                        match path {
+                            CostPath::MakerTaker => "MAKER",
+                            CostPath::TakerTaker => "TAKER",
+                        },
+                        unix_ms()?
+                    );
+                    submit_measurement_order(
+                        &mut supervisor,
+                        entry_id.clone(),
+                        OrderSide::Buy,
+                        quantity,
+                        quote_price(&entry_quote, OrderSide::Buy, path == CostPath::TakerTaker)?,
+                        path == CostPath::MakerTaker,
+                        false,
+                    )?;
+                    let (entry_fill, latest_quote) = wait_for_measurement_fill(
+                        &supervisor,
+                        &runtime,
+                        &entry_id,
+                        quantity,
+                        if path == CostPath::MakerTaker {
+                            Duration::from_secs(45)
+                        } else {
+                            Duration::from_secs(20)
+                        },
+                    )?;
+                    let Some(entry_fill) = entry_fill else {
+                        let cancel = supervisor.send_command(CommandRequest {
+                            command_id: format!("cost-floor-cancel-{}", unix_ms()?),
+                            command: NautilusCommand::CancelOrder {
+                                client_order_id: entry_id,
+                            },
+                        })?;
+                        if !matches!(
+                            cancel.outcome,
+                            nautilus_sidecar::CommandOutcome::OrderCanceled { .. }
+                        ) {
+                            bail!(
+                                "unfilled maker cancel was not confirmed: {:?}",
+                                cancel.outcome
+                            );
+                        }
+                        incomplete_maker_attempts.push((requested_notional_usd, attempt));
+                        continue;
+                    };
+                    let observed_quantity = if let StreamEvent::Fill { state, .. } = &entry_fill {
+                        find_string(&Value::Object(state.clone()), &["last_qty"])
+                            .context("entry fill has no quantity")?
+                    } else {
+                        bail!("entry fill has the wrong event type");
+                    };
+                    let complete_size =
+                        decimal_to_units(&observed_quantity, 8)? == decimal_to_units(quantity, 8)?;
+                    if !complete_size {
+                        let cancel = supervisor.send_command(CommandRequest {
+                            command_id: format!("cost-floor-partial-cancel-{}", unix_ms()?),
+                            command: NautilusCommand::CancelOrder {
+                                client_order_id: entry_id,
+                            },
+                        })?;
+                        if !matches!(
+                            cancel.outcome,
+                            nautilus_sidecar::CommandOutcome::OrderCanceled { .. }
+                        ) {
+                            bail!(
+                                "partial maker cancel was not confirmed: {:?}",
+                                cancel.outcome
+                            );
+                        }
+                        incomplete_maker_attempts.push((requested_notional_usd, attempt));
+                    }
+                    let exit_quote = if let Some(quote) = latest_quote {
+                        quote
+                    } else {
+                        next_testnet_quote(&supervisor, Duration::from_secs(60))?
+                    };
+                    let exit_id = format!(
+                        "O-305-EXIT-{requested_notional_usd}-{attempt}-{}",
+                        unix_ms()?
+                    );
+                    submit_measurement_order(
+                        &mut supervisor,
+                        exit_id.clone(),
+                        OrderSide::Sell,
+                        &observed_quantity,
+                        quote_price(&exit_quote, OrderSide::Sell, true)?,
+                        false,
+                        true,
+                    )?;
+                    let (exit_fill, _) = wait_for_measurement_fill(
+                        &supervisor,
+                        &runtime,
+                        &exit_id,
+                        &observed_quantity,
+                        Duration::from_secs(20),
+                    )?;
+                    let exit_fill =
+                        exit_fill.context("reduce-only testnet exit fill did not arrive")?;
+                    if complete_size {
+                        let sample = CostFloorSample::from_legs(
+                            requested_notional_usd,
+                            CostLegObservation::from_events(&entry_quote, &entry_fill)?,
+                            CostLegObservation::from_events(&exit_quote, &exit_fill)?,
+                        )?;
+                        println!("cost_floor_sample={}", serde_json::to_string(&sample)?);
+                        samples.push(sample);
+                    }
+                }
+                if samples.len() == 5 {
+                    summaries.push(CostFloorSummary::stable(&samples, 3)?);
+                } else if path == CostPath::TakerTaker {
+                    bail!("taker path did not complete five samples");
+                }
+            }
+        }
+        let entries = runtime.ledger.entries(&LedgerQuery::default())?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema":COST_FLOOR_SCHEMA,
+                "network":"testnet",
+                "summaries":summaries,
+                "incomplete_maker_attempts":incomplete_maker_attempts,
+                "ledger_fill_entries":entries.iter().filter(|entry| entry.kind == LedgerEntryKind::Fill).count(),
+                "ending_posture":"flat_after_every_completed_sample",
+                "mainnet":"hard_refused"
+            }))?
+        );
+        supervisor.stop()?;
+        if summaries
+            .iter()
+            .filter(|summary| summary.path == CostPath::MakerTaker)
+            .count()
+            != configurations.len()
+        {
+            bail!("maker completion did not produce a stable median at every clip");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires explicit confirmation, testnet key, safe flatten price, and a bounded live fill window"]
     fn confirmed_testnet_tick_strategy_fill_reaches_the_ledger() -> Result<()> {
         if std::env::var("OMEGA_NAUTILUS_TEST_CONFIRMED").as_deref() != Ok("YES") {
             bail!(
@@ -1917,6 +2896,8 @@ mod tests {
         }
         let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
             .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let flatten_price = std::env::var("OMEGA_NAUTILUS_TEST_PRICE")
+            .context("OMEGA_NAUTILUS_TEST_PRICE must be configured")?;
         let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
@@ -2038,6 +3019,52 @@ mod tests {
         }
         let (fill_generation, fill_sequence) =
             strategy_fill.context("bounded testnet strategy produced no fill in five minutes")?;
+        let flatten_receipt = supervisor.send_command(CommandRequest {
+            command_id: "testnet-strategy-flatten-290".into(),
+            command: NautilusCommand::PlaceOrder {
+                client_order_id: format!("O-305-FLATTEN-{}", unix_ms()?),
+                instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                side: OrderSide::Buy,
+                quantity: "0.001".into(),
+                price: flatten_price,
+                post_only: false,
+                reduce_only: true,
+            },
+        })?;
+        if !matches!(
+            flatten_receipt.outcome,
+            nautilus_sidecar::CommandOutcome::OrderAccepted { .. }
+        ) {
+            bail!(
+                "testnet strategy flatten was not accepted: {:?}",
+                flatten_receipt.outcome
+            );
+        }
+        let flatten_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut flatten_fill = None;
+        while std::time::Instant::now() < flatten_deadline {
+            let frame = supervisor.take_stream_frame()?;
+            for event in &frame.state {
+                if let StreamEvent::Fill {
+                    generation,
+                    sequence,
+                    state,
+                    ..
+                } = event
+                    && find_string(&Value::Object(state.clone()), &["client_order_id"])
+                        .is_some_and(|id| id.starts_with("O-305-FLATTEN-"))
+                {
+                    flatten_fill = Some((*generation, *sequence));
+                }
+            }
+            runtime.ingest(&frame.state)?;
+            if flatten_fill.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (flatten_generation, flatten_sequence) =
+            flatten_fill.context("strategy fill flatten did not reach the stream")?;
         let entries = runtime.ledger.entries(&LedgerQuery::default())?;
         let fill_entry = entries
             .iter()
@@ -2047,10 +3074,19 @@ mod tests {
                     && entry.metadata["stream_sequence"] == fill_sequence
             })
             .context("strategy fill did not reach the trading ledger")?;
+        let flatten_entry = entries
+            .iter()
+            .find(|entry| {
+                entry.kind == LedgerEntryKind::Fill
+                    && entry.metadata["generation"] == flatten_generation
+                    && entry.metadata["stream_sequence"] == flatten_sequence
+            })
+            .context("strategy flatten fill did not reach the trading ledger")?;
         println!(
-            "testnet strategy fill evidence: generation={fill_generation} stream_sequence={fill_sequence} ledger_entry_id={} postings={}",
+            "testnet strategy fill evidence: generation={fill_generation} stream_sequence={fill_sequence} ledger_entry_id={} postings={} flatten_ledger_entry_id={}",
             fill_entry.event_id,
             fill_entry.postings.len(),
+            flatten_entry.event_id,
         );
         supervisor.stop()?;
         Ok(())

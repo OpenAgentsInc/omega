@@ -64,6 +64,12 @@ def emit(command: dict[str, Any], event_type: str, **fields: object) -> None:
     )
 
 
+def publish_fill(event: Any) -> None:
+    if stream_publisher is None:
+        raise RuntimeError("strategy fill output is not configured")
+    stream_publisher.publish("fill", event.to_dict(), lossless=True)
+
+
 class CommandControllerConfig(DataActorConfig):
     pass
 
@@ -90,7 +96,7 @@ class BoundedQuoteStrategy(Strategy):
         global bounded_quote_strategy
         bounded_quote_strategy = self
         self.parameters: dict[str, Any] | None = None
-        self.latest_bid: Decimal | None = None
+        self.latest_ask: Decimal | None = None
         self.active_client_order_id: ClientOrderId | None = None
         self.pending_price: str | None = None
         self.last_action_ns = 0
@@ -131,7 +137,7 @@ class BoundedQuoteStrategy(Strategy):
 
     def on_quote(self, quote: Any) -> None:
         self.quote_ticks += 1
-        self.latest_bid = Decimal(str(quote.bid_price))
+        self.latest_ask = Decimal(str(quote.ask_price))
         self._react()
 
     def on_trade(self, _trade: Any) -> None:
@@ -168,6 +174,7 @@ class BoundedQuoteStrategy(Strategy):
     def on_order_filled(self, event: Any) -> None:
         if event.client_order_id != self.active_client_order_id:
             return
+        publish_fill(event)
         self.filled_notional_usd += Decimal(str(event.last_qty)) * Decimal(str(event.last_px))
         if self.parameters is not None and self.filled_notional_usd > Decimal(
             str(self.parameters["position_headroom_usd"])
@@ -176,7 +183,7 @@ class BoundedQuoteStrategy(Strategy):
         self._publish_state("fill")
 
     def _react(self) -> None:
-        if self.parameters is None or self.latest_bid is None or self.halted_reason is not None:
+        if self.parameters is None or self.latest_ask is None or self.halted_reason is not None:
             return
         now_ns = self.clock.timestamp_ns()
         interval_ns = self.parameters["min_reprice_interval_ms"] * 1_000_000
@@ -188,7 +195,7 @@ class BoundedQuoteStrategy(Strategy):
             self._halt("hourly_order_limit")
             return
         offset = Decimal(self.parameters["quote_offset_bps"]) / Decimal(10_000)
-        price = str((self.latest_bid * (Decimal(1) - offset)).quantize(Decimal("0.1")))
+        price = str((self.latest_ask * (Decimal(1) + offset)).quantize(Decimal("0.1")))
         if self.active_client_order_id is None:
             self._place(price)
         elif self.pending_price is None:
@@ -212,7 +219,7 @@ class BoundedQuoteStrategy(Strategy):
         client_order_id = ClientOrderId.from_str(f"O-290-{now_ns}")
         order = self.order_factory.limit(
             instrument_id=INSTRUMENT,
-            order_side=OrderSide.BUY,
+            order_side=OrderSide.SELL,
             quantity=Quantity.from_str(self.parameters["order_quantity"]),
             price=Price.from_str(price),
             time_in_force=TimeInForce.GTC,
@@ -337,6 +344,9 @@ class CommandExecutionStrategy(Strategy):
                 client_order_id=str(event.client_order_id),
                 venue_order_id=str(event.venue_order_id),
             )
+
+    def on_order_filled(self, event: Any) -> None:
+        publish_fill(event)
 
     def on_order_cancel_rejected(self, event: Any) -> None:
         command = self.cancel_commands.pop(str(event.client_order_id), None)

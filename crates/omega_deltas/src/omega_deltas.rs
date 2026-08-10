@@ -247,6 +247,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0274",
     "OMEGA-DELTA-0275",
     "OMEGA-DELTA-0276",
+    "OMEGA-DELTA-0277",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31319,6 +31320,7 @@ mod tests {
             "order_budget",
             "mandate_revision",
             "strategy_state",
+            "publish_fill(event)",
         ] {
             assert!(
                 bridge.contains(required),
@@ -31399,7 +31401,6 @@ mod tests {
                 "OMEGA-DELTA-0274: inline market cards lost `{required}`"
             );
         }
-
         let governance = without_comments(&read_repository_file(
             "crates/nautilus_governance/src/nautilus_governance.rs",
         ));
@@ -31547,5 +31548,31 @@ mod tests {
                 "OMEGA-DELTA-0276: storage contract lost `{required}`"
             );
         }
+    }
+
+    #[test]
+    fn nautilus_cost_floor_is_typed_stable_and_testnet_only() {
+        let governance = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ));
+        for required in [
+            "omega.nautilus.cost_floor.v1",
+            "signed_adverse_slippage_micros_usd",
+            "stable cost floor requires at least five completed samples",
+            "admission_floor_bps",
+            "execute-testnet-only",
+            "reduce_only: true",
+            "open_orders=0",
+            "processed_venue_fill_ids",
+        ] {
+            assert!(
+                governance.contains(required),
+                "OMEGA-DELTA-0277: typed cost-floor boundary lost `{required}`"
+            );
+        }
+        assert!(
+            !governance.contains("Network::Mainnet"),
+            "OMEGA-DELTA-0277: cost-floor governance made mainnet representable"
+        );
     }
 }

@@ -10705,7 +10705,7 @@ never substitute for missing live production state.
 
 ### OMEGA-DELTA-0273 — The first tick strategy is bounded inside Nautilus
 
-Omega's first engine strategy is a testnet-only, post-only BTC quote strategy.
+Omega's first engine strategy is a testnet-only, post-only BTC ask strategy.
 Quote, trade, and L2 book callbacks run inside Nautilus and drive a local
 cancel-then-replace state machine without an app, MCP, or model round-trip.
 The governance loop may set the minimum reprice interval and quote offset,
@@ -10754,3 +10754,27 @@ literally: “Omega can trade on this account; Omega cannot withdraw.”
   `trading_workspace_ui`, the runtime credential-storage contract, and
   `nautilus_agent_wallet_custody_is_named_platform_only_and_fail_closed` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0277 — Nautilus cost evidence is typed and testnet-only
+
+Nautilus cost-floor observations bind each fill to the typed quote generation
+and sequence immediately preceding its order. The fixed-point calculation
+keeps fees and signed adverse slippage separate, aggregates split fills by
+quantity-weighted price and commission, and refuses a stable summary until at
+least five completed round trips agree on network, path, and intended clip.
+The admission floor is the upward-rounded measured median plus an explicit
+margin; a fee schedule is not a substitute for the observation.
+
+The credentialed measurement harness can represent testnet only. Every entry
+has one reduce-only exit and all fill events enter the shared ledger. An
+ambiguous cancel ends the run instead of retrying. Restart reconciliation
+deduplicates filled venue orders, and its safety proof requires zero positions
+and zero live order states. Because a prior-process Hyperliquid GTC remainder
+was not reliably visible in the Nautilus restart projection during the #305
+experiment, an official venue `openOrders` and position query remains a
+required operator check before another measurement segment. Mainnet remains
+hard-refused.
+
+- **Enforced by:** `nautilus_governance`, `nautilus_sidecar`, and
+  `omega_deltas` tests, including
+  `nautilus_cost_floor_is_typed_stable_and_testnet_only`.
