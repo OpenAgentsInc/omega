@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v zig >/dev/null 2>&1; then
+  echo "wasm build requires Zig (https://ziglang.org/download/)" >&2
+  exit 1
+fi
+
+args=()
+for arg in "$@"; do
+  if [[ "$arg" != "--target=wasm32-unknown-unknown" ]]; then
+    args+=("$arg")
+  fi
+done
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec zig cc -target wasm32-freestanding \
+  -include "$script_dir/wasm-string-compat.h" \
+  "${args[@]}"

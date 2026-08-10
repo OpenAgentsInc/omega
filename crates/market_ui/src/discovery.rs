@@ -447,10 +447,39 @@ pub struct OfferingListing {
     pub status: String,
     pub profile: String,
     pub provider_address: String,
+    pub published_at: u64,
+    pub sides: Vec<OfferingSideListing>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferingSideListing {
+    pub input_asset_id: String,
+    pub output_asset_id: String,
+    pub minimum_amount: String,
+    pub maximum_amount: String,
 }
 
 impl OfferingListing {
     fn from_validated_event(event: &Event) -> Self {
+        let content: Option<Value> = serde_json::from_str(&event.content).ok();
+        let sides = content
+            .as_ref()
+            .and_then(|content| content.pointer("/mkt_swp/sides"))
+            .and_then(Value::as_array)
+            .map(|sides| {
+                sides
+                    .iter()
+                    .filter_map(|side| {
+                        Some(OfferingSideListing {
+                            input_asset_id: side.get("input_asset_id")?.as_str()?.to_owned(),
+                            output_asset_id: side.get("output_asset_id")?.as_str()?.to_owned(),
+                            minimum_amount: side.get("min")?.as_str()?.to_owned(),
+                            maximum_amount: side.get("max")?.as_str()?.to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             offering_id: event.distinct_parameter().unwrap_or_default().to_owned(),
             pubkey: event.pubkey.clone(),
@@ -465,6 +494,12 @@ impl OfferingListing {
                 .next()
                 .unwrap_or_default()
                 .to_owned(),
+            published_at: event
+                .tag_values("published_at")
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(event.created_at),
+            sides,
         }
     }
 }

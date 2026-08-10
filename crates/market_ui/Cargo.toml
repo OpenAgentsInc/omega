@@ -13,6 +13,13 @@ path = "src/market_ui.rs"
 doctest = false
 
 [dependencies]
+gpui.workspace = true
+immortal-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ui.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
 async-tungstenite = { workspace = true, features = [
@@ -21,20 +28,20 @@ async-tungstenite = { workspace = true, features = [
 ] }
 command_center_ui.workspace = true
 futures.workspace = true
-gpui.workspace = true
 http_client.workspace = true
-immortal-client.workspace = true
 log.workspace = true
 nautilus_sidecar.workspace = true
 paths.workspace = true
 rand.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 trading_ledger.workspace = true
-ui.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+gpui_platform.workspace = true
+immortal-client = { workspace = true, features = ["mkt-swp-fixture-probe"] }
+theme.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 command_palette_hooks.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 omega_zero_base.workspace = true

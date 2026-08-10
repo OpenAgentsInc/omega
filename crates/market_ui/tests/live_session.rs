@@ -142,24 +142,57 @@ fn live_relay_negotiated_session() {
         let (outgoing_sender, outgoing_receiver) = async_channel::bounded(256);
         let (response_outgoing_sender, response_outgoing_receiver) = async_channel::bounded(1);
         let (event_sender, event_receiver) = async_channel::bounded(256);
-        let requester_socket = smol::spawn(run_session_socket(
-            relay_url.clone(),
-            signer,
-            provider_id.clone(),
-            SessionInbox::Requester,
-            outgoing_receiver,
-            event_sender.clone(),
-            unix_now,
-        ));
-        let response_socket = smol::spawn(run_session_socket(
-            relay_url.clone(),
-            response_signer,
-            provider_id,
-            SessionInbox::Response,
-            response_outgoing_receiver,
-            event_sender,
-            unix_now,
-        ));
+        let requester_url = relay_url.clone();
+        let requester_events = event_sender.clone();
+        let requester_provider_id = provider_id.clone();
+        let requester_socket = smol::spawn(async move {
+            let result = run_session_socket(
+                requester_url.clone(),
+                signer,
+                requester_provider_id,
+                SessionInbox::Requester,
+                outgoing_receiver,
+                requester_events.clone(),
+                unix_now,
+            )
+            .await;
+            let reason = match result {
+                Ok(()) => "requester inbox closed".to_owned(),
+                Err(error) => error,
+            };
+            let _ = requester_events
+                .send(SessionSocketEvent::Disconnected {
+                    relay_url: requester_url,
+                    inbox: SessionInbox::Requester,
+                    reason,
+                })
+                .await;
+        });
+        let response_url = relay_url.clone();
+        let response_events = event_sender;
+        let response_socket = smol::spawn(async move {
+            let result = run_session_socket(
+                response_url.clone(),
+                response_signer,
+                provider_id,
+                SessionInbox::Response,
+                response_outgoing_receiver,
+                response_events.clone(),
+                unix_now,
+            )
+            .await;
+            let reason = match result {
+                Ok(()) => "response inbox closed".to_owned(),
+                Err(error) => error,
+            };
+            let _ = response_events
+                .send(SessionSocketEvent::Disconnected {
+                    relay_url: response_url,
+                    inbox: SessionInbox::Response,
+                    reason,
+                })
+                .await;
+        });
 
         let deadline = Instant::now() + SESSION_DEADLINE;
         let mut ordered = false;

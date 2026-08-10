@@ -10837,3 +10837,27 @@ inversion for an out-of-tree plugin.
 - **Enforced by:** `agent` behavioral tests and
   `plugin_tools_contribute_profile_defaults_without_data_patches` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0279 — Market sessions render one typed no-spend contract
+
+Omega's Market panel and wasm proof render the same versioned presentation
+model derived from Immortal's validated requester-session projection. The
+contract keeps canonical asset identifiers separate from ticker labels,
+names the asserter behind every provider claim, distinguishes provider-signed
+reservations from covenant-backed commitments, and renders all six custody
+dimensions. Timeline gaps and forks, expiry, evidence rungs, fee equations,
+price-feed provenance, exit packages, receipts, and local typed error codes
+remain structured data rather than natural-language wire claims.
+
+Funding stays fail-closed: the checklist can authorize only when Immortal has
+authorized and every required typed check passed. The production adapter for
+omega#244 always sets that engine authority false because this panel owns no
+wallet, keys, settlement, custody, or venue effects. Its wasm P0 replays both
+Immortal's pin-embedded corpus and the byte-identical displayed corpus before
+rendering; it opens no relay and signs or submits nothing. Native-only venue
+status dependencies stay outside the wasm graph, while reproducible
+secp256k1 wasm compilation uses the repository's pinned Zig wrappers.
+
+- **Enforced by:** `market_ui` view-model, component, fixture-replay, native,
+  and wasm checks plus `market_session_view_is_typed_verified_and_no_spend` in
+  `omega_deltas`.

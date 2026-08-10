@@ -249,6 +249,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0276",
     "OMEGA-DELTA-0277",
     "OMEGA-DELTA-0278",
+    "OMEGA-DELTA-0279",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31740,6 +31741,112 @@ mod tests {
             assert!(
                 registration.contains("default_enabled_profiles: &[\"basic\", \"editor\"]"),
                 "OMEGA-DELTA-0278: in-tree plugin lost Basic/Editor defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn market_session_view_is_typed_verified_and_no_spend() {
+        let components = read_repository_file("crates/market_ui/src/components.rs");
+        for component in [
+            "OfferingCard",
+            "ProviderBadge",
+            "QuoteCompareTable",
+            "ReservationBadge",
+            "CustodyStrip",
+            "RungLabel",
+            "SessionTimeline",
+            "VerifyChecklist",
+            "ExitPackageBadge",
+            "ExpiryCountdown",
+            "ReceiptCard",
+            "SwapFlow",
+            "FeeBreakdown",
+            "PriceFeedProvenance",
+            "TypedErrorMessage",
+        ] {
+            assert!(
+                components.contains(&format!("pub struct {component}")),
+                "OMEGA-DELTA-0279: shared GPUI contract lost `{component}`"
+            );
+        }
+
+        let model = read_repository_file("crates/market_ui/src/view_model.rs");
+        for required in [
+            "openagents.omega.market-session-view.v1",
+            "openagents.mkt-swp.client-engine-fixtures.v1",
+            "canonical_id",
+            "display_ticker",
+            "ProviderAssertionView",
+            "maximum_custody_duration_seconds",
+            "exact_height_bound",
+            "TimelineSlotState::Gap",
+            "TimelineSlotState::Fork",
+            "engine_funding_authorized",
+            "engine_funding_authorized: false",
+            "MKT_SWP_ERROR_CODES",
+            "every_mkt_swp_section_17_identifier_has_a_local_message",
+        ] {
+            assert!(
+                model.contains(required),
+                "OMEGA-DELTA-0279: typed no-spend view model lost `{required}`"
+            );
+        }
+
+        let wasm = read_repository_file("crates/market_ui/examples/market_view.rs");
+        for required in [
+            "replay_embedded_manifest",
+            "replay_manifest_bytes",
+            "rendered fixture differs from the pin-embedded corpus",
+            "DEMO · no keys · no funds · no orders",
+        ] {
+            assert!(
+                wasm.contains(required),
+                "OMEGA-DELTA-0279: wasm no-spend proof lost `{required}`"
+            );
+        }
+        for forbidden in ["async_tungstenite", "SecretKey", "submit_order"] {
+            assert!(
+                !wasm.contains(forbidden),
+                "OMEGA-DELTA-0279: wasm no-spend proof gained `{forbidden}`"
+            );
+        }
+
+        let browser_manifest =
+            read_repository_file("crates/gpui_web/examples/market_view/Cargo.toml");
+        let browser_html = read_repository_file("crates/gpui_web/examples/market_view/index.html");
+        let browser_config =
+            read_repository_file("crates/gpui_web/examples/market_view/.cargo/config.toml");
+        for required in [
+            "market_ui.workspace = true",
+            "mkt-swp-fixture-probe",
+            "../../../market_ui/examples/market_view.rs",
+        ] {
+            assert!(
+                browser_manifest.contains(required),
+                "OMEGA-DELTA-0279: hostable wasm package lost `{required}`"
+            );
+        }
+        assert!(
+            browser_html.contains("data-bin=\"market_view\"")
+                && browser_config.contains("--export=__heap_base"),
+            "OMEGA-DELTA-0279: hostable wasm asset pipeline is incomplete"
+        );
+
+        let fixture_path = repository_path("crates/market_ui/fixtures/swp-client-engine-v1.json");
+        let fixture = std::fs::read(&fixture_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", fixture_path.display()));
+        assert_eq!(
+            sha256_hex(&fixture),
+            "103bfc61f11cb82b1fe0d05c13b495363ea18f3bd93503300130afd10eccd8d2",
+            "OMEGA-DELTA-0279: displayed corpus bytes drifted from Immortal b85b72d"
+        );
+
+        let cargo_config = read_repository_file(".cargo/config.toml");
+        for required in ["CC_wasm32_unknown_unknown", "AR_wasm32_unknown_unknown"] {
+            assert!(
+                cargo_config.contains(required),
+                "OMEGA-DELTA-0279: reproducible wasm C boundary lost `{required}`"
             );
         }
     }

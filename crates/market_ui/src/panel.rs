@@ -34,7 +34,8 @@ use workspace::{
 
 use crate::discovery::{
     ConnectionState, MAX_RELAY_INFORMATION_BYTES, MarketDiscovery, MarketDiscoveryConfig,
-    MarketRelayGate, NIP11_ACCEPT_MEDIA_TYPE, OfferingListing, validate_market_relay_information,
+    MarketRelayGate, NIP11_ACCEPT_MEDIA_TYPE, OfferingListing, ProviderListing,
+    validate_market_relay_information,
 };
 use crate::network_transport::{
     MultiRelayStatus, ProviderNetworkState, RelayAvailability, RelaySetPlan, fanout_exact_event,
@@ -45,9 +46,11 @@ use crate::session_flow::{
 };
 use crate::session_transport::{SessionInbox, SessionSocketEvent, run_session_socket};
 use crate::{
-    NautilusBookSource, NautilusCandleSource, NautilusLiveSnapshot,
-    NautilusOrderConfirmationSource, NautilusOrderTicketSource, RECEIPT_EXPORT_DIRECTORY,
-    ReceiptVerification, Reconnect, ToggleFocus, export_verified_receipt, persist_verified_receipt,
+    MarketSessionViewModel, NautilusBookSource, NautilusCandleSource, NautilusLiveSnapshot,
+    NautilusOrderConfirmationSource, NautilusOrderTicketSource, OfferingCard, OfferingSideView,
+    OfferingView, ProviderAssertionView, ProviderBadge, ProviderView, RECEIPT_EXPORT_DIRECTORY,
+    ReceiptVerification, Reconnect, SwapFlow, ToggleFocus, asset_view, export_verified_receipt,
+    persist_verified_receipt,
 };
 
 const PANEL_KEY: &str = "market";
@@ -1180,6 +1183,10 @@ impl MarketPanel {
                         .on_click(cx.listener(|this, _, _window, cx| this.end_session(cx))),
                 ),
         );
+        section = section.child(SwapFlow::new(
+            MarketSessionViewModel::from_market_session(session, now),
+            now,
+        ));
 
         if !session.quotes().is_empty() {
             section = section.child(
@@ -1611,14 +1618,6 @@ async fn run_socket(
     Ok(())
 }
 
-fn record_status_color(status: &str) -> Color {
-    match status {
-        "active" => Color::Success,
-        "paused" | "exhausted" => Color::Warning,
-        _ => Color::Muted,
-    }
-}
-
 impl Render for MarketPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let providers = self.discovery.providers();
@@ -1697,22 +1696,11 @@ impl Render for MarketPanel {
                     .when(synced && providers.is_empty(), |this| {
                         this.child(Label::new("—").color(Color::Muted))
                     })
-                    .children(providers.into_iter().map(|provider| {
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Indicator::dot().color(record_status_color(&provider.status)))
-                            .child(Label::new(
-                                provider
-                                    .name
-                                    .unwrap_or_else(|| provider.provider_id.clone()),
-                            ))
-                            .child(
-                                Label::new(provider.profiles.join(" "))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                    })),
+                    .children(
+                        providers
+                            .into_iter()
+                            .map(|provider| ProviderBadge::new(provider_view(provider))),
+                    ),
             )
             .child(
                 Label::new("Offerings")
@@ -1729,16 +1717,9 @@ impl Render for MarketPanel {
                         let quotable = !session_active
                             && offering.status == "active"
                             && offering.profile.starts_with("mkt-swp:");
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Indicator::dot().color(record_status_color(&offering.status)))
-                            .child(Label::new(offering.offering_id.clone()))
-                            .child(
-                                Label::new(offering.profile.clone())
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
+                        v_flex()
+                            .gap_1()
+                            .child(OfferingCard::new(offering_view(&offering), unix_now()))
                             .when(quotable, |row| {
                                 row.child(
                                     Button::new(("market-offering-quote", index), "Request quotes")
@@ -1756,6 +1737,60 @@ impl Render for MarketPanel {
             )
             .children(session_section)
     }
+}
+
+fn provider_view(provider: ProviderListing) -> ProviderView {
+    ProviderView {
+        provider_id: provider.provider_id.clone(),
+        display_name: provider.name.unwrap_or(provider.provider_id),
+        status: provider.status,
+        profiles: provider.profiles,
+        assertions: provider
+            .summary
+            .map(|summary| ProviderAssertionView {
+                assertion: summary,
+                asserter: provider.pubkey,
+            })
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn offering_view(offering: &OfferingListing) -> OfferingView {
+    let (profile, version) = offering
+        .profile
+        .rsplit_once(':')
+        .and_then(|(profile, version)| Some((profile.to_owned(), version.parse().ok()?)))
+        .unwrap_or_else(|| (offering.profile.clone(), 0));
+    OfferingView {
+        offering_id: offering.offering_id.clone(),
+        provider_id: offering.provider_address.clone(),
+        status: offering.status.clone(),
+        profile,
+        version,
+        published_at: offering.published_at,
+        sides: offering
+            .sides
+            .iter()
+            .map(|side| OfferingSideView {
+                input: asset_view(&side.input_asset_id),
+                output: asset_view(&side.output_asset_id),
+                direction: offering_direction(&side.input_asset_id, &side.output_asset_id),
+                minimum_amount: side.minimum_amount.clone(),
+                maximum_amount: side.maximum_amount.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn offering_direction(input: &str, output: &str) -> String {
+    match (input.rsplit(':').next(), output.rsplit(':').next()) {
+        (Some("chain" | "liquid"), Some("lightning")) => "submarine",
+        (Some("lightning"), Some("chain" | "liquid")) => "reverse",
+        (Some("chain" | "liquid"), Some("chain" | "liquid")) => "chain",
+        _ => "typed offering side",
+    }
+    .to_owned()
 }
 
 impl Focusable for MarketPanel {

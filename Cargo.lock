@@ -9849,6 +9849,7 @@ dependencies = [
  "command_palette_hooks",
  "futures 0.3.32",
  "gpui",
+ "gpui_platform",
  "http_client",
  "immortal-client",
  "log",
@@ -9859,9 +9860,24 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "theme",
  "trading_ledger",
  "ui",
  "workspace",
+]
+
+[[package]]
+name = "market_view"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui_platform",
+ "immortal-client",
+ "market_ui",
+ "serde",
+ "serde_json",
+ "theme",
+ "ui",
 ]
 
 [[package]]

@@ -84,6 +84,7 @@ members = [
     "crates/gpui_tokio",
     "crates/gpui_util",
     "crates/gpui_web",
+    "crates/gpui_web/examples/market_view",
     "crates/gpui_wgpu",
     "crates/gpui_windows",
     "crates/html_to_markdown",

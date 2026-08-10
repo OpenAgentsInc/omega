@@ -1664,6 +1664,8 @@ mod tests {
             status: "active".to_owned(),
             profile: "mkt-swp:1".to_owned(),
             provider_address: format!("39600:{}:local", provider.pubkey()),
+            published_at: 1,
+            sides: Vec::new(),
         }
     }
 

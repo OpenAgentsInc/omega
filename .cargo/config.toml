@@ -22,3 +22,8 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [env]
 MACOSX_DEPLOYMENT_TARGET = "10.15.7"
+# Apple clang does not ship a wasm backend. Keep the existing secp256k1 C
+# implementation and route only its wasm build through the already-required
+# Zig toolchain wrapper. This mirrors Immortal's CC0 wasm build boundary.
+CC_wasm32_unknown_unknown = { value = "scripts/wasm-cc", relative = true }
+AR_wasm32_unknown_unknown = { value = "scripts/wasm-ar", relative = true }

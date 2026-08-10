@@ -24,7 +24,6 @@ log.workspace = true
 menu.workspace = true
 num-format.workspace = true
 qrcode.workspace = true
-plugin_api.workspace = true
 schemars.workspace = true
 serde.workspace = true
 smallvec.workspace = true
@@ -34,6 +33,9 @@ time.workspace = true
 time_format.workspace = true
 ui_macros.workspace = true
 gpui_util.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+plugin_api.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

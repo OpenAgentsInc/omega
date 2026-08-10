@@ -1,0 +1,19 @@
+[package]
+name = "market_view"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "market_view"
+path = "../../../market_ui/examples/market_view.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+immortal-client = { workspace = true, features = ["mkt-swp-fixture-probe"] }
+market_ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+theme.workspace = true
+ui.workspace = true

@@ -1,0 +1,448 @@
+{
+  "schema": "openagents.mkt-swp.client-engine-fixtures.v1",
+  "source": {
+    "lane": "openagents",
+    "commit": "a7f5522c0a7430f9f5b1cfa09477dae2d16d3682",
+    "specification": "nips/openagents/MKT-SWP.md",
+    "issue": "OpenAgentsInc/immortal#12",
+    "profile": "mkt-swp",
+    "version": 1,
+    "scope": "closed executable full-session flows and requester topologies"
+  },
+  "deterministic_session": {
+    "session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "offering_id": "btc-lightning-regtest",
+    "network_a": "bip122:00000000000000000000000000000000",
+    "network_b": "bip122:11111111111111111111111111111111",
+    "chain_asset_a": "swp:1:bip122:00000000000000000000000000000000:btc:chain",
+    "lightning_asset_a": "swp:1:bip122:00000000000000000000000000000000:btc:lightning",
+    "chain_asset_b": "swp:1:bip122:11111111111111111111111111111111:btc:chain",
+    "payment_hash": "96c772a829fb7c780410f1d85cf12a89e8b3c78c0bac5fb47f62758bf961ec30",
+    "invoice": "lnbc10u1p3unwfusp5t9r3yymhpfqculx78u027lxspgxcr2n2987mx2j55nnfs95nxnzqpp5jmrh92pfld78spqs78v9euf2385t83uvpwk9ldrlvf6ch7tpascqhp5zvkrmemgth3tufcvflmzjzfvjt023nazlhljz2n9hattj4f8jq8qxqyjw5qcqpjrzjqtc4fc44feggv7065fqe5m4ytjarg3repr5j9el35xhmtfexc42yczarjuqqfzqqqqqqqqlgqqqqqqgq9q9qxpqysgq079nkq507a5tw7xgttmj4u990j7wfggtrasah5gd4ywfr2pjcn29383tphp4t48gquelz9z78p4cq7ml3nrrphw5w6eckhjwmhezhnqpy6gyf0",
+    "invoice_amount_msat": "1000000",
+    "invoice_timestamp": 1674164540,
+    "invoice_expiry_seconds": 604800,
+    "invoice_minimum_final_cltv_delta": 18,
+    "invoice_observed_at": 1674164600,
+    "funding_transaction": "02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff01a0860100000000002251202b57d284ad0470478797b9646c8cfef0a517c55830ba25a7345d1e8de51f5bcb00000000",
+    "funding_output_index": 0,
+    "funding_amount": "100000",
+    "taproot_output_key": "2b57d284ad0470478797b9646c8cfef0a517c55830ba25a7345d1e8de51f5bcb",
+    "taproot_script": "203cce51a0d412eae5953107a1c5a27cb29ea49d172c24aabb24af428bac56d3e1ac",
+    "taproot_control_block": "c115e303d114320fd738c4a552a7ccf202674fc46a6f0d306ee9fd769cfc5e1c0e",
+    "destination_script_pubkey": "51"
+  },
+  "record_construction": [],
+  "flows": [
+    {
+      "name": "swp-v1-submarine-regtest-cooperative",
+      "swap_type": "submarine",
+      "terminal": "completed"
+    },
+    {
+      "name": "swp-v1-submarine-regtest-script-refund",
+      "swap_type": "submarine",
+      "terminal": "refunded"
+    },
+    {
+      "name": "swp-v1-reverse-regtest-cooperative",
+      "swap_type": "reverse",
+      "terminal": "completed"
+    },
+    {
+      "name": "swp-v1-reverse-regtest-provider-refund",
+      "swap_type": "reverse",
+      "terminal": "refunded"
+    },
+    {
+      "name": "swp-v1-chain-regtest-cooperative",
+      "swap_type": "chain",
+      "terminal": "completed"
+    },
+    {
+      "name": "swp-v1-chain-regtest-dual-refund",
+      "swap_type": "chain",
+      "terminal": "refunded"
+    }
+  ],
+  "flow_topologies": [
+    {
+      "name": "swp-v1-client-submarine-topology",
+      "swap_type": "submarine",
+      "requester_funding": {
+        "role": "chain_fund",
+        "leg_id": "source",
+        "action": "broadcast_bitcoin"
+      },
+      "requester_exits": [
+        {
+          "leg_id": "source",
+          "path": "refund",
+          "condition": "cltv"
+        }
+      ]
+    },
+    {
+      "name": "swp-v1-client-reverse-topology",
+      "swap_type": "reverse",
+      "requester_funding": {
+        "role": "invoice_pay",
+        "leg_id": "lightning",
+        "action": "pay_lightning_invoice"
+      },
+      "requester_exits": [
+        {
+          "leg_id": "destination",
+          "path": "claim",
+          "condition": "hashlock"
+        }
+      ]
+    },
+    {
+      "name": "swp-v1-client-chain-topology",
+      "swap_type": "chain",
+      "requester_funding": {
+        "role": "chain_fund",
+        "leg_id": "source",
+        "action": "broadcast_bitcoin"
+      },
+      "requester_exits": [
+        {
+          "leg_id": "source",
+          "path": "refund",
+          "condition": "cltv"
+        },
+        {
+          "leg_id": "destination",
+          "path": "claim",
+          "condition": "hashlock"
+        }
+      ]
+    }
+  ],
+  "verify_before_fund": [
+    {
+      "name": "swp-v1-negative-payment-hash-mismatch",
+      "mutation": "payment_hash",
+      "error": "swp_payment_hash_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-script-commitment-mismatch",
+      "mutation": "taproot_script",
+      "error": "swp_script_commitment_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-confirmation-insufficient",
+      "mutation": "zero_confirmations",
+      "error": "swp_confirmation_insufficient"
+    },
+    {
+      "name": "swp-v1-negative-rbf-policy-violation",
+      "mutation": "replaceable_funding",
+      "error": "swp_rbf_policy_violation"
+    },
+    {
+      "name": "swp-v1-negative-timeout-ladder-unsafe",
+      "mutation": "fund_deadline_reached",
+      "error": "swp_timeout_ladder_unsafe"
+    },
+    {
+      "name": "swp-v1-negative-amountless-invoice",
+      "mutation": "amountless_invoice",
+      "error": "swp_invoice_invalid"
+    },
+    {
+      "name": "swp-v1-negative-bilateral-contract-missing",
+      "mutation": "provider_contract_missing",
+      "error": "swp_contract_missing"
+    },
+    {
+      "name": "swp-v1-negative-rfq-missing",
+      "mutation": "rfq_missing",
+      "error": "swp_unresolved_loss"
+    },
+    {
+      "name": "swp-v1-negative-snapshot-custody-member",
+      "mutation": "snapshot_seed",
+      "error": "swp_secret_material_forbidden"
+    },
+    {
+      "name": "swp-v1-negative-selection-outside-quote",
+      "mutation": "selection_outside",
+      "error": "swp_order_selection_invalid"
+    },
+    {
+      "name": "swp-v1-negative-expired-quote",
+      "mutation": "expired_quote",
+      "error": "swp_quote_expired"
+    },
+    {
+      "name": "swp-v1-negative-expired-invoice",
+      "mutation": "expired_invoice",
+      "error": "swp_invoice_invalid"
+    },
+    {
+      "name": "swp-v1-negative-minimum-final-cltv-mismatch",
+      "mutation": "minimum_final_cltv",
+      "error": "swp_invoice_invalid"
+    },
+    {
+      "name": "swp-v1-negative-exit-package-missing",
+      "mutation": "exit_package_missing",
+      "error": "swp_exit_package_missing"
+    },
+    {
+      "name": "swp-v1-negative-reverse-readiness-adapter-missing",
+      "mutation": "reverse_adapter_missing",
+      "error": "swp_funding_not_authorized"
+    },
+    {
+      "name": "swp-v1-negative-reverse-readiness-mismatch",
+      "mutation": "reverse_readiness_mismatch",
+      "error": "swp_funding_not_authorized"
+    },
+    {
+      "name": "swp-v1-negative-reverse-readiness-expired",
+      "mutation": "reverse_readiness_expired",
+      "error": "swp_funding_not_authorized"
+    },
+    {
+      "name": "swp-v1-negative-funding-amount-mismatch",
+      "mutation": "funding_amount",
+      "error": "swp_terms_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-invoice-network-mismatch",
+      "mutation": "invoice_network",
+      "error": "swp_invoice_invalid"
+    },
+    {
+      "name": "swp-v1-negative-contract-digest-fork",
+      "mutation": "contract_digest_fork",
+      "error": "swp_contract_digest_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-contract-order-mismatch",
+      "mutation": "contract_order_mismatch",
+      "error": "swp_contract_terms_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-rfq-constraint-weakened",
+      "mutation": "rfq_constraint_weakened",
+      "error": "swp_contract_terms_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-leg-execution-field-mutation",
+      "mutation": "leg_execution_field",
+      "error": "swp_contract_terms_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-exit-funding-txid",
+      "mutation": "exit_funding_txid",
+      "error": "swp_exit_package_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-exit-hidden-taproot-sibling",
+      "mutation": "exit_hidden_taproot_sibling",
+      "error": "swp_exit_package_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-exit-signing-key",
+      "mutation": "exit_signing_key",
+      "error": "swp_exit_package_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-exit-lock-value",
+      "mutation": "exit_lock_value",
+      "error": "swp_exit_package_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-exit-internal-key",
+      "mutation": "exit_internal_key",
+      "error": "swp_exit_package_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-exit-verifier-digest",
+      "mutation": "exit_verifier_digest",
+      "error": "swp_exit_package_mismatch"
+    },
+    {
+      "name": "swp-v1-negative-recovery-package-unusable",
+      "mutation": "recovery_package_unusable",
+      "error": "swp_exit_package_unusable"
+    },
+    {
+      "name": "swp-v1-negative-exit-package-malformed",
+      "mutation": "exit_package_malformed",
+      "error": "swp_exit_package_unusable"
+    },
+    {
+      "name": "swp-v1-negative-persisted-funding-effect-conflict",
+      "mutation": "persisted_funding_effect_conflict",
+      "error": "swp_external_effect_conflict"
+    },
+    {
+      "name": "swp-v1-negative-effective-cancel-before-fund",
+      "mutation": "effective_cancel_before_fund",
+      "error": "swp_cancel_ineffective"
+    }
+  ],
+  "sequencing": [
+    {
+      "name": "swp-v1-negative-signed-status-base-state-mismatch",
+      "operation": "signed_status_base_state_mismatch",
+      "error": "swp_status_transition_invalid"
+    },
+    {
+      "name": "swp-v1-close-signer-local-other-gap",
+      "operation": "close_signer_local_other_gap",
+      "result": "accepted"
+    }
+  ],
+  "external_effects": [
+    {
+      "name": "swp-v1-negative-terminal-evidence-before-funding",
+      "operation": "terminal_evidence_before_funding",
+      "error": "swp_funding_not_authorized"
+    },
+    {
+      "name": "swp-v1-negative-terminal-evidence-without-funding-effect",
+      "operation": "terminal_evidence_without_funding_effect",
+      "error": "swp_funding_not_authorized"
+    },
+    {
+      "name": "swp-v1-rail-evidence-orphan-crash-restore",
+      "operation": "rail_evidence_orphan_restore",
+      "result": "restored"
+    },
+    {
+      "name": "swp-v1-reverse-refund-bitcoin-spend-evidence",
+      "operation": "reverse_refund_bitcoin_spend_evidence",
+      "result": "bitcoin_spend"
+    },
+    {
+      "name": "swp-v1-lightning-disposition-orphan-crash-restore",
+      "operation": "lightning_disposition_orphan_restore",
+      "result": "restored"
+    },
+    {
+      "name": "swp-v1-negative-reverse-progress-before-funding-effect",
+      "operation": "reverse_progress_before_funding_effect",
+      "error": "swp_funding_not_authorized"
+    },
+    {
+      "name": "swp-v1-negative-reverse-progress-terminal-state",
+      "operation": "reverse_progress_terminal_state",
+      "error": "swp_unresolved_loss"
+    },
+    {
+      "name": "swp-v1-negative-external-signature-invalid",
+      "operation": "external_signer_returns_invalid_signature",
+      "error": "swp_external_signature_invalid"
+    },
+    {
+      "name": "swp-v1-negative-external-signature-mismatch",
+      "operation": "external_signer_changes_requested_bytes",
+      "error": "swp_external_signature_mismatch"
+    }
+  ],
+  "recovery": [
+    {
+      "name": "swp-v1-reverse-refunded-unpaid-final",
+      "lightning_state": "unpaid_final",
+      "counterparty_available": false,
+      "action": "cancelled"
+    },
+    {
+      "name": "swp-v1-reverse-refunded-paid-loss",
+      "lightning_state": "paid",
+      "counterparty_available": true,
+      "action": "explicit_loss"
+    },
+    {
+      "name": "swp-v1-reverse-refunded-pending-available",
+      "lightning_state": "pending",
+      "counterparty_available": true,
+      "action": "wait_for_counterparty"
+    },
+    {
+      "name": "swp-v1-reverse-refunded-pending-unavailable",
+      "lightning_state": "pending",
+      "counterparty_available": false,
+      "action": "explicit_loss"
+    }
+  ],
+  "lifecycle": [
+    {
+      "name": "swp-v1-cancel-acceptor-effective",
+      "operation": "cancel_acceptor_effective",
+      "result": "accepted"
+    },
+    {
+      "name": "swp-v1-negative-cancel-outsider-effective",
+      "operation": "cancel_outsider_effective",
+      "error": "swp_contract_signer_invalid"
+    },
+    {
+      "name": "swp-v1-negative-loss-vanished-principal",
+      "operation": "loss_accounting",
+      "mutation": "vanished_principal",
+      "error": "swp_unresolved_loss"
+    },
+    {
+      "name": "swp-v1-negative-loss-unknown-output",
+      "operation": "loss_accounting",
+      "mutation": "unknown_output_received",
+      "error": "swp_unresolved_loss"
+    },
+    {
+      "name": "swp-v1-negative-loss-unknown-miner-fee",
+      "operation": "loss_accounting",
+      "mutation": "unknown_miner_fee_paid",
+      "error": "swp_unresolved_loss"
+    },
+    {
+      "name": "swp-v1-negative-loss-unknown-input-failed",
+      "operation": "loss_accounting",
+      "mutation": "unknown_input_committed_failed",
+      "error": "swp_unresolved_loss"
+    },
+    {
+      "name": "swp-v1-negative-loss-unknown-input-disputed",
+      "operation": "loss_accounting",
+      "mutation": "unknown_input_committed_disputed",
+      "error": "swp_unresolved_loss"
+    },
+    {
+      "name": "swp-v1-negative-loss-unknown-input-unresolved",
+      "operation": "loss_accounting",
+      "mutation": "unknown_input_committed_unresolved",
+      "error": "swp_unresolved_loss"
+    }
+  ],
+  "custody_tripwires": [
+    { "member": "seed", "error": "swp_secret_material_forbidden" },
+    { "member": "wallet-seed", "error": "swp_secret_material_forbidden" },
+    { "member": "mnemonic", "error": "swp_secret_material_forbidden" },
+    { "member": "xprv", "error": "swp_secret_material_forbidden" },
+    { "member": "private_key", "error": "swp_secret_material_forbidden" },
+    { "member": "privateKey", "error": "swp_secret_material_forbidden" },
+    { "member": "claim_private_key", "error": "swp_secret_material_forbidden" },
+    { "member": "refund_private_key", "error": "swp_secret_material_forbidden" },
+    { "member": "preimage", "error": "swp_secret_material_forbidden" },
+    { "member": "macaroon", "error": "swp_secret_material_forbidden" },
+    { "member": "lnd-macaroon", "error": "swp_secret_material_forbidden" },
+    { "member": "nwc", "error": "swp_secret_material_forbidden" },
+    { "member": "nwc_string", "error": "swp_secret_material_forbidden" },
+    { "member": "nwc-uri", "error": "swp_secret_material_forbidden" },
+    { "member": "bearer_token", "error": "swp_secret_material_forbidden" },
+    { "member": "wallet_credential", "error": "swp_secret_material_forbidden" },
+    { "member": "wallet_rpc_payload", "error": "swp_secret_material_forbidden" },
+    { "member": "musig_secret_nonce", "error": "swp_secret_material_forbidden" },
+    { "member": "secretNonce", "error": "swp_secret_material_forbidden" },
+    { "member": "signing_nonce", "error": "swp_secret_material_forbidden" },
+    { "member": "blinding_key", "error": "swp_secret_material_forbidden" },
+    { "member": "valueBlinder", "error": "swp_secret_material_forbidden" },
+    { "member": "asset-blinder", "error": "swp_secret_material_forbidden" }
+  ]
+}

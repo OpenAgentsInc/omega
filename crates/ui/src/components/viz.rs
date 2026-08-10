@@ -40,6 +40,7 @@ mod sparkline;
 mod stats_strip;
 mod swap_network;
 mod trade_tape;
+#[cfg(not(target_arch = "wasm32"))]
 mod venue_status;
 mod viz_chip;
 mod viz_cloud_provision;
@@ -89,6 +90,7 @@ pub use sparkline::*;
 pub use stats_strip::*;
 pub use swap_network::*;
 pub use trade_tape::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use venue_status::*;
 pub use viz_chip::*;
 pub use viz_cloud_provision::*;

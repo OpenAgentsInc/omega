@@ -178,17 +178,7 @@ pub async fn run_session_socket(
                     .map_err(|error| format!("session subscription failed: {error}"))?;
                 stream
                     .send(Message::Text(
-                        json!([
-                            "REQ",
-                            SESSION_NETWORK_SUBSCRIPTION_ID,
-                            {
-                                "kinds": [MKT_SWP_KEY_ROTATION_KIND, MKT_SWP_RELAY_SET_KIND],
-                                "#provider": [provider_id],
-                                "limit": 128
-                            }
-                        ])
-                        .to_string()
-                        .into(),
+                        provider_network_subscription_request().into(),
                     ))
                     .await
                     .map_err(|error| format!("provider network subscription failed: {error}"))?;
@@ -357,6 +347,22 @@ pub async fn run_session_socket(
     }
 }
 
+fn provider_network_subscription_request() -> String {
+    // NIP-01 filter selectors can address one-letter indexed tags (plus
+    // relay-declared extensions). `provider` is a signed NIP-MKT content tag,
+    // not an indexed selector, so the bounded kind corpus is filtered locally
+    // after signature and domain validation.
+    json!([
+        "REQ",
+        SESSION_NETWORK_SUBSCRIPTION_ID,
+        {
+            "kinds": [MKT_SWP_KEY_ROTATION_KIND, MKT_SWP_RELAY_SET_KIND],
+            "limit": 128
+        }
+    ])
+    .to_string()
+}
+
 async fn send_event(
     events: &async_channel::Sender<SessionSocketEvent>,
     event: SessionSocketEvent,
@@ -365,4 +371,25 @@ async fn send_event(
         .send(event)
         .await
         .map_err(|_| "session event receiver was dropped".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use immortal_client::domain::Filter;
+
+    #[test]
+    fn provider_network_subscription_is_a_valid_bounded_nip01_filter() {
+        let frame: Value = serde_json::from_str(&provider_network_subscription_request())
+            .expect("network subscription frame parses");
+        let filter: Filter = serde_json::from_value(frame[2].clone())
+            .expect("network subscription filter uses supported selectors");
+        filter.validate().expect("network subscription is valid");
+        assert_eq!(filter.limit, Some(128));
+        assert_eq!(
+            filter.kinds,
+            Some(vec![MKT_SWP_KEY_ROTATION_KIND, MKT_SWP_RELAY_SET_KIND])
+        );
+        assert!(filter.tags.is_empty());
+    }
 }
