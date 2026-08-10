@@ -576,8 +576,15 @@ fn decimal_usdc_micros(value: &str) -> anyhow::Result<i64> {
         || whole.is_empty()
         || !whole.bytes().all(|byte| byte.is_ascii_digit())
         || !fractional.bytes().all(|byte| byte.is_ascii_digit())
-        || fractional.len() > 6
     {
+        anyhow::bail!("USDC balance is not a non-negative six-decimal value");
+    }
+    let (fractional, excess) = if fractional.len() > 6 {
+        fractional.split_at(6)
+    } else {
+        (fractional, "")
+    };
+    if !excess.bytes().all(|byte| byte == b'0') {
         anyhow::bail!("USDC balance is not a non-negative six-decimal value");
     }
     let whole = whole.parse::<i64>()?;
@@ -840,6 +847,10 @@ mod tests {
     fn usdc_balance_parser_is_exact_and_fail_closed() {
         assert_eq!(
             decimal_usdc_micros("987.913135").expect("balance"),
+            987_913_135
+        );
+        assert_eq!(
+            decimal_usdc_micros("987.91313500").expect("canonical trailing zeros"),
             987_913_135
         );
         assert_eq!(decimal_usdc_micros("1").expect("whole balance"), 1_000_000);
