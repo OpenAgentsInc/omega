@@ -240,6 +240,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0267",
     "OMEGA-DELTA-0268",
     "OMEGA-DELTA-0269",
+    "OMEGA-DELTA-0270",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31006,6 +31007,75 @@ mod tests {
         assert!(
             !strategy.contains("submit_order("),
             "OMEGA-DELTA-0269: the observer strategy gained order placement"
+        );
+    }
+
+    #[test]
+    fn nautilus_commands_are_typed_local_and_single_attempt() {
+        let channel = without_comments(&read_repository_file(
+            "crates/nautilus_sidecar/src/nautilus_sidecar.rs",
+        ));
+        for required in [
+            "pub enum NautilusCommand",
+            "PlaceOrder",
+            "CancelOrder",
+            "StartStrategy",
+            "StopStrategy",
+            "SetStrategyParameters",
+            "pub struct CommandReceipt",
+            "acknowledged: bool",
+            "sent: bool",
+            "CommandOutcome::Unknown",
+            "UnknownReason::Timeout",
+            "UnknownReason::TransportClosed",
+            ".write_all(&payload)",
+            "pub async fn send(&self, request: CommandRequest)",
+            "commands_cross_one_stdio_channel_with_typed_outcomes",
+        ] {
+            assert!(
+                channel.contains(required),
+                "OMEGA-DELTA-0270: command channel lost `{required}`"
+            );
+        }
+        assert!(
+            !channel.contains("Network::Mainnet"),
+            "OMEGA-DELTA-0270: command channel gained a mainnet path"
+        );
+
+        let engine = without_comments(&read_repository_file("sidecar/nautilus/engine.py"));
+        for required in [
+            "target=read_commands",
+            "command_bridge.configure(emit, args.generation)",
+            "ImportableControllerConfig",
+            "command_bridge:CommandController",
+        ] {
+            assert!(
+                engine.contains(required),
+                "OMEGA-DELTA-0270: engine command ingress lost `{required}`"
+            );
+        }
+
+        let bridge = without_comments(&read_repository_file("sidecar/nautilus/command_bridge.py"));
+        for required in [
+            "COMMAND_SCHEMA = \"omega.nautilus.command.v1\"",
+            "class CommandController",
+            "class CommandExecutionStrategy",
+            "class TrivialStrategy",
+            "self.submit_order(order, client_id=HYPERLIQUID_CLIENT_ID)",
+            "self.cancel_order(client_order_id, client_id=HYPERLIQUID_CLIENT_ID)",
+            "mutation_state=\"sent\"",
+            "mutation_state=\"unknown\"",
+            "self.start_strategy_from_id",
+            "self.stop_strategy_from_id",
+        ] {
+            assert!(
+                bridge.contains(required),
+                "OMEGA-DELTA-0270: in-engine command bridge lost `{required}`"
+            );
+        }
+        assert!(
+            !bridge.contains("MCP") && !bridge.contains("mainnet"),
+            "OMEGA-DELTA-0270: hot command bridge gained MCP or mainnet"
         );
     }
 }

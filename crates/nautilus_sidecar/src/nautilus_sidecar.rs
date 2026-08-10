@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -18,8 +18,10 @@ const EVENT_PREFIX: &str = "OMEGA_NAUTILUS_EVENT ";
 const EVENT_SCHEMA: &str = "omega.nautilus.lifecycle.v1";
 const STREAM_PREFIX: &str = "OMEGA_NAUTILUS_STREAM ";
 const STREAM_SCHEMA: &str = "omega.nautilus.stream.v1";
+const COMMAND_SCHEMA: &str = "omega.nautilus.command.v1";
 const DEFAULT_RECONCILIATION_LOOKBACK_MINUTES: u16 = 60;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(15);
 const MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -146,6 +148,23 @@ pub enum BookSide {
     Buy,
     Sell,
     NoOrderSide,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandType {
+    PlaceOrder,
+    CancelOrder,
+    StartStrategy,
+    StopStrategy,
+    SetStrategyParameters,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -402,6 +421,98 @@ impl StreamFrame {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyParameters {
+    pub interval_ms: u64,
+    pub signal: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NautilusCommand {
+    PlaceOrder {
+        client_order_id: String,
+        instrument_id: String,
+        side: OrderSide,
+        quantity: String,
+        price: String,
+        post_only: bool,
+        reduce_only: bool,
+    },
+    CancelOrder {
+        client_order_id: String,
+    },
+    StartStrategy {
+        strategy_id: String,
+    },
+    StopStrategy {
+        strategy_id: String,
+    },
+    SetStrategyParameters {
+        strategy_id: String,
+        parameters: StrategyParameters,
+    },
+}
+
+impl NautilusCommand {
+    fn command_type(&self) -> CommandType {
+        match self {
+            Self::PlaceOrder { .. } => CommandType::PlaceOrder,
+            Self::CancelOrder { .. } => CommandType::CancelOrder,
+            Self::StartStrategy { .. } => CommandType::StartStrategy,
+            Self::StopStrategy { .. } => CommandType::StopStrategy,
+            Self::SetStrategyParameters { .. } => CommandType::SetStrategyParameters,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::PlaceOrder {
+                client_order_id,
+                instrument_id,
+                quantity,
+                price,
+                ..
+            } => {
+                validate_identifier("client order ID", client_order_id)?;
+                validate_identifier("instrument ID", instrument_id)?;
+                validate_decimal("quantity", quantity)?;
+                validate_decimal("price", price)?;
+            }
+            Self::CancelOrder { client_order_id } => {
+                validate_identifier("client order ID", client_order_id)?;
+            }
+            Self::StartStrategy { strategy_id }
+            | Self::StopStrategy { strategy_id }
+            | Self::SetStrategyParameters { strategy_id, .. } => {
+                validate_identifier("strategy ID", strategy_id)?;
+            }
+        }
+        if let Self::SetStrategyParameters { parameters, .. } = self
+            && !(10..=60_000).contains(&parameters.interval_ms)
+        {
+            bail!("strategy interval must be from 10 through 60000 milliseconds");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandRequest {
+    pub command_id: String,
+    #[serde(flatten)]
+    pub command: NautilusCommand,
+}
+
+impl CommandRequest {
+    fn validate(&self) -> Result<()> {
+        validate_identifier("command ID", &self.command_id)?;
+        self.command.validate()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderableBookLevel {
     pub price: String,
@@ -486,11 +597,272 @@ struct GlobalNautilusStreamSource(Entity<NautilusStreamSource>);
 
 impl Global for GlobalNautilusStreamSource {}
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandOutcome {
+    OrderAccepted {
+        client_order_id: String,
+        venue_order_id: String,
+    },
+    OrderCanceled {
+        client_order_id: String,
+        venue_order_id: String,
+    },
+    StrategyStarted {
+        running: bool,
+    },
+    StrategyStopped {
+        running: bool,
+    },
+    StrategyParametersApplied {
+        parameters: StrategyParameters,
+    },
+    Refused {
+        reason_code: RefusalReason,
+    },
+    Unknown {
+        reason_code: UnknownReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    InvalidCommand,
+    InvalidEnvelope,
+    InvalidCommandId,
+    UnknownStrategy,
+    InvalidOrder,
+    InvalidParameters,
+    OrderNotFound,
+    RiskDenied,
+    VenueRejected,
+    CancelRejected,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownReason {
+    DispatchFailed,
+    TransportClosed,
+    Timeout,
+    MalformedOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandReceipt {
+    pub command_id: String,
+    pub command_type: CommandType,
+    pub acknowledged: bool,
+    pub sent: bool,
+    pub outcome: CommandOutcome,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum CommandEvent {
+    Acknowledged {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+    },
+    Sent {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        client_order_id: String,
+        mutation_state: MutationState,
+    },
+    OrderAccepted {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        client_order_id: String,
+        venue_order_id: String,
+    },
+    OrderCanceled {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        client_order_id: String,
+        venue_order_id: String,
+    },
+    StrategyStarted {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        running: bool,
+    },
+    StrategyStopped {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        running: bool,
+    },
+    StrategyParametersApplied {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        parameters: StrategyParameters,
+    },
+    Refused {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        reason_code: RefusalReason,
+    },
+    Unknown {
+        schema: String,
+        generation: u64,
+        network: Network,
+        command_id: String,
+        command_type: CommandType,
+        client_order_id: String,
+        mutation_state: MutationState,
+        reason_code: UnknownReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MutationState {
+    Sent,
+    Unknown,
+}
+
+impl CommandEvent {
+    fn metadata(&self) -> (&str, u64, Network, &str, CommandType) {
+        match self {
+            Self::Acknowledged {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+            }
+            | Self::Sent {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            }
+            | Self::OrderAccepted {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            }
+            | Self::OrderCanceled {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            }
+            | Self::StrategyStarted {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            }
+            | Self::StrategyStopped {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            }
+            | Self::StrategyParametersApplied {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            }
+            | Self::Refused {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            }
+            | Self::Unknown {
+                schema,
+                generation,
+                network,
+                command_id,
+                command_type,
+                ..
+            } => (schema, *generation, *network, command_id, *command_type),
+        }
+    }
+
+    fn validate(&self, expected_generation: u64) -> Result<()> {
+        let (schema, generation, network, _, _) = self.metadata();
+        if schema != COMMAND_SCHEMA {
+            bail!("Nautilus command schema is not supported");
+        }
+        if generation != expected_generation {
+            bail!("Nautilus command event has a stale generation");
+        }
+        if network != Network::Testnet {
+            bail!("Nautilus command event is not testnet");
+        }
+        Ok(())
+    }
+}
+
+enum SidecarEvent {
+    Lifecycle(LifecycleEvent),
+    Command(CommandEvent),
+}
+
+#[derive(Deserialize)]
+struct EventSchema {
+    schema: String,
+}
+
+#[derive(Serialize)]
+struct CommandEnvelope<'a> {
+    schema: &'static str,
+    generation: u64,
+    network: Network,
+    command_id: &'a str,
+    #[serde(flatten)]
+    command: &'a NautilusCommand,
+}
+
 pub struct NautilusSupervisor {
     config: NautilusConfig,
     private_key: PrivateKey,
     child: Option<Child>,
-    events: Option<mpsc::Receiver<Result<LifecycleEvent>>>,
+    child_stdin: Option<ChildStdin>,
+    events: Option<mpsc::Receiver<Result<SidecarEvent>>>,
     generation: u64,
     last_health: Option<LifecycleEvent>,
     stream: Arc<Mutex<StreamBuffer>>,
@@ -505,6 +877,7 @@ impl NautilusSupervisor {
             config,
             private_key,
             child: None,
+            child_stdin: None,
             events: None,
             generation: 0,
             last_health: None,
@@ -548,7 +921,7 @@ impl NautilusSupervisor {
             .arg(self.config.reconciliation_lookback_minutes.to_string())
             .env("HYPERLIQUID_TESTNET_PK", self.private_key.0.as_str())
             .env("PYTHONDONTWRITEBYTECODE", "1")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn().with_context(|| {
@@ -561,6 +934,10 @@ impl NautilusSupervisor {
             .stdout
             .take()
             .ok_or_else(|| anyhow!("Nautilus sidecar stdout is unavailable"))?;
+        let child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Nautilus sidecar stdin is unavailable"))?;
         let stderr = child
             .stderr
             .take()
@@ -580,8 +957,7 @@ impl NautilusSupervisor {
                     }
                 };
                 if let Some(payload) = line.strip_prefix(EVENT_PREFIX) {
-                    let event =
-                        serde_json::from_str(payload).context("decode Nautilus lifecycle event");
+                    let event = decode_sidecar_event(payload);
                     if sender.send(event).is_err() {
                         return;
                     }
@@ -617,6 +993,7 @@ impl NautilusSupervisor {
             }
         });
         self.child = Some(child);
+        self.child_stdin = Some(child_stdin);
         self.events = Some(receiver);
         self.wait_for_health()
     }
@@ -631,6 +1008,7 @@ impl NautilusSupervisor {
         };
         if crashed {
             self.child.take();
+            self.child_stdin.take();
             self.events.take();
             self.last_health.take();
             return self.start();
@@ -645,6 +1023,7 @@ impl NautilusSupervisor {
             return Ok(());
         };
         self.events.take();
+        self.child_stdin.take();
         self.last_health.take();
         request_clean_stop(&mut child)?;
         let deadline = Instant::now() + SHUTDOWN_GRACE_PERIOD;
@@ -674,10 +1053,220 @@ impl NautilusSupervisor {
             let event = receiver
                 .recv_timeout(remaining)
                 .context("Nautilus sidecar health timed out")??;
-            event.validate(self.generation)?;
-            if matches!(event, LifecycleEvent::Healthy { .. }) {
-                self.last_health = Some(event.clone());
-                return Ok(event);
+            if let SidecarEvent::Lifecycle(event) = event {
+                event.validate(self.generation)?;
+                if matches!(event, LifecycleEvent::Healthy { .. }) {
+                    self.last_health = Some(event.clone());
+                    return Ok(event);
+                }
+            }
+        }
+    }
+
+    pub fn send_command(&mut self, request: CommandRequest) -> Result<CommandReceipt> {
+        request.validate()?;
+        let command_type = request.command.command_type();
+        let envelope = CommandEnvelope {
+            schema: COMMAND_SCHEMA,
+            generation: self.generation,
+            network: Network::Testnet,
+            command_id: &request.command_id,
+            command: &request.command,
+        };
+        let payload = serde_json::to_vec(&envelope).context("encode Nautilus command")?;
+        let Some(child_stdin) = self.child_stdin.as_mut() else {
+            bail!("Nautilus command channel is unavailable");
+        };
+        if child_stdin
+            .write_all(&payload)
+            .and_then(|()| child_stdin.write_all(b"\n"))
+            .and_then(|()| child_stdin.flush())
+            .is_err()
+        {
+            return Ok(unknown_receipt(
+                request.command_id,
+                command_type,
+                false,
+                false,
+                UnknownReason::TransportClosed,
+            ));
+        }
+
+        let receiver = self
+            .events
+            .as_ref()
+            .ok_or_else(|| anyhow!("Nautilus sidecar event channel is unavailable"))?;
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        let mut acknowledged = false;
+        let mut sent = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = match receiver.recv_timeout(remaining) {
+                Ok(Ok(event)) => event,
+                Ok(Err(_)) => {
+                    return Ok(unknown_receipt(
+                        request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        UnknownReason::MalformedOutcome,
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Ok(unknown_receipt(
+                        request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        UnknownReason::Timeout,
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Ok(unknown_receipt(
+                        request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        UnknownReason::TransportClosed,
+                    ));
+                }
+            };
+            let SidecarEvent::Command(event) = event else {
+                continue;
+            };
+            if event.validate(self.generation).is_err() {
+                return Ok(unknown_receipt(
+                    request.command_id,
+                    command_type,
+                    acknowledged,
+                    sent,
+                    UnknownReason::MalformedOutcome,
+                ));
+            }
+            let (_, _, _, event_command_id, event_command_type) = event.metadata();
+            if event_command_id != request.command_id {
+                continue;
+            }
+            if event_command_type != command_type {
+                return Ok(unknown_receipt(
+                    request.command_id,
+                    command_type,
+                    acknowledged,
+                    sent,
+                    UnknownReason::MalformedOutcome,
+                ));
+            }
+            match event {
+                CommandEvent::Acknowledged { .. } => acknowledged = true,
+                CommandEvent::Sent {
+                    mutation_state: MutationState::Sent,
+                    client_order_id,
+                    ..
+                } => {
+                    validate_identifier("sent client order ID", &client_order_id)?;
+                    sent = true;
+                }
+                CommandEvent::Sent { .. } => {
+                    return Ok(unknown_receipt(
+                        request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        UnknownReason::MalformedOutcome,
+                    ));
+                }
+                CommandEvent::OrderAccepted {
+                    client_order_id,
+                    venue_order_id,
+                    ..
+                } => {
+                    return Ok(CommandReceipt {
+                        command_id: request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        outcome: CommandOutcome::OrderAccepted {
+                            client_order_id,
+                            venue_order_id,
+                        },
+                    });
+                }
+                CommandEvent::OrderCanceled {
+                    client_order_id,
+                    venue_order_id,
+                    ..
+                } => {
+                    return Ok(CommandReceipt {
+                        command_id: request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        outcome: CommandOutcome::OrderCanceled {
+                            client_order_id,
+                            venue_order_id,
+                        },
+                    });
+                }
+                CommandEvent::StrategyStarted { running, .. } => {
+                    return Ok(CommandReceipt {
+                        command_id: request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        outcome: CommandOutcome::StrategyStarted { running },
+                    });
+                }
+                CommandEvent::StrategyStopped { running, .. } => {
+                    return Ok(CommandReceipt {
+                        command_id: request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        outcome: CommandOutcome::StrategyStopped { running },
+                    });
+                }
+                CommandEvent::StrategyParametersApplied { parameters, .. } => {
+                    return Ok(CommandReceipt {
+                        command_id: request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        outcome: CommandOutcome::StrategyParametersApplied { parameters },
+                    });
+                }
+                CommandEvent::Refused { reason_code, .. } => {
+                    return Ok(CommandReceipt {
+                        command_id: request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        outcome: CommandOutcome::Refused { reason_code },
+                    });
+                }
+                CommandEvent::Unknown {
+                    mutation_state: MutationState::Unknown,
+                    reason_code,
+                    client_order_id,
+                    ..
+                } => {
+                    validate_identifier("unknown client order ID", &client_order_id)?;
+                    return Ok(unknown_receipt(
+                        request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        reason_code,
+                    ));
+                }
+                CommandEvent::Unknown { .. } => {
+                    return Ok(unknown_receipt(
+                        request.command_id,
+                        command_type,
+                        acknowledged,
+                        sent,
+                        UnknownReason::MalformedOutcome,
+                    ));
+                }
             }
         }
     }
@@ -689,6 +1278,67 @@ impl Drop for NautilusSupervisor {
             log::warn!("Nautilus sidecar cleanup failed: {error:#}");
         }
     }
+}
+
+fn decode_sidecar_event(payload: &str) -> Result<SidecarEvent> {
+    let event_schema: EventSchema =
+        serde_json::from_str(payload).context("decode Nautilus event schema")?;
+    match event_schema.schema.as_str() {
+        EVENT_SCHEMA => serde_json::from_str(payload)
+            .map(SidecarEvent::Lifecycle)
+            .context("decode Nautilus lifecycle event"),
+        COMMAND_SCHEMA => serde_json::from_str(payload)
+            .map(SidecarEvent::Command)
+            .context("decode Nautilus command event"),
+        _ => bail!("Nautilus event schema is not supported"),
+    }
+}
+
+fn unknown_receipt(
+    command_id: String,
+    command_type: CommandType,
+    acknowledged: bool,
+    sent: bool,
+    reason_code: UnknownReason,
+) -> CommandReceipt {
+    CommandReceipt {
+        command_id,
+        command_type,
+        acknowledged,
+        sent,
+        outcome: CommandOutcome::Unknown { reason_code },
+    }
+}
+
+fn validate_identifier(name: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 128 {
+        bail!("{name} must contain from 1 through 128 bytes");
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        bail!("{name} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_decimal(name: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        || value.bytes().filter(|byte| *byte == b'.').count() > 1
+    {
+        bail!("{name} must be a positive decimal string");
+    }
+    let parsed: f64 = value
+        .parse()
+        .with_context(|| format!("parse {name} decimal"))?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        bail!("{name} must be a positive finite decimal");
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -710,11 +1360,37 @@ fn request_clean_stop(child: &mut Child) -> Result<()> {
     child.kill().context("terminate Nautilus sidecar")
 }
 
+#[derive(Clone)]
+pub struct NautilusCommandChannel {
+    supervisor: Arc<Mutex<Option<NautilusSupervisor>>>,
+}
+
+impl NautilusCommandChannel {
+    pub async fn send(&self, request: CommandRequest) -> Result<CommandReceipt> {
+        let supervisor = self.supervisor.clone();
+        smol::unblock(move || {
+            supervisor
+                .lock()
+                .map_err(|_| anyhow!("Nautilus supervisor lock is poisoned"))?
+                .as_mut()
+                .ok_or_else(|| anyhow!("Nautilus supervisor is unavailable"))?
+                .send_command(request)
+        })
+        .await
+    }
+}
+
 struct NautilusLifecycle {
+    command_channel: NautilusCommandChannel,
     _quit_subscription: Subscription,
 }
 
 impl Global for NautilusLifecycle {}
+
+pub fn command_channel(cx: &App) -> Option<NautilusCommandChannel> {
+    cx.try_global::<NautilusLifecycle>()
+        .map(|lifecycle| lifecycle.command_channel.clone())
+}
 
 pub fn init(cx: &mut App) {
     let config = match NautilusConfig::from_process_environment() {
@@ -753,6 +1429,9 @@ pub fn init(cx: &mut App) {
         }
     });
     cx.set_global(NautilusLifecycle {
+        command_channel: NautilusCommandChannel {
+            supervisor: supervisor.clone(),
+        },
         _quit_subscription: quit_subscription,
     });
     let credentials = zed_credentials_provider::local_credentials(cx);
@@ -963,6 +1642,174 @@ mod tests {
         });
     }
 
+    #[test]
+    fn command_envelope_is_typed_versioned_and_testnet_only() {
+        let request = CommandRequest {
+            command_id: "place-1".into(),
+            command: NautilusCommand::PlaceOrder {
+                client_order_id: "O-OMEGA-287-1".into(),
+                instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                side: OrderSide::Buy,
+                quantity: "0.001".into(),
+                price: "60000.0".into(),
+                post_only: true,
+                reduce_only: false,
+            },
+        };
+        request.validate().expect("valid command");
+        let encoded = serde_json::to_value(CommandEnvelope {
+            schema: COMMAND_SCHEMA,
+            generation: 3,
+            network: Network::Testnet,
+            command_id: &request.command_id,
+            command: &request.command,
+        })
+        .expect("serialize command");
+        assert_eq!(encoded["schema"], COMMAND_SCHEMA);
+        assert_eq!(encoded["generation"], 3);
+        assert_eq!(encoded["network"], "testnet");
+        assert_eq!(encoded["type"], "place_order");
+        assert_eq!(encoded["client_order_id"], "O-OMEGA-287-1");
+        assert!(encoded.get("message").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_cross_one_stdio_channel_with_typed_outcomes() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let script = temporary_directory.path().join("fake-command-engine.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+generation=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--generation" ]; then generation="$2"; shift 2; else shift; fi
+done
+printf 'OMEGA_NAUTILUS_EVENT {"type":"healthy","schema":"omega.nautilus.lifecycle.v1","generation":%s,"network":"testnet","venue":"hyperliquid","reconciliation_lookback_minutes":60}\n' "$generation"
+trap 'exit 0' TERM
+while IFS= read -r command; do
+  case "$command" in
+    *'"command_id":"place-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"place-1","command_type":"place_order"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"sent","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"place-1","command_type":"place_order","client_order_id":"O-OMEGA-287-1","mutation_state":"sent"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"order_accepted","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"place-1","command_type":"place_order","client_order_id":"O-OMEGA-287-1","venue_order_id":"venue-1"}\n' "$generation"
+      ;;
+    *'"command_id":"cancel-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"cancel-1","command_type":"cancel_order"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"sent","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"cancel-1","command_type":"cancel_order","client_order_id":"O-OMEGA-287-1","mutation_state":"sent"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"order_canceled","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"cancel-1","command_type":"cancel_order","client_order_id":"O-OMEGA-287-1","venue_order_id":"venue-1"}\n' "$generation"
+      ;;
+    *'"command_id":"params-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"strategy_parameters_applied","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters","parameters":{"interval_ms":25,"signal":7}}\n' "$generation"
+      ;;
+    *'"command_id":"start-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"start-1","command_type":"start_strategy"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"strategy_started","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"start-1","command_type":"start_strategy","running":true}\n' "$generation"
+      ;;
+    *'"command_id":"stop-1"'*)
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"stop-1","command_type":"stop_strategy"}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"strategy_stopped","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"stop-1","command_type":"stop_strategy","running":false}\n' "$generation"
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fake command engine");
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+            .expect("make fake engine executable");
+        let config = NautilusConfig {
+            network: Network::Testnet,
+            python: script,
+            engine: PathBuf::from("ignored"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(5),
+        };
+        let mut supervisor = NautilusSupervisor::new(config, private_key()).expect("supervisor");
+        supervisor.start().expect("start fake engine");
+
+        let place = supervisor
+            .send_command(CommandRequest {
+                command_id: "place-1".into(),
+                command: NautilusCommand::PlaceOrder {
+                    client_order_id: "O-OMEGA-287-1".into(),
+                    instrument_id: "BTC-USD-PERP.HYPERLIQUID".into(),
+                    side: OrderSide::Buy,
+                    quantity: "0.001".into(),
+                    price: "60000".into(),
+                    post_only: true,
+                    reduce_only: false,
+                },
+            })
+            .expect("place command");
+        assert!(place.acknowledged);
+        assert!(place.sent);
+        assert!(matches!(
+            place.outcome,
+            CommandOutcome::OrderAccepted { .. }
+        ));
+
+        let cancel = supervisor
+            .send_command(CommandRequest {
+                command_id: "cancel-1".into(),
+                command: NautilusCommand::CancelOrder {
+                    client_order_id: "O-OMEGA-287-1".into(),
+                },
+            })
+            .expect("cancel command");
+        assert!(cancel.acknowledged);
+        assert!(cancel.sent);
+        assert!(matches!(
+            cancel.outcome,
+            CommandOutcome::OrderCanceled { .. }
+        ));
+
+        let parameters = supervisor
+            .send_command(CommandRequest {
+                command_id: "params-1".into(),
+                command: NautilusCommand::SetStrategyParameters {
+                    strategy_id: "OMEGA-TRIVIAL-001".into(),
+                    parameters: StrategyParameters {
+                        interval_ms: 25,
+                        signal: 7,
+                    },
+                },
+            })
+            .expect("parameter command");
+        assert!(matches!(
+            parameters.outcome,
+            CommandOutcome::StrategyParametersApplied { .. }
+        ));
+
+        let start = supervisor
+            .send_command(CommandRequest {
+                command_id: "start-1".into(),
+                command: NautilusCommand::StartStrategy {
+                    strategy_id: "OMEGA-TRIVIAL-001".into(),
+                },
+            })
+            .expect("start command");
+        assert!(matches!(
+            start.outcome,
+            CommandOutcome::StrategyStarted { running: true }
+        ));
+
+        let stop = supervisor
+            .send_command(CommandRequest {
+                command_id: "stop-1".into(),
+                command: NautilusCommand::StopStrategy {
+                    strategy_id: "OMEGA-TRIVIAL-001".into(),
+                },
+            })
+            .expect("stop command");
+        assert!(matches!(
+            stop.outcome,
+            CommandOutcome::StrategyStopped { running: false }
+        ));
+        supervisor.stop().expect("stop fake engine");
+    }
+
     #[cfg(unix)]
     #[test]
     fn crashed_sidecar_restarts_with_a_new_generation_and_stops_cleanly() {
@@ -990,7 +1837,7 @@ while :; do sleep 1; done
             python: script,
             engine: PathBuf::from("ignored"),
             reconciliation_lookback_minutes: 60,
-            health_timeout: Duration::from_secs(2),
+            health_timeout: Duration::from_secs(5),
         };
         let mut supervisor = NautilusSupervisor::new(config, private_key()).expect("supervisor");
         supervisor.start().expect("first start");

@@ -10565,3 +10565,30 @@ at most one UI notification for that frame.
 
 - **Enforced by:** `nautilus_sidecar` stream schema, generation, backpressure,
   lossless-state, lifecycle, and testnet integration tests.
+
+### OMEGA-DELTA-0270 — Nautilus commands are typed, local, and single-attempt
+
+Omega sends discrete execution commands to its local Nautilus process over the
+same stdio process boundary that carries the engine event stream. Version 1
+covers limit placement and cancellation by client order ID plus start, stop,
+and fixed-schema parameter changes for an in-engine strategy. MCP does not
+carry this traffic; later governance tools wrap these typed operations above
+the command channel.
+
+Every command is generation-fenced and testnet-only. The sidecar acknowledges
+admission, reports when an effectful command has been sent to its execution
+engine, and then publishes a typed terminal outcome. Omega writes an effectful
+command once. A transport loss, timeout, malformed outcome, or dispatch
+exception after that write returns `unknown`; the channel never retries an
+ambiguous mutation. Validation failures and definitive risk, venue, or cancel
+rejections remain typed refusals.
+
+An always-running Nautilus controller drains the channel on the engine thread.
+Venue mutations pass through a Nautilus strategy, while a separate trivial
+strategy proves that parameter, start, and stop commands control the hot loop
+without placing an LLM or MCP inside it. Both Rust and Python make mainnet
+unrepresentable or refuse it before execution.
+
+- **Enforced by:** `nautilus_sidecar` unit and Hyperliquid testnet integration
+  tests and `nautilus_commands_are_typed_local_and_single_attempt` in
+  `omega_deltas`.

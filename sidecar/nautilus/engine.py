@@ -7,6 +7,8 @@ import os
 import sys
 import threading
 
+import command_bridge
+
 
 EVENT_SCHEMA = "omega.nautilus.lifecycle.v1"
 HYPERLIQUID = "HYPERLIQUID"
@@ -16,13 +18,23 @@ event_file_descriptor = sys.stdout.fileno()
 def emit(event_type: str, generation: int, **fields: object) -> None:
     event = {
         "type": event_type,
-        "schema": EVENT_SCHEMA,
+        "schema": fields.pop("schema", EVENT_SCHEMA),
         "generation": generation,
         "network": "testnet",
         **fields,
     }
     payload = f"OMEGA_NAUTILUS_EVENT {json.dumps(event, separators=(',', ':'))}\n"
     os.write(event_file_descriptor, payload.encode())
+
+
+def read_commands() -> None:
+    for line in sys.stdin:
+        try:
+            command = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(command, dict):
+            command_bridge.enqueue(command)
 
 
 def capture_engine_logs(args: argparse.Namespace) -> tuple[int, threading.Thread]:
@@ -94,6 +106,7 @@ def main() -> None:
     from nautilus_trader.live import LiveNode
     from nautilus_trader.model import AccountId
     from nautilus_trader.model import TraderId
+    from nautilus_trader.trading import ImportableControllerConfig
     from stream_strategy import OmegaStreamStrategy
     from stream_strategy import StreamPublisher
 
@@ -106,6 +119,13 @@ def main() -> None:
         .with_timeout_disconnection_secs(5)
         .with_delay_post_stop_secs(1)
         .with_delay_shutdown_secs(1)
+        .with_controller(
+            ImportableControllerConfig(
+                controller_path="command_bridge:CommandController",
+                config_path="command_bridge:CommandControllerConfig",
+                config={"actor_id": command_bridge.COMMAND_CONTROLLER_ID},
+            )
+        )
         .add_data_client(
             None,
             HyperliquidDataClientFactory(),
@@ -122,6 +142,13 @@ def main() -> None:
         )
     )
     event_output, monitor_thread = capture_engine_logs(args)
+    command_bridge.configure(emit, args.generation)
+    command_thread = threading.Thread(
+        target=read_commands,
+        name="nautilus-command-reader",
+        daemon=True,
+    )
+    command_thread.start()
     node = builder.build()
     stream_publisher = StreamPublisher(event_output, args.generation)
     node.add_strategy(OmegaStreamStrategy(stream_publisher))
