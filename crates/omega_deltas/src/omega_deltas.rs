@@ -19077,6 +19077,11 @@ mod tests {
             "market_provision_cloud",
             "market_swap_quote",
             "market_swap_status",
+            "nautilus_account",
+            "nautilus_order",
+            "nautilus_prediction",
+            "nautilus_risk",
+            "nautilus_strategy",
             "read",
             "resume_thread",
             "write",
@@ -19087,7 +19092,7 @@ mod tests {
             actual, expected,
             "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
              the six coding tools plus the five built-in market tools and the \
-             seven LN Markets tools."
+             registered LN Markets and Nautilus governance tools."
         );
         assert!(
             !actual.contains("search_web"),
@@ -31117,6 +31122,34 @@ mod tests {
             !governance.contains("submit_order(") && !governance.contains("on_quote_tick"),
             "OMEGA-DELTA-0271: governance entered the venue hot loop"
         );
+        let defaults = read_repository_file("assets/settings/default.json");
+        for profile_name in ["basic", "editor"] {
+            let profile_settings = defaults
+                .split(&format!("\"{profile_name}\": {{"))
+                .nth(1)
+                .unwrap_or_else(|| {
+                    panic!("OMEGA-DELTA-0271: shipped settings lost the {profile_name} profile")
+                });
+            let profile_settings =
+                profile_settings
+                    .split("\n      },")
+                    .next()
+                    .unwrap_or_else(|| {
+                        panic!("OMEGA-DELTA-0271: could not bound the {profile_name} profile")
+                    });
+            for tool in [
+                "nautilus_account",
+                "nautilus_prediction",
+                "nautilus_strategy",
+                "nautilus_order",
+                "nautilus_risk",
+            ] {
+                assert!(
+                    profile_settings.contains(&format!("\"{tool}\": true")),
+                    "OMEGA-DELTA-0271: the {profile_name} profile hides `{tool}`"
+                );
+            }
+        }
     }
 
     #[test]

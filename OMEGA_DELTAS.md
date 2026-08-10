@@ -6536,7 +6536,10 @@ coding tools (`read`, `write`, `edit`, `bash`, `delegate`, and `resume_thread`)
 and five built-in market tools (`market_network_status`, `market_swap_quote`,
 `market_execute_swap`, `market_swap_status`, and `market_provision_cloud`).
 OMEGA-DELTA-0241 adds the three first-party LN Markets tools to this closed
-surface: `lnmarkets_account`, `lnmarkets_market_data`, and `lnmarkets_swap`.
+surface; its later governance additions bring that registered set to seven.
+OMEGA-DELTA-0271 adds the five registered Nautilus governance tools:
+`nautilus_account`, `nautilus_prediction`, `nautilus_strategy`,
+`nautilus_order`, and `nautilus_risk`.
 Context-server tools are off, so an MCP installation cannot silently add
 another tool. `search_web` is absent; every provider Omega ships refuses it.
 
@@ -10599,7 +10602,9 @@ Omega exposes Hyperliquid testnet account, position, exposure, strategy,
 discrete-order, and emergency risk controls as governance tools above the
 Nautilus boundary. The plugin declares no network hosts: it reads the typed
 sidecar state projection and sends each approved mutation once through the
-local command channel. Discrete placement and cancellation always require a
+local command channel. The shipped Basic and Editor profiles expose every
+registered Nautilus governance tool so a normal Omega conversation can reach
+the boundary. Discrete placement and cancellation always require a
 fresh human confirmation. Start, parameter, and risk-increasing placement
 also require a stored prediction linked to the exact decision; stop, cancel,
 reduce, and flatten retain their emergency prediction exemption.
