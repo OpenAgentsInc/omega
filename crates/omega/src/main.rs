@@ -822,8 +822,11 @@ fn main() {
         git_ui::init(cx);
         account_ui::init(cx);
         onboarding::init(cx);
-        settings_ui::init(cx);
+        // Settings snapshots plugin-contributed page links while it registers
+        // the Omega API Keys surface. Populate the registry first so Trading
+        // pages and their view factories enter the same settings inventory.
         plugins::init(cx);
+        settings_ui::init(cx);
         json_schema_store::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);

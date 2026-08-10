@@ -3031,6 +3031,52 @@ mod tests {
             .unwrap();
     }
 
+    /// Production initializes the plugin registry before Settings snapshots
+    /// the API Keys page inventory. Exercise that order with the actual
+    /// Hyperliquid registration and require its embedded page to paint, rather
+    /// than proving only that a registry entry exists.
+    #[gpui::test]
+    fn hyperliquid_plugin_page_paints_in_production_settings_order(cx: &mut TestAppContext) {
+        let startup = include_str!("main.rs");
+        let Some(plugin_offset) = startup.find("plugins::init(cx);") else {
+            panic!("production startup must initialize built-in plugins");
+        };
+        let Some(settings_offset) = startup.find("settings_ui::init(cx);") else {
+            panic!("production startup must initialize Settings");
+        };
+        assert!(
+            plugin_offset < settings_offset,
+            "production must populate the plugin registry before Settings snapshots its pages"
+        );
+
+        init_test(cx);
+        cx.update(|cx| {
+            let mut registry =
+                plugin_api::PluginRegistry::new(PathBuf::from("/tmp/omega-settings-order-test"));
+            registry.add_settings_page(trading_workspace_ui::settings_page_registration());
+            plugin_api::init_global(registry, cx);
+            settings_ui::init(cx);
+        });
+
+        let (settings, cx) = cx.add_window_view(|window, cx| {
+            settings_ui::SettingsWindow::new_embedded_omega(None, true, window, cx)
+        });
+        settings.update_in(cx, |settings, window, cx| {
+            assert!(
+                settings.navigate_to_sub_page("nautilus_agent_wallet", window, cx),
+                "Trading / Hyperliquid agent wallet must be present in API Keys"
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !cx.debug_render_snapshot()
+                .occurrences("nautilus.agent_wallet_settings")
+                .is_empty(),
+            "the registered Hyperliquid page must paint in embedded Settings"
+        );
+    }
+
     #[gpui::test]
     async fn test_open_remote_from_existing_connection_reuses_window(
         cx: &mut TestAppContext,
