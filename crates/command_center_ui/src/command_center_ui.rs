@@ -15,8 +15,12 @@
 mod activity_feed;
 mod command_center_header;
 mod format;
+mod ledger_browser;
 mod mandate_status_card;
+mod portfolio_accounting;
 mod prediction_card;
+mod receipt_viewer;
+mod transfer_flow;
 
 pub use activity_feed::{
     ActivityEvent, ActivityEventKind, ActivityFeed, AgentActivityState, AgentRoster,
@@ -28,10 +32,20 @@ pub use format::{
     format_probability_micros, format_sats, format_signed_sats, format_usd, format_wall_clock,
     signed_color,
 };
+pub use ledger_browser::{LedgerBrowser, LedgerBrowserData, LedgerChainState};
 pub use mandate_status_card::{MandateStatusCard, MandateUsage};
+pub use portfolio_accounting::{
+    BalanceMode, BalanceRow, BalancesTable, FeeFundingBreakdown, FeeFundingData, FeeFundingRow,
+    ReconciliationRow, ReconciliationStatusTable,
+};
 pub use prediction_card::{
     ForecastDisplay, PredictionCard, PredictionCardData, PredictionList, PredictionResolution,
 };
+pub use receipt_viewer::{
+    ReceiptFeeView, ReceiptLegView, ReceiptVerificationState, ReceiptViewData, ReceiptViewer,
+    VenueRecordLink,
+};
+pub use transfer_flow::{DepositWithdrawFlow, TransferDirection, TransferRail, TransferRequest};
 pub use ui::{HeadroomMeter, MeterZone};
 
 pub fn unix_now_ms() -> i64 {
@@ -49,7 +63,9 @@ mod paint_tests {
     use ui::prelude::*;
 
     use crate::{
-        ActivityFeed, AgentRoster, CommandCenterHeader, MandateStatusCard, PredictionCard,
+        ActivityFeed, AgentRoster, BalancesTable, CommandCenterHeader, DepositWithdrawFlow,
+        FeeFundingBreakdown, LedgerBrowser, MandateStatusCard, PredictionCard, ReceiptViewer,
+        ReconciliationStatusTable,
     };
 
     struct AllCommandCenterPreviews;
@@ -67,6 +83,12 @@ mod paint_tests {
                 .child(ActivityFeed::preview(window, cx))
                 .child(MandateStatusCard::preview(window, cx))
                 .child(PredictionCard::preview(window, cx))
+                .child(BalancesTable::preview(window, cx))
+                .child(LedgerBrowser::preview(window, cx))
+                .child(ReceiptViewer::preview(window, cx))
+                .child(ReconciliationStatusTable::preview(window, cx))
+                .child(FeeFundingBreakdown::preview(window, cx))
+                .child(DepositWithdrawFlow::preview(window, cx))
         }
     }
 
@@ -93,6 +115,12 @@ mod paint_tests {
             "command_center.mandate_card",
             "command_center.prediction_card",
             "command_center.prediction_list",
+            "command_center.balances_table",
+            "command_center.ledger_browser",
+            "command_center.receipt_viewer",
+            "command_center.reconciliation_table",
+            "command_center.fee_funding_breakdown",
+            "command_center.deposit_withdraw_flow",
         ] {
             assert!(
                 !rendered.occurrences(selector).is_empty(),
