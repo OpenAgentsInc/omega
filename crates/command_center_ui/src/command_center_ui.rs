@@ -8,9 +8,9 @@
 //! (`trading_ledger`, `trading_mandate`, `strategy_engine`, `agent_wakeup`,
 //! `prediction_events`).
 //!
-//! The number formatting and up/down color helpers in [`format`] are local
-//! shims: they get swapped for the shared financial theme tokens and
-//! formatting kit in `crates/ui` once that lands (tracked on omega#284).
+//! The number, duration, and relative-time formatting paths come from the
+//! shared market kit in `crates/ui`; [`format`] only maps command-center domain
+//! types onto those shared helpers.
 
 mod activity_feed;
 mod command_center_header;
@@ -28,10 +28,11 @@ pub use format::{
     format_probability_micros, format_sats, format_signed_sats, format_usd, format_wall_clock,
     signed_color,
 };
-pub use mandate_status_card::{HeadroomMeter, MandateStatusCard, MandateUsage, MeterZone};
+pub use mandate_status_card::{MandateStatusCard, MandateUsage};
 pub use prediction_card::{
     ForecastDisplay, PredictionCard, PredictionCardData, PredictionList, PredictionResolution,
 };
+pub use ui::{HeadroomMeter, MeterZone};
 
 pub fn unix_now_ms() -> i64 {
     std::time::SystemTime::now()

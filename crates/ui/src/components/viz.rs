@@ -7,10 +7,16 @@
 //! a color with a dash pattern, glyph, or stroke shape, so scenes survive
 //! grayscale and color-vision deficiencies. See omega#247.
 
+mod badges;
 mod candles;
+mod countdown;
+mod gauge;
+mod high_frequency;
 mod market_kit;
 mod order_book;
 mod plot;
+mod qr;
+mod sparkline;
 mod viz_chip;
 mod viz_cloud_provision;
 mod viz_edge;
@@ -25,10 +31,16 @@ mod viz_rfq;
 mod viz_swap;
 mod viz_zone;
 
+pub use badges::*;
 pub use candles::*;
+pub use countdown::*;
+pub use gauge::*;
+pub use high_frequency::*;
 pub use market_kit::*;
 pub use order_book::*;
 pub use plot::*;
+pub use qr::*;
+pub use sparkline::*;
 pub use viz_chip::*;
 pub use viz_cloud_provision::*;
 pub use viz_edge::*;
@@ -413,6 +425,12 @@ mod tests {
                 .child(Plot::preview(window, cx))
                 .child(CandlestickChart::preview(window, cx))
                 .child(OrderBookLadder::preview(window, cx))
+                .child(Gauge::preview(window, cx))
+                .child(QrCodeCanvas::preview(window, cx))
+                .child(Countdown::preview(window, cx))
+                .child(Sparkline::preview(window, cx))
+                .child(MarketBadge::preview(window, cx))
+                .child(HighFrequencyUpdateDemo::preview(window, cx))
         }
     }
 
@@ -430,5 +448,20 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+
+        let rendered = cx.debug_render_snapshot();
+        for selector in [
+            "market.gauge",
+            "market.qr",
+            "market.countdown",
+            "market.sparkline",
+            "market.badge",
+            "market.high_frequency_batch",
+        ] {
+            assert!(
+                !rendered.occurrences(selector).is_empty(),
+                "viz previews did not paint {selector}"
+            );
+        }
     }
 }

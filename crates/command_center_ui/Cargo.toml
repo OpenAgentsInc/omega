@@ -16,7 +16,6 @@ doctest = false
 [dependencies]
 agent_wakeup.workspace = true
 anyhow.workspace = true
-chrono.workspace = true
 component.workspace = true
 gpui.workspace = true
 prediction_events.workspace = true

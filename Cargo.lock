@@ -3340,7 +3340,6 @@ version = "0.1.0"
 dependencies = [
  "agent_wakeup",
  "anyhow",
- "chrono",
  "component",
  "gpui",
  "prediction_events",
@@ -18416,6 +18415,7 @@ dependencies = [
  "log",
  "menu",
  "num-format",
+ "qrcode",
  "schemars 1.0.4",
  "serde",
  "settings",
@@ -18423,6 +18423,8 @@ dependencies = [
  "strum 0.27.2",
  "theme",
  "theme_settings",
+ "time",
+ "time_format",
  "ui_macros",
  "windows 0.61.3",
 ]

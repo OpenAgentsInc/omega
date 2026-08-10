@@ -231,6 +231,88 @@ pub fn format_btc(sats: u64) -> String {
     format!("{}.{:08} BTC", format_grouped_u64(whole), fraction)
 }
 
+/// Signed sats through the shared unsigned formatter.
+pub fn format_signed_sats_amount(sats: i64) -> String {
+    let sign = if sats < 0 { "-" } else { "" };
+    format!("{sign}{}", format_sats(sats.unsigned_abs()))
+}
+
+/// Signed sats with an explicit `+` for positive changes.
+pub fn format_sats_change(sats: i64) -> String {
+    let sign = match sats.cmp(&0) {
+        std::cmp::Ordering::Greater => "+",
+        std::cmp::Ordering::Less => "-",
+        std::cmp::Ordering::Equal => "",
+    };
+    format!("{sign}{}", format_sats(sats.unsigned_abs()))
+}
+
+/// Signed BTC with the kit's fixed eight-decimal representation.
+pub fn format_signed_btc(sats: i64) -> String {
+    let sign = if sats < 0 { "-" } else { "" };
+    format!("{sign}{}", format_btc(sats.unsigned_abs()))
+}
+
+/// Whole-dollar USD with grouped thousands.
+pub fn format_usd(usd: u64) -> String {
+    format!("${}", format_grouped_u64(usd))
+}
+
+/// A micro-probability where one million represents certainty.
+pub fn format_probability_micros(micros: u32) -> String {
+    let tenths = u64::from(micros) / 1_000;
+    if tenths.is_multiple_of(10) {
+        format!("{}%", tenths / 10)
+    } else {
+        format!("{}.{}%", tenths / 10, tenths % 10)
+    }
+}
+
+/// Basis points rendered as a percentage without dropping hundredths.
+pub fn format_percent_bps(basis_points: u32) -> String {
+    if basis_points.is_multiple_of(100) {
+        format!("{}%", basis_points / 100)
+    } else {
+        format!("{}.{:02}%", basis_points / 100, basis_points % 100)
+    }
+}
+
+/// Compact duration used by deadlines and high-density market rows.
+pub fn format_duration_ms(milliseconds: i64) -> String {
+    let total_seconds = milliseconds.max(0) / 1_000;
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// A deadline relative to `now_ms`.
+pub fn format_countdown(deadline_ms: i64, now_ms: i64) -> String {
+    if deadline_ms >= now_ms {
+        format!("in {}", format_duration_ms(deadline_ms - now_ms))
+    } else {
+        format!("{} ago", format_duration_ms(now_ms - deadline_ms))
+    }
+}
+
+/// A local-time readout using the workspace's one locale-aware time path.
+pub fn format_wall_clock(at_ms: i64) -> String {
+    let nanos = i128::from(at_ms).saturating_mul(1_000_000);
+    match time::OffsetDateTime::from_unix_timestamp_nanos(nanos) {
+        Ok(timestamp) => time_format::format_time(timestamp),
+        Err(_) => format!("{at_ms} ms"),
+    }
+}
+
 pub fn sats_to_btc(sats: u64) -> f64 {
     sats as f64 / SATS_PER_BTC as f64
 }
@@ -608,6 +690,14 @@ mod tests {
             format_signed_percent(-0.0234, 2),
             ("-2.34%".to_string(), MarketDirection::Down)
         );
+    }
+
+    #[test]
+    fn shared_deadline_formats_stay_compact() {
+        assert_eq!(format_duration_ms(42_000), "42s");
+        assert_eq!(format_duration_ms(3 * 60_000 + 5_000), "3m 05s");
+        assert_eq!(format_countdown(10_000, 5_000), "in 5s");
+        assert_eq!(format_countdown(5_000, 10_000), "5s ago");
     }
 
     #[test]

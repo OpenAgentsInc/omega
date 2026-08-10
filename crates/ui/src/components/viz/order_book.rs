@@ -9,6 +9,8 @@
 //! updates throttle per the rendering laws: the demo advances the book on a
 //! bounded tick cadence rather than every frame, and the ladder is capped at
 //! twenty levels per side so it only ever lays out what is visible.
+//! Live adapters use [`HighFrequencyBatch`](crate::HighFrequencyBatch) to
+//! coalesce feed snapshots and notify at most once per animation frame.
 
 use std::time::Duration;
 

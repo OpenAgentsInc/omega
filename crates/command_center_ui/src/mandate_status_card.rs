@@ -1,14 +1,12 @@
 use std::collections::BTreeSet;
 
 use component::{Component, ComponentScope, example_group_with_title, single_example};
-use gpui::{AnyElement, App, FontWeight, SharedString, Window, relative};
+use gpui::{AnyElement, App, FontWeight, SharedString, Window};
 use trading_mandate::{AssetId, MandateSnapshot, ReviewCadence, TradingMandate, TradingNetwork};
 use ui::prelude::*;
+use ui::{Gauge, HeadroomMeter};
 
 use crate::format::{format_countdown, format_percent_bps, format_sats, format_usd};
-
-const WARN_FRACTION: f32 = 0.7;
-const CRITICAL_FRACTION: f32 = 0.9;
 
 /// Current usage against each mandate limit, gathered by the caller from
 /// the ledger and venue state.
@@ -24,50 +22,6 @@ pub struct MandateUsage {
     pub orders_this_hour: u32,
     /// Distance to liquidation in basis points; `None` while flat.
     pub liquidation_distance_bps: Option<u32>,
-}
-
-/// The threshold zone a meter's fill sits in.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MeterZone {
-    Safe,
-    Warn,
-    Critical,
-}
-
-impl MeterZone {
-    pub fn from_fraction(fraction: f32) -> Self {
-        if fraction >= CRITICAL_FRACTION {
-            Self::Critical
-        } else if fraction >= WARN_FRACTION {
-            Self::Warn
-        } else {
-            Self::Safe
-        }
-    }
-
-    pub fn color(self) -> Color {
-        match self {
-            Self::Safe => Color::Success,
-            Self::Warn => Color::Warning,
-            Self::Critical => Color::Error,
-        }
-    }
-}
-
-/// One per-limit headroom meter: how much of the limit is consumed.
-#[derive(Clone, Debug)]
-pub struct HeadroomMeter {
-    pub label: SharedString,
-    pub used_display: SharedString,
-    pub limit_display: SharedString,
-    /// Fraction of the limit consumed, unclamped so tests can see overshoot.
-    pub fraction: f32,
-}
-
-impl HeadroomMeter {
-    pub fn zone(&self) -> MeterZone {
-        MeterZone::from_fraction(self.fraction)
-    }
 }
 
 fn fraction(used: u64, limit: u64) -> f32 {
@@ -206,54 +160,6 @@ impl MandateStatusCard {
     }
 }
 
-fn meter_row(meter: &HeadroomMeter, cx: &App) -> AnyElement {
-    let zone = meter.zone();
-    let fill = meter.fraction.clamp(0.0, 1.0);
-    v_flex()
-        .w_full()
-        .gap_0p5()
-        .child(
-            h_flex()
-                .w_full()
-                .justify_between()
-                .gap_2()
-                .child(Label::new(meter.label.clone()).size(LabelSize::XSmall))
-                .child(
-                    Label::new(format!("{} / {}", meter.used_display, meter.limit_display))
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                ),
-        )
-        .child(
-            div()
-                .relative()
-                .w_full()
-                .h_1p5()
-                .rounded_full()
-                .bg(cx.theme().colors().element_background)
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .h_full()
-                        .rounded_full()
-                        .w(relative(fill))
-                        .bg(zone.color().color(cx)),
-                )
-                .children([WARN_FRACTION, CRITICAL_FRACTION].map(|threshold| {
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(relative(threshold))
-                        .h_full()
-                        .w(px(1.))
-                        .bg(cx.theme().colors().border)
-                })),
-        )
-        .into_any_element()
-}
-
 impl RenderOnce for MandateStatusCard {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let expired = self.expires_at_ms <= self.now_ms;
@@ -331,12 +237,11 @@ impl RenderOnce for MandateStatusCard {
                     ),
             )
             .child(
-                v_flex()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    .children(self.meters.iter().map(|meter| meter_row(meter, cx))),
+                v_flex().w_full().px_3().py_2().gap_2().children(
+                    self.meters
+                        .into_iter()
+                        .map(|meter| Gauge::new(meter).width(494.0)),
+                ),
             )
     }
 }
@@ -433,6 +338,7 @@ impl Component for MandateStatusCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ui::MeterZone;
 
     #[test]
     fn meter_zones_split_at_the_thresholds() {

@@ -4,100 +4,17 @@
 //! semantics all come from the shared financial kit in `crates/ui`
 //! (`ui::MarketTokens`, `ui::MarketDirection`, `ui::format_sats`, …) so every
 //! market surface agrees on one formatting and color path. The helpers here
-//! are the thin command-center-specific layer on top: signed money wrappers,
-//! the prediction/probability/basis-point/duration formatters the kit does
-//! not carry, and the `App`-resolved direction colors that turn a signed
-//! quantity into one of the kit's tokens.
+//! are re-exports of that one path. This module only retains the `App`-resolved
+//! direction mapping from prediction domain types into the kit's tokens.
 
-use chrono::{TimeZone as _, Utc};
 use gpui::App;
-use ui::{
-    Color, MarketDirection, MarketTokens, format_btc as kit_format_btc, format_grouped_u64,
-    format_sats as kit_format_sats,
+use ui::{Color, MarketDirection, MarketTokens};
+
+pub use ui::{
+    format_countdown, format_duration_ms, format_percent_bps, format_probability_micros,
+    format_sats_change as format_signed_sats, format_signed_btc as format_btc,
+    format_signed_sats_amount as format_sats, format_usd, format_wall_clock,
 };
-
-/// Unsigned sats with a leading `-` when negative: `"1,234,567 sats"`.
-pub fn format_sats(sats: i64) -> String {
-    let sign = if sats < 0 { "-" } else { "" };
-    format!("{sign}{}", kit_format_sats(sats.unsigned_abs()))
-}
-
-/// Sats that always show their direction: `"+42,000 sats"`, `"-1,000 sats"`,
-/// `"0 sats"`.
-pub fn format_signed_sats(sats: i64) -> String {
-    let sign = match sats {
-        value if value > 0 => "+",
-        value if value < 0 => "-",
-        _ => "",
-    };
-    format!("{sign}{}", kit_format_sats(sats.unsigned_abs()))
-}
-
-/// BTC with a leading `-` when negative; eight decimals via the kit.
-pub fn format_btc(sats: i64) -> String {
-    let sign = if sats < 0 { "-" } else { "" };
-    format!("{sign}{}", kit_format_btc(sats.unsigned_abs()))
-}
-
-/// Whole-dollar USD with grouped thousands: `"$1,234"`.
-pub fn format_usd(usd: u64) -> String {
-    format!("${}", format_grouped_u64(usd))
-}
-
-/// Formats a micro-probability (`prediction_events::PROBABILITY_SCALE`) as a
-/// percentage.
-pub fn format_probability_micros(micros: u32) -> String {
-    let tenths = u64::from(micros) / 1_000;
-    if tenths % 10 == 0 {
-        format!("{}%", tenths / 10)
-    } else {
-        format!("{}.{}%", tenths / 10, tenths % 10)
-    }
-}
-
-pub fn format_percent_bps(bps: u32) -> String {
-    if bps.is_multiple_of(100) {
-        format!("{}%", bps / 100)
-    } else {
-        format!("{}.{:02}%", bps / 100, bps % 100)
-    }
-}
-
-pub fn format_duration_ms(milliseconds: i64) -> String {
-    let total_seconds = milliseconds.max(0) / 1_000;
-    let (days, hours, minutes, seconds) = (
-        total_seconds / 86_400,
-        (total_seconds % 86_400) / 3_600,
-        (total_seconds % 3_600) / 60,
-        total_seconds % 60,
-    );
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m {seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
-/// A deadline relative to now: "in 2h 14m" before it, "3m 05s ago" after it.
-pub fn format_countdown(deadline_ms: i64, now_ms: i64) -> String {
-    if deadline_ms >= now_ms {
-        format!("in {}", format_duration_ms(deadline_ms - now_ms))
-    } else {
-        format!("{} ago", format_duration_ms(now_ms - deadline_ms))
-    }
-}
-
-/// A UTC wall-clock timestamp for feed rows.
-pub fn format_wall_clock(at_ms: i64) -> String {
-    match Utc.timestamp_millis_opt(at_ms).single() {
-        Some(time) => time.format("%H:%M:%S").to_string(),
-        None => format!("{at_ms} ms"),
-    }
-}
 
 /// The shared kit's colorblind-safe token for a signed quantity's direction:
 /// blue up for gains, orange down for losses, muted when flat.
