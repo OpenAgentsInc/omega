@@ -31576,9 +31576,15 @@ mod tests {
         ));
         for required in [
             "omega.nautilus.cost_floor.v1",
+            "omega.nautilus.cost_floor_report.v1",
             "signed_adverse_slippage_micros_usd",
             "stable cost floor requires at least five completed samples",
+            "stable cost floor requires five unique completed samples",
             "admission_floor_bps",
+            "raw_evidence_sha256",
+            "self.cells.len() != 6",
+            "quote_offset_bps < cost_floor.admission_floor_bps",
+            "cost_evidence_sha256: cost_floor.raw_evidence_sha256",
             "execute-testnet-only",
             "reduce_only: true",
             "open_orders=0",
@@ -31645,6 +31651,7 @@ mod tests {
             "post_dispatch_venue_rejected",
             "post_dispatch_cancel_rejected",
             "def _emit_post_dispatch_unknown(",
+            "self.parameters.get(\"cost_evidence_sha256\") != cost_evidence_sha256",
         ] {
             assert!(
                 bridge.contains(required),

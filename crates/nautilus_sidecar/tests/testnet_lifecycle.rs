@@ -128,6 +128,13 @@ fn command_channel_places_cancels_and_controls_an_engine_strategy() {
                     position_headroom_usd: 100,
                     order_budget: 2,
                     mandate_revision: 1,
+                    cost_path: "maker_taker".into(),
+                    cost_clip_usd: 65,
+                    cost_sample_count: 5,
+                    measured_round_trip_cost_micros_bps: 6_000_000,
+                    cost_margin_bps: 3,
+                    admission_floor_bps: 9,
+                    cost_evidence_sha256: "a".repeat(64),
                 },
             },
         })
@@ -144,6 +151,7 @@ fn command_channel_places_cancels_and_controls_an_engine_strategy() {
             command_id: "testnet-start-287".into(),
             command: NautilusCommand::StartStrategy {
                 strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
+                cost_evidence_sha256: "a".repeat(64),
             },
         })
         .expect("start strategy");

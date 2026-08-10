@@ -252,7 +252,11 @@ class BoundedQuoteStrategy(Strategy):
             self.cancel_order(self.active_client_order_id, client_id=HYPERLIQUID_CLIENT_ID)
         self._publish_state("halted")
 
-    def prepare_explicit_start(self) -> str | None:
+    def prepare_explicit_start(self, cost_evidence_sha256: str) -> str | None:
+        if self.parameters is None:
+            return "invalid_parameters"
+        if self.parameters.get("cost_evidence_sha256") != cost_evidence_sha256:
+            return "invalid_parameters"
         if self.halted_reason is not None:
             return "strategy_halted"
         if self.budget_wait_until_ns is None:
@@ -469,7 +473,9 @@ class CommandController(Controller):
         elif command_type == "cancel_order":
             execution_strategy.cancel_order_by_id(command)
         elif command_type == "start_strategy":
-            start_refusal = bounded_quote_strategy.prepare_explicit_start()
+            start_refusal = bounded_quote_strategy.prepare_explicit_start(
+                command["cost_evidence_sha256"]
+            )
             if start_refusal is not None:
                 emit(command, "refused", reason_code=start_refusal)
                 return
@@ -499,7 +505,7 @@ def validate_command(command: dict[str, Any]) -> str | None:
             "reduce_only",
         },
         "cancel_order": {"client_order_id"},
-        "start_strategy": {"strategy_id"},
+        "start_strategy": {"strategy_id", "cost_evidence_sha256"},
         "stop_strategy": {"strategy_id"},
         "set_strategy_parameters": {"strategy_id", "parameters"},
     }
@@ -517,6 +523,14 @@ def validate_command(command: dict[str, Any]) -> str | None:
     if command_type in {"start_strategy", "stop_strategy", "set_strategy_parameters"}:
         if command.get("strategy_id") != BOUNDED_QUOTE_STRATEGY_ID:
             return "unknown_strategy"
+    if command_type == "start_strategy":
+        evidence = command.get("cost_evidence_sha256")
+        if (
+            not isinstance(evidence, str)
+            or len(evidence) != 64
+            or any(character not in "0123456789abcdef" for character in evidence)
+        ):
+            return "invalid_parameters"
     if command_type == "place_order":
         if command.get("side") not in {"buy", "sell"}:
             return "invalid_order"
@@ -545,8 +559,22 @@ def validate_command(command: dict[str, Any]) -> str | None:
             "position_headroom_usd",
             "order_budget",
             "mandate_revision",
+            "cost_path",
+            "cost_clip_usd",
+            "cost_sample_count",
+            "measured_round_trip_cost_micros_bps",
+            "cost_margin_bps",
+            "admission_floor_bps",
+            "cost_evidence_sha256",
         }:
             return "invalid_parameters"
+        measured_ceiling_bps = (
+            max(parameters["measured_round_trip_cost_micros_bps"], 0) + 999_999
+        ) // 1_000_000 if isinstance(
+            parameters["measured_round_trip_cost_micros_bps"], int
+        ) and not isinstance(
+            parameters["measured_round_trip_cost_micros_bps"], bool
+        ) else None
         if (
             not isinstance(parameters["min_reprice_interval_ms"], int)
             or isinstance(parameters["min_reprice_interval_ms"], bool)
@@ -561,6 +589,26 @@ def validate_command(command: dict[str, Any]) -> str | None:
             or not 1 <= parameters["order_budget"] <= 100
             or not isinstance(parameters["mandate_revision"], int)
             or parameters["mandate_revision"] <= 0
+            or parameters["cost_path"] != "maker_taker"
+            or parameters["cost_clip_usd"] != 65
+            or not isinstance(parameters["cost_sample_count"], int)
+            or isinstance(parameters["cost_sample_count"], bool)
+            or parameters["cost_sample_count"] < 5
+            or measured_ceiling_bps is None
+            or not isinstance(parameters["cost_margin_bps"], int)
+            or isinstance(parameters["cost_margin_bps"], bool)
+            or parameters["cost_margin_bps"] <= 0
+            or not isinstance(parameters["admission_floor_bps"], int)
+            or isinstance(parameters["admission_floor_bps"], bool)
+            or parameters["admission_floor_bps"]
+            != measured_ceiling_bps + parameters["cost_margin_bps"]
+            or parameters["quote_offset_bps"] < parameters["admission_floor_bps"]
+            or not isinstance(parameters["cost_evidence_sha256"], str)
+            or len(parameters["cost_evidence_sha256"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in parameters["cost_evidence_sha256"]
+            )
         ):
             return "invalid_parameters"
     return None

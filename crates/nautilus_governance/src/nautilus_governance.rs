@@ -1,5 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
+    fs,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -34,6 +36,7 @@ use review_accounting::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use trading_ledger::{
     AssetId, LedgerAccount, LedgerEntryDraft, LedgerEntryKind, LedgerPosting, LedgerQuery,
     LedgerStore, ReconciliationOutcome,
@@ -61,7 +64,10 @@ const BTC_SCALE: u32 = 8;
 const GOVERNANCE_STATE_CAPACITY: usize = 2_048;
 const ZERO_LEDGER_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 pub const COST_FLOOR_SCHEMA: &str = "omega.nautilus.cost_floor.v1";
+pub const COST_FLOOR_REPORT_SCHEMA: &str = "omega.nautilus.cost_floor_report.v1";
 pub const BASIS_POINT_MICROS: i64 = 1_000_000;
+const COST_FLOOR_REPORT_ENV: &str = "OMEGA_NAUTILUS_COST_FLOOR_REPORT";
+const COST_FLOOR_CLIPS_USD: [u64; 3] = [65, 325, 650];
 
 pub const MANIFEST: PluginManifest = PluginManifest {
     id: "nautilus_governance",
@@ -104,6 +110,7 @@ pub struct GovernanceRuntime {
     state: Arc<Mutex<GovernanceState>>,
     command_counter: Arc<AtomicU64>,
     soak: Option<Arc<NautilusSoakStore>>,
+    cost_floor_report: Option<Arc<CostFloorReport>>,
 }
 
 impl GovernanceRuntime {
@@ -117,6 +124,7 @@ impl GovernanceRuntime {
             state: Arc::new(Mutex::new(GovernanceState::default())),
             command_counter: Arc::new(AtomicU64::new(1)),
             soak: NautilusSoakStore::open_configured()?.map(Arc::new),
+            cost_floor_report: CostFloorReport::open_configured()?.map(Arc::new),
         })
     }
 
@@ -131,7 +139,18 @@ impl GovernanceRuntime {
             state: Arc::new(Mutex::new(GovernanceState::default())),
             command_counter: Arc::new(AtomicU64::new(1)),
             soak: None,
+            cost_floor_report: None,
         })
+    }
+
+    #[cfg(test)]
+    fn in_memory_with_cost_floor(
+        capabilities: VenueCapabilityStore,
+        report: CostFloorReport,
+    ) -> Result<Self> {
+        let mut runtime = Self::in_memory(capabilities)?;
+        runtime.cost_floor_report = Some(Arc::new(report));
+        Ok(runtime)
     }
 
     fn ingest(&self, events: &[StreamEvent]) -> Result<()> {
@@ -733,6 +752,13 @@ impl GovernanceRuntime {
         min_reprice_interval_ms: u64,
         quote_offset_bps: u32,
     ) -> Result<StrategyParameters> {
+        let cost_floor = self.cost_floor_admission()?;
+        if quote_offset_bps < cost_floor.admission_floor_bps {
+            bail!(
+                "strategy edge {quote_offset_bps} bps is below the measured {} bps admission floor",
+                cost_floor.admission_floor_bps
+            );
+        }
         let snapshot = self.mandate.snapshot()?;
         if snapshot.revision != mandate_revision {
             bail!("trading mandate changed before strategy parameters were sent");
@@ -757,7 +783,21 @@ impl GovernanceRuntime {
             position_headroom_usd,
             order_budget,
             mandate_revision,
+            cost_path: "maker_taker".into(),
+            cost_clip_usd: cost_floor.requested_notional_usd,
+            cost_sample_count: u32::try_from(cost_floor.sample_count)?,
+            measured_round_trip_cost_micros_bps: cost_floor.median_cost_micros_bps,
+            cost_margin_bps: cost_floor.margin_bps,
+            admission_floor_bps: cost_floor.admission_floor_bps,
+            cost_evidence_sha256: cost_floor.raw_evidence_sha256,
         })
+    }
+
+    fn cost_floor_admission(&self) -> Result<CostFloorAdmission> {
+        self.cost_floor_report
+            .as_deref()
+            .context("Nautilus strategy admission has no configured measured cost report")?
+            .admission(CostPath::MakerTaker, 65)
     }
 
     fn record_receipt(
@@ -929,6 +969,43 @@ impl CostLegObservation {
             reference_notional_micros_usd: u64::try_from(reference_notional_micros_usd)?,
         })
     }
+
+    fn validate(&self) -> Result<()> {
+        if self.quote_generation == 0
+            || self.quote_sequence == 0
+            || self.fill_generation == 0
+            || self.fill_sequence == 0
+            || self.client_order_id.trim().is_empty()
+        {
+            bail!("cost leg has incomplete typed event evidence");
+        }
+        let quantity_units = i128::from(decimal_to_units(&self.quantity, 8)?);
+        let mid_units = i128::from(decimal_to_units(&self.pre_trade_mid, 8)?);
+        let fill_units = i128::from(decimal_to_units(&self.fill_price, 8)?);
+        decimal_to_units(&self.fee_usd, USDC_SCALE)?;
+        if quantity_units <= 0 || mid_units <= 0 || fill_units <= 0 {
+            bail!("cost leg price or quantity is outside the measured domain");
+        }
+        let signed_price_delta = match self.side {
+            OrderSide::Buy => fill_units.checked_sub(mid_units),
+            OrderSide::Sell => mid_units.checked_sub(fill_units),
+        }
+        .context("cost leg slippage delta overflowed")?;
+        let signed_slippage = signed_price_delta
+            .checked_mul(quantity_units)
+            .context("cost leg slippage overflowed")?
+            / 10_i128.pow(10);
+        let reference = mid_units
+            .checked_mul(quantity_units)
+            .context("cost leg reference overflowed")?
+            / 10_i128.pow(10);
+        if i64::try_from(signed_slippage)? != self.signed_adverse_slippage_micros_usd
+            || u64::try_from(reference)? != self.reference_notional_micros_usd
+        {
+            bail!("cost leg derived slippage or reference notional does not recompute");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1015,6 +1092,9 @@ pub struct CostFloorSummary {
 impl CostFloorSummary {
     pub fn stable(samples: &[CostFloorSample], margin_bps: u32) -> Result<Self> {
         let first = samples.first().context("cost floor has no samples")?;
+        if margin_bps == 0 {
+            bail!("cost floor requires an explicit positive admission margin");
+        }
         if samples.len() < 5 {
             bail!("stable cost floor requires at least five completed samples");
         }
@@ -1025,12 +1105,44 @@ impl CostFloorSummary {
         }) {
             bail!("cost floor samples do not describe one testnet configuration");
         }
+        let mut evidence_keys = HashSet::new();
+        for sample in samples {
+            sample.entry.validate()?;
+            sample.exit.validate()?;
+            let recomputed = CostFloorSample::from_legs(
+                sample.requested_notional_usd,
+                sample.entry.clone(),
+                sample.exit.clone(),
+            )?;
+            if sample.schema != COST_FLOOR_SCHEMA || *sample != recomputed {
+                bail!("cost floor sample has incomplete typed evidence");
+            }
+            let key = (
+                sample.entry.fill_generation,
+                sample.entry.fill_sequence,
+                sample.entry.client_order_id.as_str(),
+                sample.exit.fill_generation,
+                sample.exit.fill_sequence,
+                sample.exit.client_order_id.as_str(),
+            );
+            if !evidence_keys.insert(key) {
+                bail!("stable cost floor requires five unique completed samples");
+            }
+        }
         let mut costs = samples
             .iter()
             .map(|sample| sample.round_trip_cost_micros_bps)
             .collect::<Vec<_>>();
         costs.sort_unstable();
-        let median_cost_micros_bps = costs[costs.len() / 2];
+        let middle = costs.len() / 2;
+        let median_cost_micros_bps = if costs.len().is_multiple_of(2) {
+            costs[middle - 1]
+                .checked_add(costs[middle])
+                .context("cost floor median overflowed")?
+                / 2
+        } else {
+            costs[middle]
+        };
         let measured_ceiling_bps = median_cost_micros_bps
             .max(0)
             .checked_add(BASIS_POINT_MICROS - 1)
@@ -1050,6 +1162,159 @@ impl CostFloorSummary {
             admission_floor_bps,
         })
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostFloorCell {
+    pub path: CostPath,
+    pub requested_notional_usd: u64,
+    pub samples: Vec<CostFloorSample>,
+    pub summary: CostFloorSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostFloorReport {
+    pub schema: String,
+    pub network: TradingNetwork,
+    pub margin_bps: u32,
+    pub raw_evidence_sha256: String,
+    pub cells: Vec<CostFloorCell>,
+}
+
+impl CostFloorReport {
+    pub fn from_samples(samples: &[CostFloorSample], margin_bps: u32) -> Result<Self> {
+        let mut global_evidence = HashSet::new();
+        for sample in samples {
+            let key = (
+                sample.entry.fill_generation,
+                sample.entry.fill_sequence,
+                sample.entry.client_order_id.as_str(),
+                sample.exit.fill_generation,
+                sample.exit.fill_sequence,
+                sample.exit.client_order_id.as_str(),
+            );
+            if !global_evidence.insert(key) {
+                bail!("cost floor report reuses raw fill evidence across cells");
+            }
+        }
+        let mut cells = Vec::with_capacity(6);
+        for path in [CostPath::TakerTaker, CostPath::MakerTaker] {
+            for requested_notional_usd in COST_FLOOR_CLIPS_USD {
+                let cell_samples = samples
+                    .iter()
+                    .filter(|sample| {
+                        sample.path == path
+                            && sample.requested_notional_usd == requested_notional_usd
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let summary =
+                    CostFloorSummary::stable(&cell_samples, margin_bps).with_context(|| {
+                        format!(
+                            "cost floor report cell {path:?}/{requested_notional_usd} is incomplete"
+                        )
+                    })?;
+                cells.push(CostFloorCell {
+                    path,
+                    requested_notional_usd,
+                    samples: cell_samples,
+                    summary,
+                });
+            }
+        }
+        let reported_sample_count = cells.iter().map(|cell| cell.samples.len()).sum::<usize>();
+        if reported_sample_count != samples.len() {
+            bail!("cost floor report contains an unsupported path or clip");
+        }
+        let raw_evidence_sha256 = cost_floor_evidence_sha256(margin_bps, &cells)?;
+        Ok(Self {
+            schema: COST_FLOOR_REPORT_SCHEMA.into(),
+            network: TradingNetwork::Testnet,
+            margin_bps,
+            raw_evidence_sha256,
+            cells,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != COST_FLOOR_REPORT_SCHEMA
+            || self.network != TradingNetwork::Testnet
+            || self.cells.len() != 6
+        {
+            bail!("cost floor report is not the exact six-cell testnet schema");
+        }
+        let recomputed = Self::from_samples(
+            &self
+                .cells
+                .iter()
+                .flat_map(|cell| cell.samples.iter().cloned())
+                .collect::<Vec<_>>(),
+            self.margin_bps,
+        )?;
+        if *self != recomputed {
+            bail!("cost floor report summaries or raw evidence binding do not recompute");
+        }
+        Ok(())
+    }
+
+    pub fn open_configured() -> Result<Option<Self>> {
+        let Some(path) = std::env::var_os(COST_FLOOR_REPORT_ENV) else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(path);
+        let report = serde_json::from_slice::<Self>(
+            &fs::read(&path)
+                .with_context(|| format!("read cost floor report {}", path.display()))?,
+        )
+        .with_context(|| format!("parse cost floor report {}", path.display()))?;
+        report.validate()?;
+        Ok(Some(report))
+    }
+
+    fn admission(&self, path: CostPath, requested_notional_usd: u64) -> Result<CostFloorAdmission> {
+        self.validate()?;
+        let cell = self
+            .cells
+            .iter()
+            .find(|cell| cell.path == path && cell.requested_notional_usd == requested_notional_usd)
+            .context("cost floor report has no matching admission cell")?;
+        Ok(CostFloorAdmission {
+            path,
+            requested_notional_usd,
+            sample_count: cell.summary.sample_count,
+            median_cost_micros_bps: cell.summary.median_cost_micros_bps,
+            margin_bps: cell.summary.margin_bps,
+            admission_floor_bps: cell.summary.admission_floor_bps,
+            raw_evidence_sha256: self.raw_evidence_sha256.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CostFloorAdmission {
+    path: CostPath,
+    requested_notional_usd: u64,
+    sample_count: usize,
+    median_cost_micros_bps: i64,
+    margin_bps: u32,
+    admission_floor_bps: u32,
+    raw_evidence_sha256: String,
+}
+
+fn cost_floor_evidence_sha256(margin_bps: u32, cells: &[CostFloorCell]) -> Result<String> {
+    let raw_cells = cells
+        .iter()
+        .map(|cell| (&cell.path, cell.requested_notional_usd, &cell.samples))
+        .collect::<Vec<_>>();
+    let material = serde_json::to_vec(&(
+        COST_FLOOR_REPORT_SCHEMA,
+        TradingNetwork::Testnet,
+        margin_bps,
+        raw_cells,
+    ))?;
+    Ok(format!("{:x}", Sha256::digest(material)))
 }
 
 pub struct NautilusGovernancePlugin;
@@ -1676,7 +1941,13 @@ impl AgentTool for StrategyTool {
             };
             let revision = self.runtime.authorize(VenueActionClass::StrategyExecution, 0, emergency).map_err(|error| ToolOutput::error(error.to_string()))?;
             let command = match input {
-                StrategyInput::Start { .. } => NautilusCommand::StartStrategy { strategy_id: STRATEGY_ID.into() },
+                StrategyInput::Start { .. } => {
+                    let cost_floor = self.runtime.cost_floor_admission().map_err(|error| ToolOutput::error(error.to_string()))?;
+                    NautilusCommand::StartStrategy {
+                        strategy_id: STRATEGY_ID.into(),
+                        cost_evidence_sha256: cost_floor.raw_evidence_sha256,
+                    }
+                },
                 StrategyInput::Stop => NautilusCommand::StopStrategy { strategy_id: STRATEGY_ID.into() },
                 StrategyInput::SetParameters { min_reprice_interval_ms, quote_offset_bps, .. } => {
                     let parameters = self.runtime.bounded_strategy_parameters(revision, min_reprice_interval_ms, quote_offset_bps).map_err(|error| ToolOutput::error(error.to_string()))?;
@@ -2176,6 +2447,66 @@ mod tests {
             }))
             .expect("valid fill state"),
         }
+    }
+
+    fn cost_sample(
+        index: u64,
+        path: CostPath,
+        requested_notional_usd: u64,
+    ) -> Result<CostFloorSample> {
+        let path_offset = match path {
+            CostPath::TakerTaker => 1_000,
+            CostPath::MakerTaker => 2_000,
+        };
+        let path_name = match path {
+            CostPath::TakerTaker => "TAKER",
+            CostPath::MakerTaker => "MAKER",
+        };
+        let base = index
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(requested_notional_usd))
+            .and_then(|value| value.checked_add(path_offset))
+            .context("cost sample sequence overflowed")?;
+        let (entry_side, entry_liquidity, entry_price, entry_fee, exit_side, exit_price) =
+            match path {
+                CostPath::MakerTaker => ("SELL", "MAKER", "100.1", "0.015", "BUY", "100.1"),
+                CostPath::TakerTaker => ("BUY", "TAKER", "100.1", "0.045", "SELL", "99.9"),
+            };
+        let entry = CostLegObservation::from_events(
+            &cost_quote(base + 1, "99", "101"),
+            &cost_fill(
+                base + 2,
+                &format!("O-COST-{path_name}-{requested_notional_usd}-{index}-ENTRY"),
+                entry_side,
+                entry_liquidity,
+                entry_price,
+                entry_fee,
+            ),
+        )?;
+        let exit = CostLegObservation::from_events(
+            &cost_quote(base + 3, "99", "101"),
+            &cost_fill(
+                base + 4,
+                &format!("O-COST-{path_name}-{requested_notional_usd}-{index}-EXIT"),
+                exit_side,
+                "TAKER",
+                exit_price,
+                "0.045",
+            ),
+        )?;
+        CostFloorSample::from_legs(requested_notional_usd, entry, exit)
+    }
+
+    fn complete_cost_floor_report() -> Result<CostFloorReport> {
+        let mut samples = Vec::new();
+        for path in [CostPath::TakerTaker, CostPath::MakerTaker] {
+            for requested_notional_usd in COST_FLOOR_CLIPS_USD {
+                for index in 1..=5 {
+                    samples.push(cost_sample(index, path, requested_notional_usd)?);
+                }
+            }
+        }
+        CostFloorReport::from_samples(&samples, 3)
     }
 
     fn next_testnet_quote(
@@ -2732,7 +3063,10 @@ mod tests {
         let sample = CostFloorSample::from_legs(100, entry, exit)?;
         assert_eq!(sample.path, CostPath::MakerTaker);
         assert_eq!(sample.round_trip_cost_micros_bps, 6 * BASIS_POINT_MICROS);
-        let summary = CostFloorSummary::stable(&vec![sample; 5], 3)?;
+        let samples = (1..=5)
+            .map(|index| cost_sample(index, CostPath::MakerTaker, 100))
+            .collect::<Result<Vec<_>>>()?;
+        let summary = CostFloorSummary::stable(&samples, 3)?;
         assert_eq!(summary.sample_count, 5);
         assert_eq!(summary.admission_floor_bps, 9);
         assert_eq!(summary.schema, COST_FLOOR_SCHEMA);
@@ -2751,9 +3085,72 @@ mod tests {
         )?;
         let sample = CostFloorSample::from_legs(100, entry, exit)?;
         assert!(CostFloorSummary::stable(&vec![sample.clone(); 4], 3).is_err());
-        let mut mixed = vec![sample; 5];
+        assert!(CostFloorSummary::stable(&vec![sample; 5], 3).is_err());
+        let mut mixed = (1..=5)
+            .map(|index| cost_sample(index, CostPath::TakerTaker, 100))
+            .collect::<Result<Vec<_>>>()?;
         mixed[4].requested_notional_usd = 10;
         assert!(CostFloorSummary::stable(&mixed, 3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cost_floor_report_requires_six_bound_cells_and_recomputes_raw_evidence() -> Result<()> {
+        let report = complete_cost_floor_report()?;
+        assert_eq!(report.schema, COST_FLOOR_REPORT_SCHEMA);
+        assert_eq!(report.cells.len(), 6);
+        assert!(report.cells.iter().all(|cell| cell.samples.len() == 5));
+        assert_eq!(report.raw_evidence_sha256.len(), 64);
+        report.validate()?;
+
+        let admission = report.admission(CostPath::MakerTaker, 65)?;
+        assert_eq!(admission.sample_count, 5);
+        assert_eq!(admission.margin_bps, 3);
+        assert!(admission.admission_floor_bps >= admission.margin_bps);
+
+        let mut tampered = report.clone();
+        tampered
+            .cells
+            .first_mut()
+            .context("six-cell report is empty")?
+            .summary
+            .admission_floor_bps += 1;
+        assert!(tampered.validate().is_err());
+
+        let complete_samples = report
+            .cells
+            .iter()
+            .flat_map(|cell| cell.samples.iter().cloned())
+            .collect::<Vec<_>>();
+        assert!(CostFloorReport::from_samples(&complete_samples, 0).is_err());
+        let mut incomplete_samples = complete_samples;
+        incomplete_samples.retain(|sample| {
+            sample.path != CostPath::MakerTaker || sample.requested_notional_usd != 650
+        });
+        assert!(CostFloorReport::from_samples(&incomplete_samples, 3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn strategy_admission_refuses_missing_or_below_floor_evidence() -> Result<()> {
+        let report = complete_cost_floor_report()?;
+        let admission = report.admission(CostPath::MakerTaker, 65)?;
+        let runtime =
+            GovernanceRuntime::in_memory_with_cost_floor(VenueCapabilityStore::default(), report)?;
+        let error = runtime
+            .bounded_strategy_parameters(1, 500, admission.admission_floor_bps.saturating_sub(1))
+            .expect_err("an edge below measured median plus margin must be refused");
+        assert!(error.to_string().contains("below the measured"));
+
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let error = runtime
+            .bounded_strategy_parameters(1, 500, 1_000)
+            .expect_err("strategy admission must require a configured measured report");
+        assert!(
+            error
+                .to_string()
+                .contains("no configured measured cost report")
+        );
         Ok(())
     }
 
@@ -3938,7 +4335,11 @@ mod tests {
         )?;
         supervisor.start()?;
 
-        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let report = CostFloorReport::open_configured()?
+            .context("set OMEGA_NAUTILUS_COST_FLOOR_REPORT to the validated six-cell report")?;
+        let admission = report.admission(CostPath::MakerTaker, 65)?;
+        let runtime =
+            GovernanceRuntime::in_memory_with_cost_floor(VenueCapabilityStore::default(), report)?;
         let account_deadline = std::time::Instant::now() + Duration::from_secs(30);
         while std::time::Instant::now() < account_deadline {
             let frame = supervisor.take_stream_frame()?;
@@ -3968,7 +4369,11 @@ mod tests {
         let proposal = runtime.mandate.propose(mandate)?;
         let approved =
             trading_mandate::MandateStore::apply_ui_approved(&runtime.mandate, proposal, now)?;
-        let parameters = runtime.bounded_strategy_parameters(approved.revision, 30_000, 0)?;
+        let parameters = runtime.bounded_strategy_parameters(
+            approved.revision,
+            30_000,
+            admission.admission_floor_bps,
+        )?;
         let parameter_receipt = supervisor.send_command(CommandRequest {
             command_id: "testnet-strategy-parameters-290".into(),
             command: NautilusCommand::SetStrategyParameters {
@@ -3989,6 +4394,7 @@ mod tests {
             command_id: "testnet-strategy-start-290".into(),
             command: NautilusCommand::StartStrategy {
                 strategy_id: STRATEGY_ID.into(),
+                cost_evidence_sha256: admission.raw_evidence_sha256,
             },
         })?;
         if !matches!(

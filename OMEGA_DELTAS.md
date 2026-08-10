@@ -10777,7 +10777,17 @@ keeps fees and signed adverse slippage separate, aggregates split fills by
 quantity-weighted price and commission, and refuses a stable summary until at
 least five completed round trips agree on network, path, and intended clip.
 The admission floor is the upward-rounded measured median plus an explicit
-margin; a fee schedule is not a substitute for the observation.
+margin; a fee schedule is not a substitute for the observation. One typed
+report contains exactly six cells: taker/taker and maker/taker at each intended
+`$65`, `$325`, and `$650` clip. Each cell carries at least five unique completed
+raw samples and its recomputed summary, while one SHA-256 binds the complete raw
+evidence matrix. Strategy admission loads and validates that report, selects the
+maker/taker `$65` cell used by the bounded quote strategy, and refuses an edge
+below its measured median plus margin. The typed strategy parameters carry the
+path, clip, sample count, median, margin, admission floor, and evidence digest;
+both Rust and Python boundaries recompute the floor and reject a fee-schedule or
+unbound substitute. Strategy start carries the same evidence digest and the
+engine refuses it unless it matches the parameters already applied.
 
 The credentialed measurement harness can represent testnet only. Every entry
 has one reduce-only exit and all fill events enter the shared ledger. Taker and

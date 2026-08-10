@@ -494,6 +494,13 @@ pub struct StrategyParameters {
     pub position_headroom_usd: u64,
     pub order_budget: u32,
     pub mandate_revision: u64,
+    pub cost_path: String,
+    pub cost_clip_usd: u64,
+    pub cost_sample_count: u32,
+    pub measured_round_trip_cost_micros_bps: i64,
+    pub cost_margin_bps: u32,
+    pub admission_floor_bps: u32,
+    pub cost_evidence_sha256: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -521,6 +528,7 @@ pub enum NautilusCommand {
     },
     StartStrategy {
         strategy_id: String,
+        cost_evidence_sha256: String,
     },
     StopStrategy {
         strategy_id: String,
@@ -559,21 +567,55 @@ impl NautilusCommand {
             Self::CancelOrder { client_order_id } => {
                 validate_identifier("client order ID", client_order_id)?;
             }
-            Self::StartStrategy { strategy_id }
-            | Self::StopStrategy { strategy_id }
+            Self::StartStrategy {
+                strategy_id,
+                cost_evidence_sha256,
+            } => {
+                validate_identifier("strategy ID", strategy_id)?;
+                if cost_evidence_sha256.len() != 64
+                    || !cost_evidence_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    bail!("strategy start has no measured cost evidence binding");
+                }
+            }
+            Self::StopStrategy { strategy_id }
             | Self::SetStrategyParameters { strategy_id, .. } => {
                 validate_identifier("strategy ID", strategy_id)?;
             }
         }
-        if let Self::SetStrategyParameters { parameters, .. } = self
-            && (!(100..=60_000).contains(&parameters.min_reprice_interval_ms)
+        if let Self::SetStrategyParameters { parameters, .. } = self {
+            let measured_ceiling_bps = parameters
+                .measured_round_trip_cost_micros_bps
+                .max(0)
+                .checked_add(999_999)
+                .context("measured cost ceiling overflowed")?
+                / 1_000_000;
+            let expected_floor = u32::try_from(measured_ceiling_bps)?
+                .checked_add(parameters.cost_margin_bps)
+                .context("measured cost admission floor overflowed")?;
+            let digest_is_lower_hex = parameters.cost_evidence_sha256.len() == 64
+                && parameters
+                    .cost_evidence_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            if !(100..=60_000).contains(&parameters.min_reprice_interval_ms)
                 || parameters.quote_offset_bps > 1_000
                 || parameters.order_quantity != "0.001"
                 || parameters.position_headroom_usd == 0
                 || !(1..=100).contains(&parameters.order_budget)
-                || parameters.mandate_revision == 0)
-        {
-            bail!("bounded quote strategy parameters exceed the testnet envelope");
+                || parameters.mandate_revision == 0
+                || parameters.cost_path != "maker_taker"
+                || parameters.cost_clip_usd != 65
+                || parameters.cost_sample_count < 5
+                || parameters.cost_margin_bps == 0
+                || parameters.admission_floor_bps != expected_floor
+                || parameters.quote_offset_bps < parameters.admission_floor_bps
+                || !digest_is_lower_hex
+            {
+                bail!("bounded quote strategy parameters exceed the testnet envelope");
+            }
         }
         Ok(())
     }
@@ -1957,6 +1999,52 @@ mod tests {
         PrivateKey::new(format!("0x{}", "1".repeat(64)).into_bytes()).expect("test key")
     }
 
+    fn measured_strategy_parameters() -> StrategyParameters {
+        StrategyParameters {
+            min_reprice_interval_ms: 500,
+            quote_offset_bps: 100,
+            order_quantity: "0.001".into(),
+            position_headroom_usd: 100,
+            order_budget: 6,
+            mandate_revision: 1,
+            cost_path: "maker_taker".into(),
+            cost_clip_usd: 65,
+            cost_sample_count: 5,
+            measured_round_trip_cost_micros_bps: 6_000_000,
+            cost_margin_bps: 3,
+            admission_floor_bps: 9,
+            cost_evidence_sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn strategy_parameters_bind_measured_cost_floor_and_margin() {
+        let command = |parameters| NautilusCommand::SetStrategyParameters {
+            strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
+            parameters,
+        };
+        assert!(command(measured_strategy_parameters()).validate().is_ok());
+
+        let mut below_floor = measured_strategy_parameters();
+        below_floor.quote_offset_bps = 8;
+        assert!(command(below_floor).validate().is_err());
+
+        let mut fee_schedule_substitute = measured_strategy_parameters();
+        fee_schedule_substitute.measured_round_trip_cost_micros_bps = 0;
+        assert!(command(fee_schedule_substitute).validate().is_err());
+
+        let mut unbound = measured_strategy_parameters();
+        unbound.cost_evidence_sha256 = "0".repeat(63);
+        assert!(command(unbound).validate().is_err());
+
+        let start = |cost_evidence_sha256| NautilusCommand::StartStrategy {
+            strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
+            cost_evidence_sha256,
+        };
+        assert!(start("a".repeat(64)).validate().is_ok());
+        assert!(start("a".repeat(63)).validate().is_err());
+    }
+
     #[test]
     fn mainnet_is_hard_refused() {
         assert_eq!(
@@ -2317,7 +2405,7 @@ while IFS= read -r command; do
       ;;
     *'"command_id":"params-1"'*)
       printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters"}\n' "$generation"
-      printf 'OMEGA_NAUTILUS_EVENT {"type":"strategy_parameters_applied","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters","parameters":{"min_reprice_interval_ms":500,"quote_offset_bps":100,"order_quantity":"0.001","position_headroom_usd":100,"order_budget":6,"mandate_revision":1}}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"strategy_parameters_applied","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters","parameters":{"min_reprice_interval_ms":500,"quote_offset_bps":100,"order_quantity":"0.001","position_headroom_usd":100,"order_budget":6,"mandate_revision":1,"cost_path":"maker_taker","cost_clip_usd":65,"cost_sample_count":5,"measured_round_trip_cost_micros_bps":6000000,"cost_margin_bps":3,"admission_floor_bps":9,"cost_evidence_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\n' "$generation"
       ;;
     *'"command_id":"start-1"'*)
       printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"start-1","command_type":"start_strategy"}\n' "$generation"
@@ -2459,14 +2547,7 @@ done
                 command_id: "params-1".into(),
                 command: NautilusCommand::SetStrategyParameters {
                     strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
-                    parameters: StrategyParameters {
-                        min_reprice_interval_ms: 500,
-                        quote_offset_bps: 100,
-                        order_quantity: "0.001".into(),
-                        position_headroom_usd: 100,
-                        order_budget: 6,
-                        mandate_revision: 1,
-                    },
+                    parameters: measured_strategy_parameters(),
                 },
             })
             .expect("parameter command");
@@ -2480,6 +2561,7 @@ done
                 command_id: "start-1".into(),
                 command: NautilusCommand::StartStrategy {
                     strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
+                    cost_evidence_sha256: "a".repeat(64),
                 },
             })
             .expect("start command");
