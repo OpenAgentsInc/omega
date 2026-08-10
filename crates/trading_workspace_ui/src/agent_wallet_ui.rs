@@ -16,13 +16,29 @@ use nautilus_sidecar::{
     refresh_agent_wallet_approval,
 };
 use trading_ledger::{AssetId, LedgerEntryKind, LedgerQuery, LedgerStore};
-use trading_mandate::{MandateStore, TradingNetwork};
+use trading_mandate::{MandateStore, TradingMandate, TradingNetwork};
 use ui::{Divider, MarketTokens, prelude::*};
 use util::ResultExt as _;
 
 fn unix_ms() -> anyhow::Result<i64> {
     let milliseconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     i64::try_from(milliseconds).map_err(Into::into)
+}
+
+const NAUTILUS_TESTNET_STRATEGY_ID: &str = "OMEGA-BOUNDED-QUOTE-001";
+
+fn prepare_testnet_mandate_renewal(
+    candidate: &mut TradingMandate,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    candidate.allowed_strategies.clear();
+    candidate
+        .allowed_strategies
+        .insert(NAUTILUS_TESTNET_STRATEGY_ID.to_owned());
+    candidate.expires_at_ms = now_ms
+        .checked_add(3_600_000)
+        .ok_or_else(|| anyhow::anyhow!("mandate expiry overflowed"))?;
+    Ok(())
 }
 
 fn demo_summary() -> AgentWalletSummary {
@@ -372,9 +388,7 @@ impl NautilusAgentWalletSettingsPage {
                 .ok_or_else(|| {
                     anyhow::anyhow!("No Hyperliquid Testnet mandate exists to renew.")
                 })?;
-            candidate.expires_at_ms = now_ms
-                .checked_add(3_600_000)
-                .ok_or_else(|| anyhow::anyhow!("mandate expiry overflowed"))?;
+            prepare_testnet_mandate_renewal(&mut candidate, now_ms)?;
             store.propose(candidate)
         });
         let proposal = match proposal {
@@ -857,5 +871,36 @@ mod tests {
         assert!(decimal_usdc_micros("1.0000001").is_err());
         assert!(decimal_usdc_micros("-1").is_err());
         assert!(decimal_usdc_micros("NaN").is_err());
+    }
+
+    #[test]
+    fn mandate_renewal_targets_the_current_sealed_strategy() {
+        let mut mandate = TradingMandate {
+            venue: "hyperliquid".to_owned(),
+            network: TradingNetwork::Testnet,
+            collateral_asset: AssetId::usdc(),
+            objective: "testnet proof".to_owned(),
+            max_venue_balance: 2_000_000_000,
+            max_position_usd: 1_000,
+            max_leverage: 2,
+            daily_loss_stop: 100_000_000,
+            max_orders_per_hour: 6,
+            min_liquidation_buffer_bps: 1_000,
+            allowed_strategies: ["OMEGA-TRIVIAL-001".to_owned()].into_iter().collect(),
+            review_cadence: trading_mandate::ReviewCadence::Interval { seconds: 3_600 },
+            expires_at_ms: 1,
+        };
+
+        prepare_testnet_mandate_renewal(&mut mandate, 10).expect("renewal candidate");
+
+        assert_eq!(
+            mandate.allowed_strategies,
+            [NAUTILUS_TESTNET_STRATEGY_ID.to_owned()]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(mandate.expires_at_ms, 3_600_010);
+        assert_eq!(mandate.max_position_usd, 1_000);
+        assert_eq!(mandate.max_orders_per_hour, 6);
     }
 }

@@ -29381,6 +29381,9 @@ mod tests {
             });
         for required in [
             "Renew this bounded Hyperliquid Testnet mandate for one hour?",
+            "OMEGA-BOUNDED-QUOTE-001",
+            "prepare_testnet_mandate_renewal",
+            "mandate_renewal_targets_the_current_sealed_strategy",
             "Approve mandate",
             "answer.await != Ok(0)",
             "store.apply_ui_approved(proposal, approved_at_ms)",

@@ -10005,7 +10005,9 @@ bound to the displayed candidate and base revision. Restriction and revocation
 take effect immediately. The store exposes no unclassified mutation method,
 and production widening calls exist only in explicit settings UI surfaces. The
 Hyperliquid Testnet settings surface can renew an existing bounded mandate for
-one hour without changing any other limit; it cannot create mainnet authority.
+one hour while binding its allowed-strategy scope to the current sealed Nautilus
+strategy. The confirmation displays that scope and preserves every numeric risk
+limit; it cannot create mainnet authority.
 
 - **Enforced by:** `trading_mandate` unit tests and
   `trading_mandate_widening_is_settings_only_and_proposal_bound` in
