@@ -179,7 +179,10 @@ impl GovernanceRuntime {
     }
 
     fn observe_account_modes(&self, account: &Value) -> Result<()> {
-        let now = unix_ms()?;
+        self.observe_account_modes_at(account, unix_ms()?)
+    }
+
+    fn observe_account_modes_at(&self, account: &Value, observed_at_ms: i64) -> Result<()> {
         let raw_account = find_string(account, &["account_type", "account_mode"])
             .unwrap_or_else(|| "unknown".into());
         let account_mode = if matches!(
@@ -200,8 +203,8 @@ impl GovernanceRuntime {
         };
         self.capabilities.publish(VenueCapabilities {
             venue_id: VENUE.into(),
-            account_mode: ProbedVenueAssumption::new(account_mode, now),
-            margin_mode: ProbedVenueAssumption::new(margin_mode, now),
+            account_mode: ProbedVenueAssumption::new(account_mode, observed_at_ms),
+            margin_mode: ProbedVenueAssumption::new(margin_mode, observed_at_ms),
             actions: [
                 VenueActionClass::StrategyExecution,
                 VenueActionClass::OrderPlacement,
@@ -214,7 +217,7 @@ impl GovernanceRuntime {
                         action_class,
                         status: VenueActionStatus::Supported,
                     },
-                    now,
+                    observed_at_ms,
                 )
             })
             .collect(),
@@ -1484,6 +1487,29 @@ mod tests {
         let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
         runtime.observe_account_modes(&json!({"account_type":"ALIEN","margin_mode":"cross"}))?;
         assert!(runtime.state.lock().halted_reason.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_account_snapshot_refreshes_capability_evidence() -> Result<()> {
+        let capabilities = VenueCapabilityStore::default();
+        let runtime = GovernanceRuntime::in_memory(capabilities.clone())?;
+        let account = json!({"account_type":"MARGIN","margin_mode":"cross"});
+        runtime.observe_account_modes_at(&account, 1_000)?;
+        assert!(
+            capabilities
+                .report(VENUE, 31_001, CAPABILITY_MAX_AGE_MS)
+                .verification
+                .stale
+        );
+
+        runtime.observe_account_modes_at(&account, 30_000)?;
+        let report = capabilities.report(VENUE, 31_001, CAPABILITY_MAX_AGE_MS);
+        assert_eq!(
+            report.verification.status,
+            plugin_api::VenueCapabilityVerificationStatus::Verified
+        );
+        assert!(!report.verification.stale);
         Ok(())
     }
 

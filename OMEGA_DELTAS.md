@@ -10612,6 +10612,11 @@ reduce, and flatten retain their emergency prediction exemption.
 Every effect passes a current venue-capability probe and the testnet trading
 mandate before the command write. Unknown account or margin modes, stale
 capabilities, missing mandates, and reconciliation differences fail closed.
+The sidecar snapshots the live engine's current account state every ten seconds
+and emits it with a new typed stream sequence, even when no balance event has
+changed. If the engine has no account state, it emits no replacement evidence,
+so the thirty-second capability age guard still expires instead of blessing an
+absent startup observation.
 Transport failure after a single send is reported as unknown and is never
 retried blindly. Scheduled governance reviews must record a forecast even
 when the result is no change, and their measured tokens, tools, and wall time

@@ -70,7 +70,7 @@ fn hyperliquid_testnet_reaches_health_and_stops_cleanly() {
                 _ => {}
             }
         }
-        if quotes > 0 && trades > 0 && books > 0 && accounts > 0 && order_states > 0 {
+        if quotes > 0 && trades > 0 && books > 0 && accounts >= 3 && order_states > 0 {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -78,7 +78,10 @@ fn hyperliquid_testnet_reaches_health_and_stops_cleanly() {
     assert!(quotes > 0, "no BTC testnet quotes reached Omega");
     assert!(trades > 0, "no BTC testnet trades reached Omega");
     assert!(books > 0, "no BTC testnet book updates reached Omega");
-    assert!(accounts > 0, "no testnet account state reached Omega");
+    assert!(
+        accounts >= 3,
+        "testnet account state did not refresh after startup"
+    );
     assert!(order_states > 0, "no testnet order state reached Omega");
     eprintln!(
         "testnet stream evidence: quotes={quotes} trades={trades} books={books} accounts={accounts} order_states={order_states} account_fields={account_fields:?} balance_fields={balance_fields:?}"

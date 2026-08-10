@@ -21,6 +21,7 @@ STREAM_SCHEMA = "omega.nautilus.stream.v1"
 INSTRUMENT = InstrumentId.from_str("BTC-USD-PERP.HYPERLIQUID")
 CLIENT = ClientId.from_str("HYPERLIQUID")
 VENUE = Venue.from_str("HYPERLIQUID")
+ACCOUNT_SNAPSHOT_INTERVAL_NS = 10_000_000_000
 
 
 class StreamPublisher:
@@ -100,6 +101,7 @@ class OmegaStreamStrategy(Strategy):
         )
         self._publisher = publisher
         self._last_account_event_count = -1
+        self._last_account_snapshot_ns = 0
         self._last_order_signature = ""
         self._last_position_signature = ""
 
@@ -149,11 +151,19 @@ class OmegaStreamStrategy(Strategy):
 
     def _publish_state(self, _: Any) -> None:
         account = self.cache.account_for_venue(VENUE)
-        if account is not None and account.event_count != self._last_account_event_count:
+        now_ns = self.clock.timestamp_ns()
+        account_changed = (
+            account is not None and account.event_count != self._last_account_event_count
+        )
+        account_snapshot_due = (
+            now_ns - self._last_account_snapshot_ns >= ACCOUNT_SNAPSHOT_INTERVAL_NS
+        )
+        if account is not None and (account_changed or account_snapshot_due):
             last_event = account.last_event
             if last_event is not None:
                 self._publisher.publish("account", last_event.to_dict(), lossless=True)
                 self._last_account_event_count = account.event_count
+                self._last_account_snapshot_ns = now_ns
 
         orders = [order.to_dict() for order in self.cache.orders(venue=VENUE)]
         order_signature = json.dumps(orders, sort_keys=True, separators=(",", ":"))

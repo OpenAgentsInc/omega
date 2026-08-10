@@ -31105,6 +31105,7 @@ mod tests {
             "reconcile_asset",
             "pending_wakeup",
             "ReviewAccountingStore",
+            "CAPABILITY_MAX_AGE_MS: i64 = 30_000",
         ] {
             assert!(
                 governance.contains(required),
@@ -31122,6 +31123,18 @@ mod tests {
             !governance.contains("submit_order(") && !governance.contains("on_quote_tick"),
             "OMEGA-DELTA-0271: governance entered the venue hot loop"
         );
+        let stream = without_comments(&read_repository_file("sidecar/nautilus/stream_strategy.py"));
+        for required in [
+            "ACCOUNT_SNAPSHOT_INTERVAL_NS = 10_000_000_000",
+            "account_snapshot_due",
+            "account_changed or account_snapshot_due",
+            "publisher.publish(\"account\"",
+        ] {
+            assert!(
+                stream.contains(required),
+                "OMEGA-DELTA-0271: fresh capability evidence lost `{required}`"
+            );
+        }
         let defaults = read_repository_file("assets/settings/default.json");
         for profile_name in ["basic", "editor"] {
             let profile_settings = defaults
