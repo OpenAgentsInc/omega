@@ -220,7 +220,7 @@ fn fill_rect(
 
 /// Draws every candle and its volume bar, the last-price line, and the hover
 /// OHLC readout, all through the frame transforms.
-fn draw_candles(
+pub(crate) fn draw_candles(
     frame: &PlotFrame,
     window: &mut Window,
     cx: &mut App,

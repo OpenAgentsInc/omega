@@ -7,6 +7,10 @@
 //! a color with a dash pattern, glyph, or stroke shape, so scenes survive
 //! grayscale and color-vision deficiencies. See omega#247.
 
+mod analytics_indicators;
+mod analytics_stats;
+mod analytics_tearsheet;
+mod analytics_trades;
 mod badges;
 mod calibration;
 mod candles;
@@ -46,6 +50,10 @@ mod viz_swap;
 mod viz_zone;
 mod watchlist;
 
+pub use analytics_indicators::*;
+pub use analytics_stats::*;
+pub use analytics_tearsheet::*;
+pub use analytics_trades::*;
 pub use badges::*;
 pub use calibration::*;
 pub use candles::*;
@@ -476,6 +484,13 @@ mod tests {
                 .child(FundingCountdown::preview(window, cx))
                 .child(OracleAttestationReadout::preview(window, cx))
                 .child(VenueStatusBadge::preview(window, cx))
+                .child(IndicatorOverlayChart::preview(window, cx))
+                .child(OscillatorStack::preview(window, cx))
+                .child(BookImbalanceGauge::preview(window, cx))
+                .child(StatisticTileGrid::preview(window, cx))
+                .child(Tearsheet::preview(window, cx))
+                .child(FillsOnCandlesChart::preview(window, cx))
+                .child(TradeLogTable::preview(window, cx))
         }
     }
 
@@ -517,6 +532,13 @@ mod tests {
             "market.funding_countdown",
             "market.oracle_attestation",
             "market.venue_status",
+            "market.indicator_overlays",
+            "market.oscillator_stack",
+            "market.book_imbalance_gauge",
+            "market.statistic_tile_grid",
+            "market.tearsheet",
+            "market.fills_on_candles",
+            "market.trade_log_table",
         ] {
             assert!(
                 !rendered.occurrences(selector).is_empty(),
