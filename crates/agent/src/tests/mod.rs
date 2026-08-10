@@ -1970,6 +1970,62 @@ async fn test_profiles(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn local_only_thread_omits_tools(cx: &mut TestAppContext) {
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.add_tool(EchoTool);
+            thread.set_local_only(true, cx);
+            thread.send(ClientUserMessageId::new(), ["hello"], cx)
+        })
+        .expect("the local-only turn should start");
+    cx.run_until_parked();
+
+    let completion = fake_model
+        .pending_completions()
+        .pop()
+        .expect("the local model should receive one completion");
+    assert!(completion.tools.is_empty());
+    assert!(
+        completion
+            .messages
+            .iter()
+            .any(|message| message.role == Role::User)
+    );
+    fake_model.end_completion_stream(&completion);
+}
+
+#[gpui::test]
+async fn model_without_tool_support_omits_tools(cx: &mut TestAppContext) {
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+    fake_model.set_supports_tools(false);
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.add_tool(EchoTool);
+            thread.send(ClientUserMessageId::new(), ["hello"], cx)
+        })
+        .expect("the text-only turn should start");
+    cx.run_until_parked();
+
+    let completion = fake_model
+        .pending_completions()
+        .pop()
+        .expect("the text-only model should receive one completion");
+    assert!(completion.tools.is_empty());
+    assert!(
+        completion
+            .messages
+            .iter()
+            .any(|message| message.role == Role::User)
+    );
+    fake_model.end_completion_stream(&completion);
+}
+
+#[gpui::test]
 async fn test_mcp_tools(cx: &mut TestAppContext) {
     let ThreadTest {
         model,

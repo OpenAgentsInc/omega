@@ -12,21 +12,42 @@ use crate::{NativeAgent, NativeAgentConnection, ThreadStore, templates::Template
 pub struct NativeAgentServer {
     fs: Arc<dyn Fs>,
     thread_store: Entity<ThreadStore>,
+    agent_id: AgentId,
+    logo: ui::IconName,
 }
 
 impl NativeAgentServer {
     pub fn new(fs: Arc<dyn Fs>, thread_store: Entity<ThreadStore>) -> Self {
-        Self { fs, thread_store }
+        Self::with_identity(
+            fs,
+            thread_store,
+            crate::OMEGA_AGENT_ID.clone(),
+            ui::IconName::OmegaAgent,
+        )
+    }
+
+    pub fn with_identity(
+        fs: Arc<dyn Fs>,
+        thread_store: Entity<ThreadStore>,
+        agent_id: AgentId,
+        logo: ui::IconName,
+    ) -> Self {
+        Self {
+            fs,
+            thread_store,
+            agent_id,
+            logo,
+        }
     }
 }
 
 impl AgentServer for NativeAgentServer {
     fn agent_id(&self) -> AgentId {
-        crate::OMEGA_AGENT_ID.clone()
+        self.agent_id.clone()
     }
 
     fn logo(&self) -> ui::IconName {
-        ui::IconName::OmegaAgent
+        self.logo
     }
 
     fn connect(

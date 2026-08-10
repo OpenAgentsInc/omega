@@ -114,6 +114,7 @@ pub struct FakeLanguageModel {
         )>,
     >,
     forbid_requests: AtomicBool,
+    supports_tools: AtomicBool,
     supports_thinking: AtomicBool,
     supports_disabling_thinking: AtomicBool,
     supports_streaming_tools: AtomicBool,
@@ -132,6 +133,7 @@ impl Default for FakeLanguageModel {
             provider_name: LanguageModelProviderName::from("Fake".to_string()),
             current_completion_txs: Mutex::new(Vec::new()),
             forbid_requests: AtomicBool::new(false),
+            supports_tools: AtomicBool::new(true),
             supports_thinking: AtomicBool::new(false),
             supports_disabling_thinking: AtomicBool::new(true),
             supports_streaming_tools: AtomicBool::new(false),
@@ -169,6 +171,10 @@ impl FakeLanguageModel {
 
     pub fn set_supports_thinking(&self, supports: bool) {
         self.supports_thinking.store(supports, SeqCst);
+    }
+
+    pub fn set_supports_tools(&self, supports: bool) {
+        self.supports_tools.store(supports, SeqCst);
     }
 
     pub fn set_supports_disabling_thinking(&self, supports: bool) {
@@ -294,7 +300,7 @@ impl LanguageModel for FakeLanguageModel {
     }
 
     fn supports_tools(&self) -> bool {
-        false
+        self.supports_tools.load(SeqCst)
     }
 
     fn supports_tool_choice(&self, _choice: LanguageModelToolChoice) -> bool {

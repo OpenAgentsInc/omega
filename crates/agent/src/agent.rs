@@ -1748,7 +1748,9 @@ impl NativeAgent {
             session.thread.update(cx, |thread, cx| {
                 thread.ensure_model(default_model.as_ref(), cx);
 
-                if let Some(model) = summarization_model.clone() {
+                if !thread.is_local_only()
+                    && let Some(model) = summarization_model.clone()
+                {
                     if thread.summarization_model().is_none()
                         || matches!(event, language_model::Event::ThreadSummaryModelChanged)
                     {

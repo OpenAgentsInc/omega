@@ -401,15 +401,41 @@ impl From<anyhow::Error> for ThreadError {
                 }
                 PromptTooLarge { .. } => Self::PromptTooLarge,
                 PaymentRequired => Self::PaymentRequired,
+                NoApiKey { provider } if provider.0.as_ref() == "muse-glimmer" => Self::Other {
+                    message: "Muse Glimmer needs a local server token. Set MUSE_GLIMMER_API_KEY or configure credentials for the muse-glimmer provider in Settings."
+                        .into(),
+                    acp_error_code: None,
+                },
                 NoApiKey { provider } => Self::NoCredentials {
                     provider: provider.to_string().into(),
                 },
                 StreamEndedUnexpectedly { provider }
                 | ApiReadResponseError { provider, .. }
                 | DeserializeResponse { provider, .. }
+                | HttpSend { provider, .. }
+                    if provider.0.as_ref() == "muse-glimmer" =>
+                {
+                    Self::Other {
+                        message: "Could not reach Muse Glimmer at the configured local endpoint. Start the local OpenAI-compatible server and verify that its endpoint ends in /v1; Omega sends chat requests to /v1/chat/completions."
+                            .into(),
+                        acp_error_code: None,
+                    }
+                }
+                StreamEndedUnexpectedly { provider }
+                | ApiReadResponseError { provider, .. }
+                | DeserializeResponse { provider, .. }
                 | HttpSend { provider, .. } => Self::StreamError {
                     provider: provider.to_string().into(),
                 },
+                AuthenticationError { provider, .. }
+                    if provider.0.as_ref() == "muse-glimmer" =>
+                {
+                    Self::Other {
+                        message: "Muse Glimmer rejected the local server token. Verify MUSE_GLIMMER_API_KEY matches the token configured by the local server."
+                            .into(),
+                        acp_error_code: None,
+                    }
+                }
                 AuthenticationError { provider, .. } => Self::AuthenticationFailed {
                     provider: provider.to_string().into(),
                 },
@@ -419,6 +445,17 @@ impl From<anyhow::Error> for ThreadError {
                 },
                 UpstreamProviderError { .. } => Self::RequestFailed,
                 DataRetentionConsentRequired { .. } => Self::DataRetentionConsentRequired,
+                BadRequestFormat { provider, .. }
+                | HttpResponseError { provider, .. }
+                | ApiEndpointNotFound { provider }
+                    if provider.0.as_ref() == "muse-glimmer" =>
+                {
+                    Self::Other {
+                        message: "The Muse Glimmer endpoint is not OpenAI-compatible. Configure its base endpoint with /v1 so Omega can call /v1/chat/completions."
+                            .into(),
+                        acp_error_code: None,
+                    }
+                }
                 BadRequestFormat { provider, .. }
                 | HttpResponseError { provider, .. }
                 | ApiEndpointNotFound { provider } => Self::ApiError {
@@ -2849,24 +2886,29 @@ impl ConversationView {
         } else {
             // Fall back to dedicated mode/model selectors
             config_options_view = None;
-            model_selector = connection.model_selector(&session_id).map(|selector| {
-                cx.new(|cx| {
-                    ModelSelectorPopover::new(
-                        selector,
-                        PopoverMenuHandle::default(),
-                        self.focus_handle(cx),
-                        window,
-                        cx,
-                    )
-                })
-            });
-
-            mode_selector = connection
-                .session_modes(&session_id, cx)
-                .map(|session_modes| {
-                    let fs = self.project.read(cx).fs().clone();
-                    cx.new(|_cx| ModeSelector::new(session_modes, self.agent.clone(), fs))
+            if matches!(self.connection_key, Agent::MuseGlimmerLocal) {
+                model_selector = None;
+                mode_selector = None;
+            } else {
+                model_selector = connection.model_selector(&session_id).map(|selector| {
+                    cx.new(|cx| {
+                        ModelSelectorPopover::new(
+                            selector,
+                            PopoverMenuHandle::default(),
+                            self.focus_handle(cx),
+                            window,
+                            cx,
+                        )
+                    })
                 });
+
+                mode_selector = connection
+                    .session_modes(&session_id, cx)
+                    .map(|session_modes| {
+                        let fs = self.project.read(cx).fs().clone();
+                        cx.new(|_cx| ModeSelector::new(session_modes, self.agent.clone(), fs))
+                    });
+            }
         }
 
         let subscriptions = vec![
@@ -2905,7 +2947,9 @@ impl ConversationView {
         }
 
         let profile_selector: Option<Rc<agent::NativeAgentConnection>> =
-            connection.clone().downcast();
+            (!matches!(self.connection_key, Agent::MuseGlimmerLocal))
+                .then(|| connection.clone().downcast())
+                .flatten();
         let profile_selector = profile_selector
             .and_then(|native_connection| native_connection.thread(&session_id, cx))
             .map(|native_thread| {
@@ -2919,11 +2963,14 @@ impl ConversationView {
                 })
             });
 
-        let agent_display_name = self
-            .agent_server_store
-            .read(cx)
-            .agent_display_name(&agent_id.clone())
-            .unwrap_or_else(|| agent_id.0.clone());
+        let agent_display_name = if matches!(self.connection_key, Agent::MuseGlimmerLocal) {
+            self.connection_key.label()
+        } else {
+            self.agent_server_store
+                .read(cx)
+                .agent_display_name(&agent_id.clone())
+                .unwrap_or_else(|| agent_id.0.clone())
+        };
 
         let agent_icon = self.agent.logo();
         let agent_icon_from_external_svg = self
@@ -4485,6 +4532,7 @@ impl ConversationView {
     fn composer_executor_label(&self, cx: &App) -> SharedString {
         match self.agent_key() {
             Agent::NativeAgent => "Omega Agent".into(),
+            Agent::MuseGlimmerLocal => "Muse Glimmer (Local)".into(),
             Agent::Custom { id } => self
                 .agent_server_store
                 .read(cx)
@@ -4831,6 +4879,16 @@ impl ConversationView {
     ) -> crate::omega_composer_executor_menu::ComposerModelPicker {
         if matches!(self.agent_key(), Agent::NativeAgent) {
             crate::omega_composer_executor_menu::ComposerModelPicker::omega_agent()
+        } else if matches!(self.agent_key(), Agent::MuseGlimmerLocal) {
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: "Muse Glimmer (Local)".into(),
+                current_model: None,
+                models: Vec::new(),
+                traits: Vec::new(),
+                enabled: false,
+                empty_message: "This conversation is pinned to muse-glimmer/muse-glimmer.".into(),
+                on_select: Rc::new(|_, _, _| {}),
+            }
         } else {
             crate::omega_composer_executor_menu::ComposerModelPicker {
                 label: "Loading models…".into(),
@@ -6451,6 +6509,20 @@ pub(crate) mod tests {
             matches!(error, ThreadError::DataRetentionConsentRequired),
             "expected ThreadError::DataRetentionConsentRequired, got: {error:?}"
         );
+    }
+
+    #[test]
+    fn muse_connection_error_explains_how_to_restore_the_local_endpoint() {
+        let provider_error = LanguageModelCompletionError::HttpSend {
+            provider: "muse-glimmer".to_string().into(),
+            error: anyhow!("connection refused"),
+        };
+        let error = ThreadError::from(anyhow!(provider_error));
+        let ThreadError::Other { message, .. } = error else {
+            panic!("expected an actionable Muse error, got: {error:?}");
+        };
+        assert!(message.contains("Start the local OpenAI-compatible server"));
+        assert!(message.contains("/v1/chat/completions"));
     }
 
     #[test]

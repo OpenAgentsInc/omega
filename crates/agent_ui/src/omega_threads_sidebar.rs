@@ -212,7 +212,11 @@ pub fn rows_with_submitted_drafts<'a>(
 /// `OMEGA-DELTA-0021` exists to stop.
 #[must_use]
 pub fn recorded_executor(agent_id: &AgentId) -> Option<SelectableExecutor> {
-    if Agent::from(agent_id.clone()).is_native() {
+    let agent = Agent::from(agent_id.clone());
+    if matches!(agent, Agent::MuseGlimmerLocal) {
+        return None;
+    }
+    if agent.is_native() {
         return Some(SelectableExecutor::Omega);
     }
     SelectableExecutor::of(ExecutorClass::ExternalAcp, agent_id.as_ref())

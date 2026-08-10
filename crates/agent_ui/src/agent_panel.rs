@@ -172,6 +172,9 @@ const MIN_PANEL_WIDTH: Pixels = px(300.);
 const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
+const MUSE_GLIMMER_PROVIDER_ID: &str = "muse-glimmer";
+const MUSE_GLIMMER_MODEL_ID: &str = "muse-glimmer";
+const MUSE_GLIMMER_MODEL_OVERRIDE: &str = "muse-glimmer/muse-glimmer";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const OMEGA_SIDEBAR_WIDTH: f32 = 256.;
 const OMEGA_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
@@ -3855,6 +3858,7 @@ impl ComposerExecutorRow {
             ModeReadiness::SetupRequired { action, .. } => matches!(
                 action,
                 ModeSetupAction::PrepareOmegaAgent
+                    | ModeSetupAction::PrepareMuseGlimmerLocal
                     | ModeSetupAction::PrepareDirectAgent
                     | ModeSetupAction::RevealPreparedConversation
             ),
@@ -6485,6 +6489,7 @@ impl AgentPanel {
     fn selected_conversation_target(&self, cx: &App) -> ConversationTarget {
         match self.selected_agent(cx) {
             Agent::NativeAgent => ConversationTarget::OmegaAgent,
+            Agent::MuseGlimmerLocal => ConversationTarget::MuseGlimmerLocal,
             Agent::Custom { id } => DirectAgentId::new(id.as_ref())
                 .map(|agent_id| ConversationTarget::DirectAgent { agent_id })
                 .unwrap_or(ConversationTarget::OmegaAgent),
@@ -6643,6 +6648,7 @@ impl AgentPanel {
             .filter(
                 |conversation| match (&target, conversation.read(cx).agent_key()) {
                     (ConversationTarget::OmegaAgent, Agent::NativeAgent) => false,
+                    (ConversationTarget::MuseGlimmerLocal, Agent::MuseGlimmerLocal) => false,
                     (ConversationTarget::DirectAgent { agent_id }, Agent::Custom { id }) => {
                         agent_id.as_str() != id.as_ref()
                     }
@@ -6668,6 +6674,12 @@ impl AgentPanel {
                 self.showing_sarah_admission = false;
                 self.set_selected_agent_and_persist(Agent::NativeAgent, cx);
                 self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
+            }
+            ConversationTarget::MuseGlimmerLocal => {
+                self.showing_full_auto = false;
+                self.showing_sarah_admission = false;
+                self.set_selected_agent_and_persist(Agent::MuseGlimmerLocal, cx);
+                self.prepare_muse_glimmer_draft(AgentThreadSource::AgentPanel, window, cx);
             }
             ConversationTarget::DirectAgent { agent_id } => {
                 if self.project.read(cx).is_via_collab() {
@@ -6748,6 +6760,9 @@ impl AgentPanel {
             ConversationTarget::OmegaAgent => {
                 self.prepare_omega_draft(AgentThreadSource::AgentPanel, window, cx);
             }
+            ConversationTarget::MuseGlimmerLocal => {
+                self.prepare_muse_glimmer_draft(AgentThreadSource::AgentPanel, window, cx);
+            }
             ConversationTarget::DirectAgent { agent_id } => {
                 self.prepare_direct_draft(
                     AgentId::new(agent_id.as_str()),
@@ -6818,6 +6833,58 @@ impl AgentPanel {
             None,
             None,
             None,
+            source,
+            window,
+            cx,
+        );
+        let draft = thread.conversation_view;
+        self.observe_draft_editor(&draft, cx);
+        self.draft_thread = Some(draft.clone());
+        draft
+    }
+
+    fn prepare_muse_glimmer_draft(
+        &mut self,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ConversationView> {
+        if let Some(draft) = self.draft_thread.clone() {
+            let is_muse = matches!(draft.read(cx).agent_key(), Agent::MuseGlimmerLocal);
+            if is_muse && !self.draft_has_content(&draft, cx) {
+                return draft;
+            }
+
+            let draft_id = draft.read(cx).thread_id;
+            if self.draft_has_content(&draft, cx) {
+                self.retained_threads.insert(draft_id, draft);
+            } else {
+                if matches!(
+                    &self.base_view,
+                    BaseView::AgentThread { conversation_view }
+                        if conversation_view.entity_id() == draft.entity_id()
+                ) {
+                    self.base_view = BaseView::Uninitialized;
+                    self.refresh_base_view_subscriptions(window, cx);
+                }
+                ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                    store.delete(draft_id, cx);
+                });
+            }
+            self.draft_thread = None;
+            self._draft_editor_observation = None;
+        }
+
+        let thread = self.create_agent_thread_inner(
+            Agent::MuseGlimmerLocal,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(MUSE_GLIMMER_MODEL_OVERRIDE.to_string()),
             source,
             window,
             cx,
@@ -6995,6 +7062,73 @@ impl AgentPanel {
         )
     }
 
+    fn muse_glimmer_is_configured(cx: &App) -> bool {
+        let configured = language_models::AllLanguageModelSettings::get_global(cx)
+            .openai_compatible
+            .get(MUSE_GLIMMER_PROVIDER_ID)
+            .is_some_and(|settings| {
+                settings
+                    .available_models
+                    .iter()
+                    .any(|model| model.name == MUSE_GLIMMER_MODEL_ID)
+            });
+        if !configured {
+            return false;
+        }
+
+        let provider_id =
+            language_model::LanguageModelProviderId::from(MUSE_GLIMMER_PROVIDER_ID.to_string());
+        let model_id = language_model::LanguageModelId::from(MUSE_GLIMMER_MODEL_ID.to_string());
+        LanguageModelRegistry::read_global(cx)
+            .provider(&provider_id)
+            .is_some_and(|provider| {
+                provider
+                    .provided_models(cx)
+                    .iter()
+                    .any(|model| model.id() == model_id)
+            })
+    }
+
+    fn muse_glimmer_draft_readiness(&self, cx: &App) -> ModeReadiness {
+        let target = ConversationTarget::MuseGlimmerLocal;
+        self.draft_thread.as_ref().map_or_else(
+            || ModeReadiness::SetupRequired {
+                reason: "Start a local Muse Glimmer conversation".into(),
+                action: ModeSetupAction::PrepareMuseGlimmerLocal,
+            },
+            |draft| {
+                if !matches!(draft.read(cx).agent_key(), Agent::MuseGlimmerLocal) {
+                    return ModeReadiness::SetupRequired {
+                        reason: "Start a local Muse Glimmer conversation".into(),
+                        action: ModeSetupAction::PrepareMuseGlimmerLocal,
+                    };
+                }
+                match draft.read(cx).preparation_state(cx) {
+                    ConversationPreparation::Loading | ConversationPreparation::RouterReady => {
+                        ModeReadiness::TemporarilyUnavailable {
+                            reason: "Connecting to Muse Glimmer at the configured local endpoint…"
+                                .into(),
+                        }
+                    }
+                    ConversationPreparation::Ready { session_id } => {
+                        PreparationReceipt::after_session_created(target, session_id).map_or_else(
+                            || ModeReadiness::TemporarilyUnavailable {
+                                reason: "Creating a Muse Glimmer session…".into(),
+                            },
+                            |receipt| ModeReadiness::Ready { receipt },
+                        )
+                    }
+                    ConversationPreparation::SetupRequired { reason } => {
+                        ModeReadiness::SetupRequired {
+                            reason: reason.to_string(),
+                            action: ModeSetupAction::RevealPreparedConversation,
+                        }
+                    }
+                }
+            },
+        )
+    }
+
     /// Every executor the composer dropdown offers, in its fixed order.
     ///
     /// `OMEGA-DELTA-0184`, omega#165. One row per executor: Omega first,
@@ -7026,6 +7160,15 @@ impl AgentPanel {
             readiness: self.omega_draft_readiness(cx),
             is_current: matches!(current_agent, Some(Agent::NativeAgent)),
         });
+
+        if Self::muse_glimmer_is_configured(cx) {
+            rows.push(ComposerExecutorRow {
+                target: ConversationTarget::MuseGlimmerLocal,
+                label: "Muse Glimmer (Local)".into(),
+                readiness: self.muse_glimmer_draft_readiness(cx),
+                is_current: matches!(current_agent, Some(Agent::MuseGlimmerLocal)),
+            });
+        }
 
         let installed: Vec<AgentId> = agent_server_store.external_agents().cloned().collect();
         // The configured launch commands, for the omega#169 presence check
@@ -7200,6 +7343,31 @@ impl AgentPanel {
                     | ConversationPreparation::SetupRequired { .. } => false,
                 };
                 if !receipt_is_live {
+                    return;
+                }
+                self.set_base_view(
+                    BaseView::AgentThread {
+                        conversation_view: draft,
+                    },
+                    true,
+                    window,
+                    cx,
+                );
+            }
+            ConversationTarget::MuseGlimmerLocal => {
+                let Some(draft) = self.draft_thread.clone() else {
+                    return;
+                };
+                if !matches!(draft.read(cx).agent_key(), Agent::MuseGlimmerLocal) {
+                    return;
+                }
+                let session_id = match draft.read(cx).preparation_state(cx) {
+                    ConversationPreparation::Ready { session_id } => session_id,
+                    ConversationPreparation::Loading
+                    | ConversationPreparation::RouterReady
+                    | ConversationPreparation::SetupRequired { .. } => return,
+                };
+                if !receipt.proves(&ConversationTarget::MuseGlimmerLocal, &session_id) {
                     return;
                 }
                 self.set_base_view(
@@ -11799,6 +11967,10 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) -> AgentThread {
         let is_new_thread = resume_thread_id.is_none() && resume_session_id.is_none();
+        let is_muse_glimmer = matches!(agent, Agent::MuseGlimmerLocal);
+        let model_override = is_muse_glimmer
+            .then(|| MUSE_GLIMMER_MODEL_OVERRIDE.to_string())
+            .or(model_override);
         let thread_id = resume_thread_id.unwrap_or_else(ThreadId::new);
         let workspace = self.workspace.clone();
         let project = self.project.clone();
@@ -11869,7 +12041,7 @@ impl AgentPanel {
             self.isolate_new_thread_if_occupied(thread_id, &conversation_view, cx);
         }
 
-        if let Some(model) = model_override {
+        if model_override.is_some() || is_muse_glimmer {
             // The native thread is constructed asynchronously after the
             // connection establishes. Wait for the first `RootThreadUpdated`
             // event that yields a native thread, then apply the override once.
@@ -11883,7 +12055,14 @@ impl AgentPanel {
                     let Some(native_thread) = view.read(cx).as_native_thread(cx) else {
                         return;
                     };
-                    apply_native_model_override(&native_thread, &model, cx);
+                    if let Some(model) = model_override.as_deref() {
+                        apply_native_model_override(&native_thread, model, cx);
+                    }
+                    if is_muse_glimmer {
+                        native_thread.update(cx, |thread, cx| {
+                            thread.set_local_only(true, cx);
+                        });
+                    }
                     applied.set(true);
                 },
             )
@@ -24779,6 +24958,8 @@ mod tests {
     use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
     use gpui::{App, Modifiers, TestAppContext, UpdateGlobal, VisualTestContext, px, size};
+    use language_model::fake_provider::{FakeLanguageModel, FakeLanguageModelProvider};
+    use language_model::{LanguageModelProviderId, LanguageModelProviderName};
     use parking_lot::Mutex;
     use project::{Project, WorktreePaths};
     use settings::{SettingsStore, WorkingDirectory};
@@ -28908,6 +29089,60 @@ mod tests {
         (panel, cx)
     }
 
+    fn configure_muse_glimmer(cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            let settings = serde_json::json!({
+                "language_models": {
+                    "openai_compatible": {
+                        "muse-glimmer": {
+                            "api_url": "http://127.0.0.1:8000/v1",
+                            "available_models": [{
+                                "name": MUSE_GLIMMER_MODEL_ID,
+                                "display_name": "Muse Glimmer (Local)",
+                                "max_tokens": 32768,
+                                "capabilities": {
+                                    "tools": false,
+                                    "images": false,
+                                    "parallel_tool_calls": false,
+                                    "prompt_cache_key": false,
+                                    "chat_completions": true,
+                                    "interleaved_reasoning": false,
+                                    "max_tokens_parameter": true
+                                }
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string();
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(&settings, cx)
+                    .expect("Muse Glimmer test settings should parse");
+            });
+
+            let model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+                MUSE_GLIMMER_PROVIDER_ID,
+                MUSE_GLIMMER_MODEL_ID,
+                "Muse Glimmer (Local)",
+                false,
+            ));
+            model.set_supports_tools(false);
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.register_provider(
+                    Arc::new(
+                        FakeLanguageModelProvider::new(
+                            LanguageModelProviderId::from(MUSE_GLIMMER_PROVIDER_ID.to_string()),
+                            LanguageModelProviderName::from("Muse Glimmer".to_string()),
+                        )
+                        .with_models(vec![model]),
+                    ),
+                    cx,
+                );
+            });
+        });
+    }
+
     fn install_prepared_omega_for_test(
         panel: &Entity<AgentPanel>,
         connection: SessionTrackingConnection,
@@ -29003,6 +29238,183 @@ mod tests {
             omega_executor_icon(Some(SelectableExecutor::Grok)),
             IconName::AiXAi
         );
+    }
+
+    #[gpui::test]
+    async fn muse_glimmer_row_is_opt_in(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+
+        panel.read_with(&cx, |panel, cx| {
+            assert!(
+                panel
+                    .composer_executor_rows(cx)
+                    .iter()
+                    .all(|row| row.target != ConversationTarget::MuseGlimmerLocal)
+            );
+        });
+
+        configure_muse_glimmer(&mut cx);
+
+        panel.read_with(&cx, |panel, cx| {
+            let muse_rows = panel
+                .composer_executor_rows(cx)
+                .into_iter()
+                .filter(|row| row.target == ConversationTarget::MuseGlimmerLocal)
+                .collect::<Vec<_>>();
+            assert_eq!(muse_rows.len(), 1);
+            let muse = muse_rows
+                .first()
+                .expect("one configured Muse row should be present");
+            assert_eq!(muse.label.as_ref(), "Muse Glimmer (Local)");
+            assert!(muse.is_selectable());
+            assert!(!muse.is_current);
+        });
+    }
+
+    #[gpui::test]
+    async fn muse_glimmer_selection_is_isolated_from_omega_agent(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        configure_muse_glimmer(&mut cx);
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.compose_on_executor(ConversationTarget::MuseGlimmerLocal, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("Muse selection should reveal its conversation");
+            assert_eq!(active.read(cx).agent_key(), &Agent::MuseGlimmerLocal);
+            let native_thread = active
+                .read(cx)
+                .as_native_thread(cx)
+                .expect("Muse should use the native text loop");
+            assert_eq!(
+                native_thread.read(cx).routed_model_pair(),
+                Some((
+                    MUSE_GLIMMER_PROVIDER_ID.to_string(),
+                    MUSE_GLIMMER_MODEL_ID.to_string(),
+                ))
+            );
+            assert!(native_thread.read(cx).is_local_only());
+            let model = native_thread
+                .read(cx)
+                .model()
+                .expect("Muse should keep its pinned local model");
+            assert!(!model.supports_tools());
+            assert!(!model.supports_images());
+
+            let rows = panel.composer_executor_rows(cx);
+            let muse = rows
+                .iter()
+                .find(|row| row.target == ConversationTarget::MuseGlimmerLocal)
+                .expect("configured Muse row should remain present");
+            let omega = rows
+                .iter()
+                .find(|row| row.target == ConversationTarget::OmegaAgent)
+                .expect("Omega row should remain present");
+            assert!(muse.is_current);
+            assert!(!omega.is_current);
+
+            let metadata = ThreadMetadataStore::global(cx).read(cx);
+            let entry = metadata
+                .entry(active.read(cx).thread_id)
+                .expect("Muse owner should be persisted");
+            assert_eq!(entry.agent_id, AgentId::new("muse-glimmer-local"));
+            assert_eq!(
+                entry
+                    .restorable_agent()
+                    .expect("Muse owner should restore exactly"),
+                Agent::MuseGlimmerLocal
+            );
+        });
+
+        let muse_thread_id = panel.read_with(&cx, |panel, cx| {
+            panel
+                .active_conversation_view()
+                .expect("Muse conversation should remain active")
+                .read(cx)
+                .thread_id
+        });
+        let restored_muse = panel.update_in(&mut cx, |panel, window, cx| {
+            panel
+                .create_agent_thread_with_server(
+                    Agent::MuseGlimmerLocal,
+                    None,
+                    Some(muse_thread_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                )
+                .conversation_view
+        });
+        cx.run_until_parked();
+        restored_muse.read_with(&cx, |view, cx| {
+            let native_thread = view
+                .as_native_thread(cx)
+                .expect("restored Muse conversation should resume the native thread");
+            assert!(
+                native_thread.read(cx).is_local_only(),
+                "restoration must reapply the no-cloud policy"
+            );
+            assert_eq!(
+                native_thread.read(cx).routed_model_pair(),
+                Some((
+                    MUSE_GLIMMER_PROVIDER_ID.to_string(),
+                    MUSE_GLIMMER_MODEL_ID.to_string(),
+                ))
+            );
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.compose_on_executor(ConversationTarget::OmegaAgent, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("Omega selection should reveal its conversation");
+            assert_eq!(active.read(cx).agent_key(), &Agent::NativeAgent);
+            let rows = panel.composer_executor_rows(cx);
+            assert!(
+                rows.iter()
+                    .find(|row| row.target == ConversationTarget::OmegaAgent)
+                    .is_some_and(|row| row.is_current)
+            );
+            assert!(
+                rows.iter()
+                    .find(|row| row.target == ConversationTarget::MuseGlimmerLocal)
+                    .is_some_and(|row| !row.is_current)
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn muse_and_omega_construct_separate_native_servers(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            let fs = FakeFs::new(cx.background_executor().clone());
+            let thread_store = ThreadStore::global(cx);
+            let muse = Agent::MuseGlimmerLocal.server(fs.clone(), thread_store.clone());
+            let omega = Agent::NativeAgent.server(fs, thread_store);
+
+            assert_eq!(muse.agent_id(), AgentId::new("muse-glimmer-local"));
+            assert_eq!(muse.logo(), IconName::AiOpenAiCompat);
+            assert_eq!(omega.agent_id(), agent::OMEGA_AGENT_ID.clone());
+            assert_eq!(omega.logo(), IconName::OmegaAgent);
+            assert!(
+                omega
+                    .downcast::<crate::omega_router::OmegaRouterServer>()
+                    .is_some()
+            );
+        });
     }
 
     #[gpui::test]
@@ -32495,6 +32907,10 @@ mod tests {
             Agent::NativeAgent,
         );
         assert_eq!(
+            serde_json::from_str::<Agent>(r#""muse_glimmer_local""#).unwrap(),
+            Agent::MuseGlimmerLocal,
+        );
+        assert_eq!(
             serde_json::from_str::<Agent>(r#"{"custom":{"name":"my-agent"}}"#).unwrap(),
             Agent::Custom {
                 id: "my-agent".into(),
@@ -32505,6 +32921,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Agent::NativeAgent).unwrap(),
             r#""native_agent""#,
+        );
+        assert_eq!(
+            serde_json::to_string(&Agent::MuseGlimmerLocal).unwrap(),
+            r#""muse_glimmer_local""#,
+        );
+        assert_eq!(
+            Agent::from(AgentId::new("muse-glimmer-local")),
+            Agent::MuseGlimmerLocal,
         );
         assert_eq!(
             serde_json::to_string(&Agent::Custom {

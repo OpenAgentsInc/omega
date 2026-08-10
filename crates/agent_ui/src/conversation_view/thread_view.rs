@@ -930,6 +930,45 @@ pub struct ThreadView {
     exo_inspector_expanded: bool,
     _exo_inspection_task: Option<Task<()>>,
 }
+
+const MUSE_GLIMMER_LOCAL_AGENT_ID: &str = "muse-glimmer-local";
+const MUSE_GLIMMER_LOCAL_DISPLAY_NAME: &str = "Muse Glimmer (Local)";
+const MUSE_GLIMMER_LOCAL_MODEL_ID: &str = "muse-glimmer";
+const MUSE_GLIMMER_LOCAL_ENDPOINT_ERROR: &str = "Could not reach Muse Glimmer at the configured local endpoint. Start the local OpenAI-compatible server and verify that its endpoint ends in /v1; Omega sends chat requests to /v1/chat/completions.";
+
+fn is_muse_glimmer_local(agent_id: &AgentId) -> bool {
+    agent_id.as_ref() == MUSE_GLIMMER_LOCAL_AGENT_ID
+}
+
+fn disclosure_for_thread_identity(
+    agent_id: &AgentId,
+    mut disclosure: ExecutorDisclosure,
+) -> ExecutorDisclosure {
+    // The native connection is shared by Omega and local text-only modes, so
+    // the server-owned ThreadView identity is the authority for this surface.
+    if is_muse_glimmer_local(agent_id) {
+        disclosure.agent_id = MUSE_GLIMMER_LOCAL_DISPLAY_NAME.to_string();
+    }
+    disclosure
+}
+
+fn muse_glimmer_local_endpoint_error(
+    agent_id: &AgentId,
+    error: &ThreadError,
+) -> Option<SharedString> {
+    if !is_muse_glimmer_local(agent_id) {
+        return None;
+    }
+    let ThreadError::Other { message, .. } = error else {
+        return None;
+    };
+    let message = message.to_lowercase();
+    (message.contains("error sending request for url")
+        || message.contains("tcp connect error")
+        || message.contains("connection refused"))
+    .then(|| MUSE_GLIMMER_LOCAL_ENDPOINT_ERROR.into())
+}
+
 impl Focusable for ThreadView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1152,11 +1191,15 @@ impl ThreadView {
         let placeholder = {
             use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
             let disclosure = thread.read(cx).omega_executor_disclosure(cx);
-            let executor = crate::omega_executor_selector::SelectableExecutor::of(
-                disclosure.class,
-                disclosure.agent_id.as_ref(),
-            )
-            .map(|executor| executor.name().to_owned());
+            let executor = if is_muse_glimmer_local(&agent_id) {
+                Some(MUSE_GLIMMER_LOCAL_DISPLAY_NAME.to_owned())
+            } else {
+                crate::omega_executor_selector::SelectableExecutor::of(
+                    disclosure.class,
+                    disclosure.agent_id.as_ref(),
+                )
+                .map(|executor| executor.name().to_owned())
+            };
             placeholder_text(executor.as_deref().unwrap_or(agent_display_name.as_ref()))
         };
 
@@ -1839,7 +1882,10 @@ impl ThreadView {
         });
         let cost = message_cost(self.turn_fields.starting_cost.as_ref(), ending_cost);
         let duration = self.turn_fields.last_turn_duration;
-        let executor = self.thread.read(cx).omega_executor_disclosure(cx);
+        let executor = disclosure_for_thread_identity(
+            &self.agent_id,
+            self.thread.read(cx).omega_executor_disclosure(cx),
+        );
         if let Some(entry_ix) = self
             .thread
             .read(cx)
@@ -2581,6 +2627,9 @@ impl ThreadView {
     /// the same reason the desktop callout already shows.
     pub(crate) fn device_mirror_error_text(&self, cx: &App) -> Option<SharedString> {
         let error = self.thread_error.as_ref()?;
+        if let Some(message) = muse_glimmer_local_endpoint_error(&self.agent_id, error) {
+            return Some(message);
+        }
         let model_or_agent_name = self.current_model_name(cx);
         Some(error.device_mirror_text(model_or_agent_name.as_ref()))
     }
@@ -3094,7 +3143,10 @@ impl ThreadView {
         omega_front_door::SteerCapability,
     ) {
         use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
-        let disclosure = self.thread.read(cx).omega_executor_disclosure(cx);
+        let disclosure = disclosure_for_thread_identity(
+            &self.agent_id,
+            self.thread.read(cx).omega_executor_disclosure(cx),
+        );
         // Only an external peer negotiates. Omega owns the native loop's stop,
         // and an engine lane's answer does not depend on what the engine can do.
         let capability = match disclosure.class {
@@ -12893,8 +12945,12 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         let callout = match self.thread_error.as_ref()? {
-            ThreadError::Other { message, .. } => {
-                self.render_any_thread_error(message.clone(), window, cx)
+            error @ ThreadError::Other { message, .. } => {
+                if let Some(message) = muse_glimmer_local_endpoint_error(&self.agent_id, error) {
+                    self.render_error_callout("Muse Glimmer Unavailable", message, true, true, cx)
+                } else {
+                    self.render_any_thread_error(message.clone(), window, cx)
+                }
             }
             ThreadError::Refusal => self.render_refusal_error(cx),
             ThreadError::DataRetentionConsentRequired => {
@@ -14112,7 +14168,10 @@ impl ThreadView {
     pub fn executor_disclosure(&self, cx: &App) -> ExecutorDisclosure {
         use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
 
-        let disclosure = self.thread.read(cx).omega_executor_disclosure(cx);
+        let disclosure = disclosure_for_thread_identity(
+            &self.agent_id,
+            self.thread.read(cx).omega_executor_disclosure(cx),
+        );
         match crate::omega_host_bridge::engine_lane_run(self.root_thread_id) {
             Some(run_ref) => {
                 crate::omega_executor_disclosure::delegated_to_run(disclosure, run_ref)
@@ -14971,6 +15030,8 @@ impl ThreadView {
         // at construction — never a separate selection store.
         let current_label = if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
             SharedString::from("Omega Agent")
+        } else if is_muse_glimmer_local(&self.agent_id) {
+            SharedString::from(MUSE_GLIMMER_LOCAL_DISPLAY_NAME)
         } else {
             crate::omega_composer_executor_menu::named_direct_agent_label(self.agent_id.as_ref())
                 .map_or_else(|| self.agent_display_name.clone(), SharedString::from)
@@ -14997,6 +15058,16 @@ impl ThreadView {
 
         if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
             crate::omega_composer_executor_menu::ComposerModelPicker::omega_agent()
+        } else if is_muse_glimmer_local(&self.agent_id) {
+            crate::omega_composer_executor_menu::ComposerModelPicker {
+                label: MUSE_GLIMMER_LOCAL_MODEL_ID.into(),
+                current_model: Some(AgentModelId::new(MUSE_GLIMMER_LOCAL_MODEL_ID)),
+                models: Vec::new(),
+                traits: Vec::new(),
+                enabled: false,
+                empty_message: "Muse Glimmer is pinned to its configured local model.".into(),
+                on_select: Rc::new(|_, _, _| {}),
+            }
         } else if let Some(config_options) = self.config_options_view.clone() {
             let models = config_options.read(cx).composer_models();
             let traits = config_options
@@ -15456,16 +15527,11 @@ impl ThreadView {
     fn render_omega_turn_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.omega_turn_state(cx);
         if self.omega_last_turn_state.as_ref() != Some(&state) {
-            let announcement = match (self.omega_last_turn_state.as_ref(), &state) {
-                (_, OmegaTurnState::Failed(phrase)) => {
-                    Some(SharedString::from(format!("Omega stopped: {phrase}.")))
-                }
-                (_, OmegaTurnState::Running) => Some(SharedString::from("Omega is responding.")),
-                (Some(OmegaTurnState::Running), OmegaTurnState::Idle) => {
-                    Some(SharedString::from("Omega finished responding."))
-                }
-                (_, OmegaTurnState::Idle) => None,
-            };
+            let announcement = turn_status_announcement(
+                &self.agent_id,
+                self.omega_last_turn_state.as_ref(),
+                &state,
+            );
             if let Some(announcement) = announcement {
                 self.omega_turn_status_announcement = Some(announcement);
             }
@@ -15516,6 +15582,30 @@ enum OmegaTurnState {
     Idle,
     Running,
     Failed(&'static str),
+}
+
+fn turn_status_announcement(
+    agent_id: &AgentId,
+    previous: Option<&OmegaTurnState>,
+    state: &OmegaTurnState,
+) -> Option<SharedString> {
+    let subject = if is_muse_glimmer_local(agent_id) {
+        "Muse Glimmer"
+    } else {
+        "Omega"
+    };
+    match (previous, state) {
+        (_, OmegaTurnState::Failed(phrase)) => {
+            Some(SharedString::from(format!("{subject} stopped: {phrase}.")))
+        }
+        (_, OmegaTurnState::Running) => {
+            Some(SharedString::from(format!("{subject} is responding.")))
+        }
+        (Some(OmegaTurnState::Running), OmegaTurnState::Idle) => Some(SharedString::from(format!(
+            "{subject} finished responding."
+        ))),
+        (_, OmegaTurnState::Idle) => None,
+    }
 }
 
 impl Render for ThreadView {
@@ -16156,6 +16246,73 @@ mod tests {
     use std::path::Path;
     use util::path;
     use workspace::MultiWorkspace;
+
+    #[test]
+    fn muse_connection_refusal_is_replaced_at_the_thread_view_boundary() {
+        let raw_error = ThreadError::Other {
+            message: "error sending request for url (http://127.0.0.1:8000/v1/chat/completions): client error (Connect): tcp connect error: Connection refused (os error 61)".into(),
+            acp_error_code: None,
+        };
+
+        assert_eq!(
+            muse_glimmer_local_endpoint_error(
+                &AgentId::new(MUSE_GLIMMER_LOCAL_AGENT_ID),
+                &raw_error,
+            )
+            .as_deref(),
+            Some(MUSE_GLIMMER_LOCAL_ENDPOINT_ERROR)
+        );
+        assert!(
+            muse_glimmer_local_endpoint_error(&AgentId::new("Omega Agent"), &raw_error).is_none()
+        );
+    }
+
+    #[test]
+    fn muse_thread_identity_relabels_disclosure_without_changing_the_model() {
+        let disclosure = ExecutorDisclosure {
+            class: ExecutorClass::NativeLoop,
+            agent_id: "Omega Agent".to_owned(),
+            provider: Some("muse-glimmer".to_owned()),
+            model: Some("muse-glimmer".to_owned()),
+            run_ref: None,
+            route: None,
+        };
+
+        let muse = disclosure_for_thread_identity(
+            &AgentId::new(MUSE_GLIMMER_LOCAL_AGENT_ID),
+            disclosure.clone(),
+        );
+        assert_eq!(muse.agent_id, MUSE_GLIMMER_LOCAL_DISPLAY_NAME);
+        assert_eq!(muse.provider, disclosure.provider);
+        assert_eq!(muse.model, disclosure.model);
+
+        let omega = disclosure_for_thread_identity(&AgentId::new("Omega Agent"), disclosure);
+        assert_eq!(omega.agent_id, "Omega Agent");
+    }
+
+    #[test]
+    fn muse_turn_status_announcements_use_the_local_agent_name() {
+        let muse = AgentId::new(MUSE_GLIMMER_LOCAL_AGENT_ID);
+        assert_eq!(
+            turn_status_announcement(&muse, None, &OmegaTurnState::Running).as_deref(),
+            Some("Muse Glimmer is responding.")
+        );
+        assert_eq!(
+            turn_status_announcement(&muse, Some(&OmegaTurnState::Running), &OmegaTurnState::Idle,)
+                .as_deref(),
+            Some("Muse Glimmer finished responding.")
+        );
+        assert_eq!(
+            turn_status_announcement(&muse, None, &OmegaTurnState::Failed("the request failed"),)
+                .as_deref(),
+            Some("Muse Glimmer stopped: the request failed.")
+        );
+        assert_eq!(
+            turn_status_announcement(&AgentId::new("Omega Agent"), None, &OmegaTurnState::Running,)
+                .as_deref(),
+            Some("Omega is responding.")
+        );
+    }
 
     #[test]
     fn omega_tool_detail_removes_the_repeated_kind_label() {

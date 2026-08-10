@@ -1473,6 +1473,7 @@ pub struct Thread {
     pub(crate) templates: Arc<Templates>,
     model: ThreadModel,
     summarization_model: Option<Arc<dyn LanguageModel>>,
+    local_only: bool,
     thinking_enabled: bool,
     thinking_effort: Option<String>,
     speed: Option<Speed>,
@@ -1639,6 +1640,7 @@ impl Thread {
             templates,
             model,
             summarization_model: None,
+            local_only: false,
             thinking_enabled: enable_thinking,
             speed,
             thinking_effort,
@@ -1670,6 +1672,7 @@ impl Thread {
         self.thinking_enabled = parent.thinking_enabled;
         self.thinking_effort = parent.thinking_effort.clone();
         self.summarization_model = parent.summarization_model.clone();
+        self.local_only = parent.local_only;
         self.profile_id = parent.profile_id.clone();
         self.profile_downgraded_for_restricted_workspace =
             parent.profile_downgraded_for_restricted_workspace;
@@ -2046,6 +2049,7 @@ impl Thread {
             templates,
             model,
             summarization_model: None,
+            local_only: false,
             thinking_enabled: db_thread.thinking_enabled,
             thinking_effort: db_thread.thinking_effort,
             speed: db_thread.speed,
@@ -2379,6 +2383,9 @@ impl Thread {
     pub fn set_model(&mut self, model: Arc<dyn LanguageModel>, cx: &mut Context<Self>) {
         let old_usage = self.latest_token_usage();
         self.model = ThreadModel::Ready(model.clone());
+        if self.local_only {
+            self.summarization_model = Some(model.clone());
+        }
         let new_caps = Self::prompt_capabilities(self.model.as_model().map(|model| model.as_ref()));
         let new_usage = self.latest_token_usage();
         if old_usage != new_usage {
@@ -2402,6 +2409,18 @@ impl Thread {
 
     pub fn summarization_model(&self) -> Option<&Arc<dyn LanguageModel>> {
         self.summarization_model.as_ref()
+    }
+
+    pub fn is_local_only(&self) -> bool {
+        self.local_only
+    }
+
+    pub fn set_local_only(&mut self, local_only: bool, cx: &mut Context<Self>) {
+        self.local_only = local_only;
+        if local_only {
+            self.summarization_model = self.model().cloned();
+        }
+        cx.notify();
     }
 
     pub fn set_summarization_model(
@@ -3655,8 +3674,14 @@ impl Thread {
         attempted: &mut Vec<(String, String)>,
         cx: &mut AsyncApp,
     ) -> Result<Option<Arc<dyn LanguageModel>>> {
-        let fallback = this.update(cx, |_, cx| {
-            Self::next_turn_fallback_model(failed_model, failure, attempted, cx)
+        let fallback = this.update(cx, |this, cx| {
+            Self::next_turn_fallback_model_for_policy(
+                this.local_only,
+                failed_model,
+                failure,
+                attempted,
+                cx,
+            )
         })?;
         let Some(fallback) = fallback else {
             log::warn!(
@@ -3798,6 +3823,26 @@ impl Thread {
             return Some(model);
         }
         None
+    }
+
+    fn next_turn_fallback_model_for_policy(
+        local_only: bool,
+        failed_model: &Arc<dyn LanguageModel>,
+        failure: &anyhow::Error,
+        attempted: &mut Vec<(String, String)>,
+        cx: &App,
+    ) -> Option<Arc<dyn LanguageModel>> {
+        if local_only {
+            let failed_key = (
+                failed_model.provider_id().0.to_string(),
+                failed_model.id().0.to_string(),
+            );
+            if !attempted.contains(&failed_key) {
+                attempted.push(failed_key);
+            }
+            return None;
+        }
+        Self::next_turn_fallback_model(failed_model, failure, attempted, cx)
     }
 
     fn codex_failure_allows_openai_api_fallback(failure: &anyhow::Error) -> bool {
@@ -4838,12 +4883,16 @@ impl Thread {
             .model()
             .ok_or_else(|| anyhow!(NoModelConfiguredError))?;
         let sandboxing_enabled = crate::sandboxing::sandboxing_enabled(cx);
-        let available_tools = self.prompt_cache_tool_order(
-            self.running_turn
-                .as_ref()
-                .map(|turn| turn.tools.keys().cloned().collect())
-                .unwrap_or_default(),
-        );
+        let available_tools = if !self.local_only && model.supports_tools() {
+            self.prompt_cache_tool_order(
+                self.running_turn
+                    .as_ref()
+                    .map(|turn| turn.tools.keys().cloned().collect())
+                    .unwrap_or_default(),
+            )
+        } else {
+            Vec::new()
+        };
         let tools = if let Some(turn) = self.running_turn.as_ref() {
             available_tools
                 .iter()
@@ -5356,6 +5405,9 @@ impl Thread {
     }
 
     fn compaction_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
+        if self.local_only {
+            return self.model().cloned();
+        }
         LanguageModelRegistry::read_global(cx)
             .compaction_model()
             .map(|m| m.model)
@@ -9718,6 +9770,33 @@ mod tests {
         assert_eq!(
             attempted,
             vec![("openagents".to_string(), "omega-agent".to_string())]
+        );
+    }
+
+    #[gpui::test]
+    async fn local_only_model_does_not_fall_back_to_a_hosted_provider(cx: &mut TestAppContext) {
+        let (_thread, _event_stream) = setup_thread_for_test(cx).await;
+        cx.update(register_omega_fallback_chain);
+        let muse: Arc<dyn LanguageModel> = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "muse-glimmer",
+            "muse-glimmer",
+            "Muse Glimmer (Local)",
+            false,
+        ));
+        let failure = anyhow!(LanguageModelCompletionError::HttpSend {
+            provider: language_model::LanguageModelProviderName::from("muse-glimmer".to_string(),),
+            error: anyhow!("connection refused"),
+        });
+        let mut attempted = Vec::new();
+
+        let fallback = cx.update(|cx| {
+            Thread::next_turn_fallback_model_for_policy(true, &muse, &failure, &mut attempted, cx)
+        });
+
+        assert!(fallback.is_none());
+        assert_eq!(
+            attempted,
+            vec![("muse-glimmer".to_string(), "muse-glimmer".to_string())]
         );
     }
 

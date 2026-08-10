@@ -570,6 +570,9 @@ where
     match AgentIdOrLegacyAgent::deserialize(deserializer)? {
         AgentIdOrLegacyAgent::AgentId(agent_id) => Ok(agent_id),
         AgentIdOrLegacyAgent::LegacyAgent(Agent::Custom { id }) => Ok(id),
+        AgentIdOrLegacyAgent::LegacyAgent(Agent::MuseGlimmerLocal) => {
+            Ok(Agent::MuseGlimmerLocal.id())
+        }
         AgentIdOrLegacyAgent::LegacyAgent(Agent::NativeAgent) => Ok(Agent::NativeAgent.id()),
         #[cfg(any(test, feature = "test-support"))]
         AgentIdOrLegacyAgent::LegacyAgent(Agent::Stub) => Ok(Agent::Stub.id()),
@@ -590,6 +593,7 @@ pub enum Agent {
     #[default]
     #[serde(alias = "NativeAgent", alias = "TextThread")]
     NativeAgent,
+    MuseGlimmerLocal,
     #[serde(alias = "Custom")]
     Custom {
         #[serde(rename = "name")]
@@ -604,6 +608,9 @@ impl From<AgentId> for Agent {
         if id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
             return Self::NativeAgent;
         }
+        if id.as_ref() == "muse-glimmer-local" {
+            return Self::MuseGlimmerLocal;
+        }
         #[cfg(any(test, feature = "test-support"))]
         if id.as_ref() == "stub" {
             return Self::Stub;
@@ -616,6 +623,7 @@ impl Agent {
     pub fn id(&self) -> AgentId {
         match self {
             Self::NativeAgent => agent::OMEGA_AGENT_ID.clone(),
+            Self::MuseGlimmerLocal => AgentId::new("muse-glimmer-local"),
             Self::Custom { id } => id.clone(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => "stub".into(),
@@ -623,12 +631,13 @@ impl Agent {
     }
 
     pub fn is_native(&self) -> bool {
-        matches!(self, Self::NativeAgent)
+        matches!(self, Self::NativeAgent | Self::MuseGlimmerLocal)
     }
 
     pub fn label(&self) -> SharedString {
         match self {
             Self::NativeAgent => "Omega Agent".into(),
+            Self::MuseGlimmerLocal => "Muse Glimmer (Local)".into(),
             Self::Custom { id, .. } => id.0.clone(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => "Stub Agent".into(),
@@ -638,6 +647,7 @@ impl Agent {
     pub fn icon(&self) -> Option<IconName> {
         match self {
             Self::NativeAgent => Some(IconName::OmegaAgent),
+            Self::MuseGlimmerLocal => Some(IconName::AiOpenAiCompat),
             Self::Custom { .. } => Some(IconName::Sparkle),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => None,
@@ -712,6 +722,12 @@ impl Agent {
                 } else {
                     omega_agent_detect::detected().to_vec()
                 },
+            )),
+            Self::MuseGlimmerLocal => Rc::new(agent::NativeAgentServer::with_identity(
+                fs,
+                thread_store,
+                AgentId::new("muse-glimmer-local"),
+                IconName::AiOpenAiCompat,
             )),
             Self::Custom { id: name } => {
                 Rc::new(agent_servers::CustomAgentServer::new(name.clone()))

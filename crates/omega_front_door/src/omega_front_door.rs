@@ -108,6 +108,7 @@ pub fn launch_surface(restore_on_startup: RestoreOnStartup) -> LaunchSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationMode {
     DirectAgent,
+    MuseGlimmerLocal,
     OmegaAgent,
     Sarah,
 }
@@ -115,13 +116,19 @@ pub enum ConversationMode {
 impl ConversationMode {
     #[must_use]
     pub const fn all() -> &'static [Self] {
-        &[Self::DirectAgent, Self::OmegaAgent, Self::Sarah]
+        &[
+            Self::DirectAgent,
+            Self::MuseGlimmerLocal,
+            Self::OmegaAgent,
+            Self::Sarah,
+        ]
     }
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::DirectAgent => "Direct Agent",
+            Self::MuseGlimmerLocal => "Muse Glimmer (Local)",
             Self::OmegaAgent => "Omega Agent",
             Self::Sarah => "Sarah",
         }
@@ -131,6 +138,7 @@ impl ConversationMode {
     pub const fn token(self) -> &'static str {
         match self {
             Self::DirectAgent => "direct-agent",
+            Self::MuseGlimmerLocal => "muse-glimmer-local",
             Self::OmegaAgent => "omega-agent",
             Self::Sarah => "sarah",
         }
@@ -161,6 +169,7 @@ impl DirectAgentId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConversationTarget {
     DirectAgent { agent_id: DirectAgentId },
+    MuseGlimmerLocal,
     OmegaAgent,
     Sarah,
 }
@@ -170,6 +179,7 @@ impl ConversationTarget {
     pub const fn mode(&self) -> ConversationMode {
         match self {
             Self::DirectAgent { .. } => ConversationMode::DirectAgent,
+            Self::MuseGlimmerLocal => ConversationMode::MuseGlimmerLocal,
             Self::OmegaAgent => ConversationMode::OmegaAgent,
             Self::Sarah => ConversationMode::Sarah,
         }
@@ -179,6 +189,7 @@ impl ConversationTarget {
     pub fn executor_label(&self) -> &str {
         match self {
             Self::DirectAgent { agent_id } => agent_id.as_str(),
+            Self::MuseGlimmerLocal => "Muse Glimmer local model",
             Self::OmegaAgent => "Omega router",
             Self::Sarah => "Sarah voice executor",
         }
@@ -199,6 +210,8 @@ impl ConversationTarget {
     ) -> Option<Self> {
         if agent_id == omega_agent_id {
             Some(Self::OmegaAgent)
+        } else if agent_id == "muse-glimmer-local" {
+            Some(Self::MuseGlimmerLocal)
         } else if sarah_agent_id == Some(agent_id) {
             Some(Self::Sarah)
         } else {
@@ -276,6 +289,7 @@ impl PreparationReceipt {
 pub enum ModeSetupAction {
     OpenFolder,
     AddAcpAgent,
+    PrepareMuseGlimmerLocal,
     PrepareOmegaAgent,
     PrepareDirectAgent,
     RevealPreparedConversation,
@@ -287,6 +301,7 @@ impl ModeSetupAction {
         match self {
             Self::OpenFolder => "Choose Folder",
             Self::AddAcpAgent => "Add an ACP Agent",
+            Self::PrepareMuseGlimmerLocal => "Start Muse Glimmer session",
             Self::PrepareOmegaAgent => "Start Omega session",
             Self::PrepareDirectAgent => "Start direct session",
             Self::RevealPreparedConversation => "Open setup",
@@ -1074,6 +1089,7 @@ mod tests {
             ConversationMode::all(),
             &[
                 ConversationMode::DirectAgent,
+                ConversationMode::MuseGlimmerLocal,
                 ConversationMode::OmegaAgent,
                 ConversationMode::Sarah,
             ]
@@ -1083,7 +1099,12 @@ mod tests {
                 .iter()
                 .map(|mode| mode.label())
                 .collect::<Vec<_>>(),
-            ["Direct Agent", "Omega Agent", "Sarah"]
+            [
+                "Direct Agent",
+                "Muse Glimmer (Local)",
+                "Omega Agent",
+                "Sarah"
+            ]
         );
     }
 
@@ -1141,6 +1162,10 @@ mod tests {
         assert_eq!(
             ConversationTarget::from_persisted_agent_id("omega", "omega", None),
             Some(ConversationTarget::OmegaAgent)
+        );
+        assert_eq!(
+            ConversationTarget::from_persisted_agent_id("muse-glimmer-local", "omega", None),
+            Some(ConversationTarget::MuseGlimmerLocal)
         );
         assert!(ConversationTarget::from_persisted_agent_id("", "omega", None).is_none());
     }
