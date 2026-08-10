@@ -14,16 +14,23 @@ mod countdown;
 mod depth_chart;
 mod equity_curve;
 mod funding_chart;
+mod funding_countdown;
 mod gauge;
 mod heatmap;
 mod high_frequency;
 mod histogram;
+mod instrument_selector;
 mod line_chart;
 mod market_kit;
+mod oracle_readout;
 mod order_book;
 mod plot;
+mod price_ticker;
 mod qr;
 mod sparkline;
+mod stats_strip;
+mod trade_tape;
+mod venue_status;
 mod viz_chip;
 mod viz_cloud_provision;
 mod viz_edge;
@@ -37,6 +44,7 @@ mod viz_progress_rail;
 mod viz_rfq;
 mod viz_swap;
 mod viz_zone;
+mod watchlist;
 
 pub use badges::*;
 pub use calibration::*;
@@ -45,16 +53,23 @@ pub use countdown::*;
 pub use depth_chart::*;
 pub use equity_curve::*;
 pub use funding_chart::*;
+pub use funding_countdown::*;
 pub use gauge::*;
 pub use heatmap::*;
 pub use high_frequency::*;
 pub use histogram::*;
+pub use instrument_selector::*;
 pub use line_chart::*;
 pub use market_kit::*;
+pub use oracle_readout::*;
 pub use order_book::*;
 pub use plot::*;
+pub use price_ticker::*;
 pub use qr::*;
 pub use sparkline::*;
+pub use stats_strip::*;
+pub use trade_tape::*;
+pub use venue_status::*;
 pub use viz_chip::*;
 pub use viz_cloud_provision::*;
 pub use viz_edge::*;
@@ -68,6 +83,7 @@ pub use viz_progress_rail::*;
 pub use viz_rfq::*;
 pub use viz_swap::*;
 pub use viz_zone::*;
+pub use watchlist::*;
 
 use gpui::{App, Font, Hsla, PathBuilder, Pixels, Point, TextRun, Window, point, px, rgb};
 use theme::ActiveTheme;
@@ -452,6 +468,14 @@ mod tests {
                 .child(ReturnsHistogram::preview(window, cx))
                 .child(CalibrationChart::preview(window, cx))
                 .child(Heatmap::preview(window, cx))
+                .child(PriceTicker::preview(window, cx))
+                .child(MarketStatsStrip::preview(window, cx))
+                .child(WatchlistTable::preview(window, cx))
+                .child(TradeTape::preview(window, cx))
+                .child(InstrumentSelector::preview(window, cx))
+                .child(FundingCountdown::preview(window, cx))
+                .child(OracleAttestationReadout::preview(window, cx))
+                .child(VenueStatusBadge::preview(window, cx))
         }
     }
 
@@ -485,6 +509,14 @@ mod tests {
             "market.returns_histogram",
             "market.calibration_chart",
             "market.heatmap",
+            "market.price_ticker",
+            "market.stats_strip",
+            "market.watchlist",
+            "market.trade_tape",
+            "market.instrument_selector",
+            "market.funding_countdown",
+            "market.oracle_attestation",
+            "market.venue_status",
         ] {
             assert!(
                 !rendered.occurrences(selector).is_empty(),

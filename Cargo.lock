@@ -18434,6 +18434,7 @@ dependencies = [
  "log",
  "menu",
  "num-format",
+ "plugin_api",
  "qrcode",
  "schemars 1.0.4",
  "serde",

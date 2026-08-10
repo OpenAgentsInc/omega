@@ -24,6 +24,7 @@ log.workspace = true
 menu.workspace = true
 num-format.workspace = true
 qrcode.workspace = true
+plugin_api.workspace = true
 schemars.workspace = true
 serde.workspace = true
 smallvec.workspace = true
