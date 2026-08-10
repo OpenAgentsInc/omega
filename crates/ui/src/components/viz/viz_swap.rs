@@ -3,7 +3,7 @@ use std::time::Duration;
 use documented::Documented;
 use gpui::{Animation, AnimationExt as _, px};
 
-use crate::components::viz::{VizPalette, VizProgressRail};
+use crate::components::viz::{VizPalette, VizProgressRail, format_sats};
 use crate::prelude::*;
 use crate::traits::animation_ext::CommonAnimationExt as _;
 
@@ -128,18 +128,6 @@ impl SwapStage {
             Self::Refunded => (2, Some(2), true),
         }
     }
-}
-
-fn format_sats(amount: u64) -> String {
-    let digits = amount.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(character);
-    }
-    format!("{grouped} sats")
 }
 
 /// An inline conversation card for a market asset swap: the pair and amount,
@@ -687,14 +675,6 @@ impl Component for SwapCard {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn amounts_group_thousands() {
-        assert_eq!(format_sats(0), "0 sats");
-        assert_eq!(format_sats(950), "950 sats");
-        assert_eq!(format_sats(50_000), "50,000 sats");
-        assert_eq!(format_sats(1_234_567), "1,234,567 sats");
-    }
 
     #[test]
     fn network_and_quote_labels_are_explicit() {
