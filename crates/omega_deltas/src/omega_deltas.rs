@@ -244,6 +244,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0271",
     "OMEGA-DELTA-0272",
     "OMEGA-DELTA-0275",
+    "OMEGA-DELTA-0273",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31068,7 +31069,7 @@ mod tests {
             "COMMAND_SCHEMA = \"omega.nautilus.command.v1\"",
             "class CommandController",
             "class CommandExecutionStrategy",
-            "class TrivialStrategy",
+            "class BoundedQuoteStrategy",
             "self.submit_order(order, client_id=HYPERLIQUID_CLIENT_ID)",
             "self.cancel_order(client_order_id, client_id=HYPERLIQUID_CLIENT_ID)",
             "mutation_state=\"sent\"",
@@ -31284,6 +31285,50 @@ mod tests {
             assert!(
                 admitted.contains(action),
                 "OMEGA-DELTA-0275: a drawn panel lost its palette route `{action}`"
+            );
+        }
+    }
+
+    #[test]
+    fn nautilus_tick_strategy_is_in_engine_mandate_bounded_and_testnet_only() {
+        let bridge = without_comments(&read_repository_file("sidecar/nautilus/command_bridge.py"));
+        for required in [
+            "class BoundedQuoteStrategy(Strategy)",
+            "def on_quote(",
+            "def on_trade(",
+            "def on_book_deltas(",
+            "self.submit_order(",
+            "self.cancel_order(",
+            "position_headroom_usd",
+            "order_budget",
+            "mandate_revision",
+            "strategy_state",
+        ] {
+            assert!(
+                bridge.contains(required),
+                "OMEGA-DELTA-0273: in-engine strategy lost `{required}`"
+            );
+        }
+        for forbidden in ["mainnet", "mcp", "openai", "anthropic"] {
+            assert!(
+                !bridge.to_ascii_lowercase().contains(forbidden),
+                "OMEGA-DELTA-0273: strategy hot loop contains forbidden `{forbidden}`"
+            );
+        }
+
+        let governance = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ));
+        for required in [
+            "bounded_strategy_parameters",
+            "max_position_usd",
+            "max_orders_per_hour",
+            "Nautilus strategy halted",
+            "pending_wakeup",
+        ] {
+            assert!(
+                governance.contains(required),
+                "OMEGA-DELTA-0273: governance boundary lost `{required}`"
             );
         }
     }

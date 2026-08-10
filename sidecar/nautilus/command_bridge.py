@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime
 import queue
+from collections import deque
+from decimal import Decimal
 from typing import Any
 
 from nautilus_trader.common import DataActorConfig
@@ -13,6 +15,7 @@ from nautilus_trader.model import Price
 from nautilus_trader.model import Quantity
 from nautilus_trader.model import StrategyId
 from nautilus_trader.model import TimeInForce
+from nautilus_trader.model import BookType
 from nautilus_trader.trading import Controller
 from nautilus_trader.trading import ImportableStrategyConfig
 from nautilus_trader.trading import Strategy
@@ -22,19 +25,26 @@ from nautilus_trader.trading import StrategyConfig
 COMMAND_SCHEMA = "omega.nautilus.command.v1"
 COMMAND_CONTROLLER_ID = "OMEGA-COMMAND-CONTROLLER-001"
 EXECUTION_STRATEGY_ID = "OMEGA-COMMAND-EXECUTION-001"
-TRIVIAL_STRATEGY_ID = "OMEGA-TRIVIAL-001"
+BOUNDED_QUOTE_STRATEGY_ID = "OMEGA-BOUNDED-QUOTE-001"
 HYPERLIQUID_CLIENT_ID = ClientId.from_str("HYPERLIQUID")
+INSTRUMENT = InstrumentId.from_str("BTC-USD-PERP.HYPERLIQUID")
 commands: queue.Queue[dict[str, Any]] = queue.Queue()
 emit_event = None
 generation = 0
 execution_strategy = None
-trivial_strategy = None
+bounded_quote_strategy = None
+stream_publisher = None
 
 
 def configure(event_emitter: Any, engine_generation: int) -> None:
     global emit_event, generation
     emit_event = event_emitter
     generation = engine_generation
+
+
+def configure_stream(publisher: Any) -> None:
+    global stream_publisher
+    stream_publisher = publisher
 
 
 def enqueue(command: dict[str, Any]) -> None:
@@ -66,43 +76,187 @@ class CommandExecutionStrategyConfig:
         )
 
 
-class TrivialStrategyConfig:
+class BoundedQuoteStrategyConfig:
     def __new__(cls) -> StrategyConfig:
         return StrategyConfig(
-            strategy_id=StrategyId.from_str(TRIVIAL_STRATEGY_ID),
-            order_id_tag="T287",
+            strategy_id=StrategyId.from_str(BOUNDED_QUOTE_STRATEGY_ID),
+            order_id_tag="Q290",
         )
 
 
-class TrivialStrategy(Strategy):
+class BoundedQuoteStrategy(Strategy):
     def __init__(self, config: StrategyConfig) -> None:
         super().__init__(config)
-        global trivial_strategy
-        trivial_strategy = self
-        self.interval_ms = 100
-        self.signal = 0
-        self.tick_count = 0
+        global bounded_quote_strategy
+        bounded_quote_strategy = self
+        self.parameters: dict[str, Any] | None = None
+        self.latest_bid: Decimal | None = None
+        self.active_client_order_id: ClientOrderId | None = None
+        self.pending_price: str | None = None
+        self.last_action_ns = 0
+        self.order_times_ns: deque[int] = deque()
+        self.quote_ticks = 0
+        self.trade_ticks = 0
+        self.book_ticks = 0
+        self.action_count = 0
+        self.filled_notional_usd = Decimal("0")
+        self.halted_reason: str | None = None
 
-    def apply_parameters(self, interval_ms: int, signal: int) -> None:
-        self.interval_ms = interval_ms
-        self.signal = signal
-        if self.is_running():
-            self.clock.cancel_timers()
-            self._start_timer()
+    def apply_parameters(self, parameters: dict[str, Any]) -> None:
+        self.parameters = parameters.copy()
+        self._publish_state("parameters_applied")
 
     def on_start(self) -> None:
-        self._start_timer()
+        if self.parameters is None:
+            self._halt("mandate_parameters_missing")
+            return
+        self.subscribe_quotes(INSTRUMENT, client_id=HYPERLIQUID_CLIENT_ID)
+        self.subscribe_trades(INSTRUMENT, client_id=HYPERLIQUID_CLIENT_ID)
+        self.subscribe_book_deltas(
+            INSTRUMENT,
+            BookType.L2_MBP,
+            depth=10,
+            client_id=HYPERLIQUID_CLIENT_ID,
+            managed=True,
+        )
+        self._publish_state("running")
 
     def on_stop(self) -> None:
-        self.clock.cancel_timers()
+        if self.active_client_order_id is not None:
+            self.cancel_order(
+                self.active_client_order_id,
+                client_id=HYPERLIQUID_CLIENT_ID,
+            )
+        self._publish_state("stopped")
 
-    def on_time_event(self, _event: object) -> None:
-        self.tick_count += 1
+    def on_quote(self, quote: Any) -> None:
+        self.quote_ticks += 1
+        self.latest_bid = Decimal(str(quote.bid_price))
+        self._react()
 
-    def _start_timer(self) -> None:
-        self.clock.set_timer(
-            "omega-trivial-tick",
-            datetime.timedelta(milliseconds=self.interval_ms),
+    def on_trade(self, _trade: Any) -> None:
+        self.trade_ticks += 1
+        self._react()
+
+    def on_book_deltas(self, _deltas: Any) -> None:
+        self.book_ticks += 1
+        self._react()
+
+    def on_order_accepted(self, event: Any) -> None:
+        if event.client_order_id == self.active_client_order_id:
+            self._publish_state("order_resting")
+
+    def on_order_canceled(self, event: Any) -> None:
+        if event.client_order_id != self.active_client_order_id:
+            return
+        self.active_client_order_id = None
+        price = self.pending_price
+        self.pending_price = None
+        if price is not None and self.halted_reason is None and self.is_running():
+            self._place(price)
+
+    def on_order_rejected(self, event: Any) -> None:
+        if event.client_order_id == self.active_client_order_id:
+            self.active_client_order_id = None
+            self._halt("venue_rejected")
+
+    def on_order_denied(self, event: Any) -> None:
+        if event.client_order_id == self.active_client_order_id:
+            self.active_client_order_id = None
+            self._halt("risk_denied")
+
+    def on_order_filled(self, event: Any) -> None:
+        if event.client_order_id != self.active_client_order_id:
+            return
+        self.filled_notional_usd += Decimal(str(event.last_qty)) * Decimal(str(event.last_px))
+        if self.parameters is not None and self.filled_notional_usd > Decimal(
+            str(self.parameters["position_headroom_usd"])
+        ):
+            self._halt("position_limit")
+        self._publish_state("fill")
+
+    def _react(self) -> None:
+        if self.parameters is None or self.latest_bid is None or self.halted_reason is not None:
+            return
+        now_ns = self.clock.timestamp_ns()
+        interval_ns = self.parameters["min_reprice_interval_ms"] * 1_000_000
+        if now_ns - self.last_action_ns < interval_ns:
+            return
+        while self.order_times_ns and now_ns - self.order_times_ns[0] >= 3_600_000_000_000:
+            self.order_times_ns.popleft()
+        if len(self.order_times_ns) >= self.parameters["order_budget"]:
+            self._halt("hourly_order_limit")
+            return
+        offset = Decimal(self.parameters["quote_offset_bps"]) / Decimal(10_000)
+        price = str((self.latest_bid * (Decimal(1) - offset)).quantize(Decimal("0.1")))
+        if self.active_client_order_id is None:
+            self._place(price)
+        elif self.pending_price is None:
+            self.pending_price = price
+            self.cancel_order(self.active_client_order_id, client_id=HYPERLIQUID_CLIENT_ID)
+            self.last_action_ns = now_ns
+            self.action_count += 1
+            self._publish_state("cancel_sent")
+
+    def _place(self, price: str) -> None:
+        if self.parameters is None:
+            self._halt("mandate_parameters_missing")
+            return
+        expected_notional = Decimal(self.parameters["order_quantity"]) * Decimal(price)
+        if self.filled_notional_usd + expected_notional > Decimal(
+            str(self.parameters["position_headroom_usd"])
+        ):
+            self._halt("position_limit")
+            return
+        now_ns = self.clock.timestamp_ns()
+        client_order_id = ClientOrderId.from_str(f"O-290-{now_ns}")
+        order = self.order_factory.limit(
+            instrument_id=INSTRUMENT,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_str(self.parameters["order_quantity"]),
+            price=Price.from_str(price),
+            time_in_force=TimeInForce.GTC,
+            post_only=True,
+            reduce_only=False,
+            client_order_id=client_order_id,
+        )
+        self.active_client_order_id = client_order_id
+        self.order_times_ns.append(now_ns)
+        self.last_action_ns = now_ns
+        self.action_count += 1
+        self.submit_order(order, client_id=HYPERLIQUID_CLIENT_ID)
+        self._publish_state("order_sent")
+
+    def _halt(self, reason: str) -> None:
+        self.halted_reason = reason
+        if self.active_client_order_id is not None:
+            self.cancel_order(self.active_client_order_id, client_id=HYPERLIQUID_CLIENT_ID)
+        self._publish_state("halted")
+
+    def _publish_state(self, phase: str) -> None:
+        if stream_publisher is None:
+            return
+        parameters = self.parameters or {}
+        stream_publisher.publish(
+            "strategy_state",
+            {
+                "strategy_id": BOUNDED_QUOTE_STRATEGY_ID,
+                "phase": phase,
+                "running": self.is_running(),
+                "halted_reason": self.halted_reason,
+                "mandate_revision": parameters.get("mandate_revision", 0),
+                "quote_ticks": self.quote_ticks,
+                "trade_ticks": self.trade_ticks,
+                "book_ticks": self.book_ticks,
+                "action_count": self.action_count,
+                "active_client_order_id": (
+                    str(self.active_client_order_id)
+                    if self.active_client_order_id is not None
+                    else None
+                ),
+                "ts_init": self.clock.timestamp_ns(),
+            },
+            lossless=True,
         )
 
 
@@ -217,8 +371,8 @@ class CommandController(Controller):
         )
         self.create_strategy_from_config(
             ImportableStrategyConfig(
-                strategy_path="command_bridge:TrivialStrategy",
-                config_path="command_bridge:TrivialStrategyConfig",
+                strategy_path="command_bridge:BoundedQuoteStrategy",
+                config_path="command_bridge:BoundedQuoteStrategyConfig",
                 config={},
             ),
             start=False,
@@ -251,17 +405,14 @@ class CommandController(Controller):
         elif command_type == "cancel_order":
             execution_strategy.cancel_order_by_id(command)
         elif command_type == "start_strategy":
-            self.start_strategy_from_id(trivial_strategy.strategy_id)
-            emit(command, "strategy_started", running=trivial_strategy.is_running())
+            self.start_strategy_from_id(bounded_quote_strategy.strategy_id)
+            emit(command, "strategy_started", running=bounded_quote_strategy.is_running())
         elif command_type == "stop_strategy":
-            self.stop_strategy_from_id(trivial_strategy.strategy_id)
-            emit(command, "strategy_stopped", running=trivial_strategy.is_running())
+            self.stop_strategy_from_id(bounded_quote_strategy.strategy_id)
+            emit(command, "strategy_stopped", running=bounded_quote_strategy.is_running())
         else:
             parameters = command["parameters"]
-            trivial_strategy.apply_parameters(
-                parameters["interval_ms"],
-                parameters["signal"],
-            )
+            bounded_quote_strategy.apply_parameters(parameters)
             emit(command, "strategy_parameters_applied", parameters=parameters)
 
 
@@ -295,7 +446,7 @@ def validate_command(command: dict[str, Any]) -> str | None:
     if not isinstance(command.get("command_id"), str) or not command["command_id"]:
         return "invalid_command_id"
     if command_type in {"start_strategy", "stop_strategy", "set_strategy_parameters"}:
-        if command.get("strategy_id") != TRIVIAL_STRATEGY_ID:
+        if command.get("strategy_id") != BOUNDED_QUOTE_STRATEGY_ID:
             return "unknown_strategy"
     if command_type == "place_order":
         if command.get("side") not in {"buy", "sell"}:
@@ -316,14 +467,29 @@ def validate_command(command: dict[str, Any]) -> str | None:
         return "invalid_order"
     if command_type == "set_strategy_parameters":
         parameters = command.get("parameters")
-        if not isinstance(parameters, dict) or set(parameters) != {"interval_ms", "signal"}:
+        if not isinstance(parameters, dict) or set(parameters) != {
+            "min_reprice_interval_ms",
+            "quote_offset_bps",
+            "order_quantity",
+            "position_headroom_usd",
+            "order_budget",
+            "mandate_revision",
+        }:
             return "invalid_parameters"
         if (
-            not isinstance(parameters["interval_ms"], int)
-            or isinstance(parameters["interval_ms"], bool)
-            or not 10 <= parameters["interval_ms"] <= 60_000
-            or not isinstance(parameters["signal"], int)
-            or isinstance(parameters["signal"], bool)
+            not isinstance(parameters["min_reprice_interval_ms"], int)
+            or isinstance(parameters["min_reprice_interval_ms"], bool)
+            or not 100 <= parameters["min_reprice_interval_ms"] <= 60_000
+            or not isinstance(parameters["quote_offset_bps"], int)
+            or not 0 <= parameters["quote_offset_bps"] <= 1_000
+            or not isinstance(parameters["order_quantity"], str)
+            or parameters["order_quantity"] != "0.001"
+            or not isinstance(parameters["position_headroom_usd"], int)
+            or parameters["position_headroom_usd"] <= 0
+            or not isinstance(parameters["order_budget"], int)
+            or not 1 <= parameters["order_budget"] <= 100
+            or not isinstance(parameters["mandate_revision"], int)
+            or parameters["mandate_revision"] <= 0
         ):
             return "invalid_parameters"
     return None

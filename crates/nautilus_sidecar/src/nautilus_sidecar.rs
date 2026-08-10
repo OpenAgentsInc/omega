@@ -282,6 +282,23 @@ pub enum StreamEvent {
         #[serde(flatten)]
         state: serde_json::Map<String, serde_json::Value>,
     },
+    StrategyState {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        strategy_id: String,
+        phase: String,
+        running: bool,
+        halted_reason: Option<String>,
+        mandate_revision: u64,
+        quote_ticks: u64,
+        trade_ticks: u64,
+        book_ticks: u64,
+        action_count: u64,
+        active_client_order_id: Option<String>,
+        ts_init: u64,
+    },
 }
 
 impl StreamEvent {
@@ -340,6 +357,12 @@ impl StreamEvent {
                 generation,
                 network,
                 ..
+            }
+            | Self::StrategyState {
+                schema,
+                generation,
+                network,
+                ..
             } => (schema, generation, network),
         };
         if schema != STREAM_SCHEMA {
@@ -363,6 +386,7 @@ impl StreamEvent {
                 | Self::Position { .. }
                 | Self::PositionState { .. }
                 | Self::Fill { .. }
+                | Self::StrategyState { .. }
         )
     }
 }
@@ -427,8 +451,12 @@ impl StreamFrame {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategyParameters {
-    pub interval_ms: u64,
-    pub signal: i64,
+    pub min_reprice_interval_ms: u64,
+    pub quote_offset_bps: u32,
+    pub order_quantity: String,
+    pub position_headroom_usd: u64,
+    pub order_budget: u32,
+    pub mandate_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -493,9 +521,14 @@ impl NautilusCommand {
             }
         }
         if let Self::SetStrategyParameters { parameters, .. } = self
-            && !(10..=60_000).contains(&parameters.interval_ms)
+            && (!(100..=60_000).contains(&parameters.min_reprice_interval_ms)
+                || parameters.quote_offset_bps > 1_000
+                || parameters.order_quantity != "0.001"
+                || parameters.position_headroom_usd == 0
+                || !(1..=100).contains(&parameters.order_budget)
+                || parameters.mandate_revision == 0)
         {
-            bail!("strategy interval must be from 10 through 60000 milliseconds");
+            bail!("bounded quote strategy parameters exceed the testnet envelope");
         }
         Ok(())
     }
@@ -680,7 +713,9 @@ impl NautilusStreamSource {
                     }
                     self.recent_fills.push_back(event);
                 }
-                StreamEvent::Order { .. } | StreamEvent::Position { .. } => {}
+                StreamEvent::Order { .. }
+                | StreamEvent::Position { .. }
+                | StreamEvent::StrategyState { .. } => {}
                 StreamEvent::Quote { .. }
                 | StreamEvent::Trade { .. }
                 | StreamEvent::Book { .. } => {}
@@ -1691,6 +1726,39 @@ mod tests {
         assert!(stream.take_frame().is_empty());
     }
 
+    #[test]
+    fn strategy_state_is_versioned_and_lossless() {
+        let event: StreamEvent = serde_json::from_value(serde_json::json!({
+            "type": "strategy_state",
+            "schema": STREAM_SCHEMA,
+            "generation": 3,
+            "sequence": 9,
+            "network": "testnet",
+            "strategy_id": "OMEGA-BOUNDED-QUOTE-001",
+            "phase": "halted",
+            "running": true,
+            "halted_reason": "hourly_order_limit",
+            "mandate_revision": 4,
+            "quote_ticks": 81,
+            "trade_ticks": 12,
+            "book_ticks": 73,
+            "action_count": 6,
+            "active_client_order_id": null,
+            "ts_init": 99,
+        }))
+        .expect("valid strategy state");
+        assert!(event.validate(3).is_ok());
+        let mut stream = StreamBuffer::default();
+        stream.ingest(event);
+        assert!(matches!(
+            stream.take_frame().state.as_slice(),
+            [StreamEvent::StrategyState {
+                quote_ticks: 81,
+                ..
+            }]
+        ));
+    }
+
     #[gpui::test]
     async fn app_source_reconstructs_a_renderable_book_once_per_frame(cx: &mut TestAppContext) {
         let source = cx.new(|_| NautilusStreamSource::default());
@@ -1828,7 +1896,7 @@ while IFS= read -r command; do
       ;;
     *'"command_id":"params-1"'*)
       printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters"}\n' "$generation"
-      printf 'OMEGA_NAUTILUS_EVENT {"type":"strategy_parameters_applied","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters","parameters":{"interval_ms":25,"signal":7}}\n' "$generation"
+      printf 'OMEGA_NAUTILUS_EVENT {"type":"strategy_parameters_applied","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"params-1","command_type":"set_strategy_parameters","parameters":{"min_reprice_interval_ms":500,"quote_offset_bps":100,"order_quantity":"0.001","position_headroom_usd":100,"order_budget":6,"mandate_revision":1}}\n' "$generation"
       ;;
     *'"command_id":"start-1"'*)
       printf 'OMEGA_NAUTILUS_EVENT {"type":"acknowledged","schema":"omega.nautilus.command.v1","generation":%s,"network":"testnet","command_id":"start-1","command_type":"start_strategy"}\n' "$generation"
@@ -1896,10 +1964,14 @@ done
             .send_command(CommandRequest {
                 command_id: "params-1".into(),
                 command: NautilusCommand::SetStrategyParameters {
-                    strategy_id: "OMEGA-TRIVIAL-001".into(),
+                    strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
                     parameters: StrategyParameters {
-                        interval_ms: 25,
-                        signal: 7,
+                        min_reprice_interval_ms: 500,
+                        quote_offset_bps: 100,
+                        order_quantity: "0.001".into(),
+                        position_headroom_usd: 100,
+                        order_budget: 6,
+                        mandate_revision: 1,
                     },
                 },
             })
@@ -1913,7 +1985,7 @@ done
             .send_command(CommandRequest {
                 command_id: "start-1".into(),
                 command: NautilusCommand::StartStrategy {
-                    strategy_id: "OMEGA-TRIVIAL-001".into(),
+                    strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
                 },
             })
             .expect("start command");
@@ -1926,7 +1998,7 @@ done
             .send_command(CommandRequest {
                 command_id: "stop-1".into(),
                 command: NautilusCommand::StopStrategy {
-                    strategy_id: "OMEGA-TRIVIAL-001".into(),
+                    strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
                 },
             })
             .expect("stop command");

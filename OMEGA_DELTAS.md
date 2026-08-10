@@ -10543,9 +10543,9 @@ during app shutdown. Lifecycle events are typed JSON and generation-fenced.
 The sidecar pins CPython 3.12 and `nautilus_trader==2.0.0rc2`. Both the Rust
 configuration and Python entrypoint reject mainnet. The engine config uses the
 Hyperliquid TESTNET data and execution adapters, in-memory Nautilus state, and
-a 60-minute reconciliation lookback. It installs no strategy and submits no
-orders; tick-rate strategy work remains inside Nautilus in the later engine
-strategy lane, while governance remains above this process boundary.
+a 60-minute reconciliation lookback. Lifecycle startup itself submits no
+orders. Strategies live inside Nautilus and remain stopped until the
+governance command channel starts them under a mandate envelope.
 
 - **Enforced by:** `nautilus_sidecar` unit tests and
   `nautilus_lifecycle_is_app_owned_versioned_and_testnet_only` in
@@ -10587,10 +10587,10 @@ ambiguous mutation. Validation failures and definitive risk, venue, or cancel
 rejections remain typed refusals.
 
 An always-running Nautilus controller drains the channel on the engine thread.
-Venue mutations pass through a Nautilus strategy, while a separate trivial
-strategy proves that parameter, start, and stop commands control the hot loop
-without placing an LLM or MCP inside it. Both Rust and Python make mainnet
-unrepresentable or refuse it before execution.
+Venue mutations pass through Nautilus strategies. Parameter, start, and stop
+commands control the bounded quote strategy without placing an LLM or MCP
+inside its hot loop. Both Rust and Python make mainnet unrepresentable or
+refuse it before execution.
 
 - **Enforced by:** `nautilus_sidecar` unit and Hyperliquid testnet integration
   tests and `nautilus_commands_are_typed_local_and_single_attempt` in
@@ -10677,3 +10677,29 @@ never substitute for missing live production state.
 - **Enforced by:** `trading_workspace_ui` GPUI paint tests and
   `trading_workspace_panels_are_capability_gated_live_and_virtualized` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0273 — The first tick strategy is bounded inside Nautilus
+
+Omega's first engine strategy is a testnet-only, post-only BTC quote strategy.
+Quote, trade, and L2 book callbacks run inside Nautilus and drive a local
+cancel-then-replace state machine without an app, MCP, or model round-trip.
+The governance loop may set the minimum reprice interval and quote offset,
+then start or stop the strategy through the existing typed command channel.
+
+Before parameters cross that channel, Omega binds them to the current mandate
+revision and derives remaining position and hourly-order headroom from the
+live account projection, ledger, and active mandate. The engine treats that
+envelope as a hard cap. Missing parameters, exhausted order budget, position
+headroom, risk denial, or venue rejection halt the strategy and cancel its
+resting order. A lossless `strategy_state` event reports callback and action
+counts, the mandate revision, current order, and typed halt reason. Omega turns
+a reported breach into its existing halt and `agent_wakeup` path. Fills still
+flow through the shared stream into the balanced multi-asset ledger.
+
+Mainnet remains unrepresentable. The strategy uses a fixed 0.001 BTC order,
+permits only a non-crossing post-only offset from zero to one thousand basis
+points, and never retries an ambiguous venue mutation.
+
+- **Enforced by:** `nautilus_sidecar`, `nautilus_governance`, and
+  `omega_deltas` tests plus the ignored Hyperliquid testnet lifecycle proof and
+  `nautilus_tick_strategy_is_in_engine_mandate_bounded_and_testnet_only`.

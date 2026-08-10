@@ -119,10 +119,14 @@ fn command_channel_places_cancels_and_controls_an_engine_strategy() {
         .send_command(CommandRequest {
             command_id: "testnet-params-287".into(),
             command: NautilusCommand::SetStrategyParameters {
-                strategy_id: "OMEGA-TRIVIAL-001".into(),
+                strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
                 parameters: StrategyParameters {
-                    interval_ms: 25,
-                    signal: 287,
+                    min_reprice_interval_ms: 5_000,
+                    quote_offset_bps: 200,
+                    order_quantity: "0.001".into(),
+                    position_headroom_usd: 100,
+                    order_budget: 2,
+                    mandate_revision: 1,
                 },
             },
         })
@@ -138,7 +142,7 @@ fn command_channel_places_cancels_and_controls_an_engine_strategy() {
         .send_command(CommandRequest {
             command_id: "testnet-start-287".into(),
             command: NautilusCommand::StartStrategy {
-                strategy_id: "OMEGA-TRIVIAL-001".into(),
+                strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
             },
         })
         .expect("start strategy");
@@ -149,11 +153,52 @@ fn command_channel_places_cancels_and_controls_an_engine_strategy() {
         ),
         "unexpected start outcome: {start:?}"
     );
+    let strategy_deadline = Instant::now() + Duration::from_secs(30);
+    let mut strategy_evidence = None;
+    while Instant::now() < strategy_deadline {
+        let frame = supervisor
+            .take_stream_frame()
+            .expect("strategy stream frame");
+        for event in frame.state {
+            if let StreamEvent::StrategyState {
+                phase,
+                quote_ticks,
+                trade_ticks,
+                book_ticks,
+                action_count,
+                halted_reason,
+                ..
+            } = event
+                && phase == "order_resting"
+                && quote_ticks > 0
+                && book_ticks > 0
+                && action_count > 0
+            {
+                strategy_evidence = Some((
+                    quote_ticks,
+                    trade_ticks,
+                    book_ticks,
+                    action_count,
+                    halted_reason,
+                ));
+                break;
+            }
+        }
+        if strategy_evidence.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (quote_ticks, trade_ticks, book_ticks, action_count, halted_reason) =
+        strategy_evidence.expect("no in-engine strategy tick/action evidence reached Omega");
+    eprintln!(
+        "testnet tick strategy evidence: quote_ticks={quote_ticks} trade_ticks={trade_ticks} book_ticks={book_ticks} action_count={action_count} halted_reason={halted_reason:?}"
+    );
     let stop = supervisor
         .send_command(CommandRequest {
             command_id: "testnet-stop-287".into(),
             command: NautilusCommand::StopStrategy {
-                strategy_id: "OMEGA-TRIVIAL-001".into(),
+                strategy_id: "OMEGA-BOUNDED-QUOTE-001".into(),
             },
         })
         .expect("stop strategy");

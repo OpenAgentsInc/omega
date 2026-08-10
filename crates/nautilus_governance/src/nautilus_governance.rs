@@ -45,7 +45,7 @@ use trading_mandate::{
 use ui::SharedString;
 
 const VENUE: &str = "hyperliquid";
-const STRATEGY_ID: &str = "OMEGA-TRIVIAL-001";
+const STRATEGY_ID: &str = "OMEGA-BOUNDED-QUOTE-001";
 const CAPABILITY_MAX_AGE_MS: i64 = 30_000;
 const USDC_SCALE: u32 = 6;
 const BTC_SCALE: u32 = 8;
@@ -65,6 +65,7 @@ struct GovernanceState {
     account: Option<Value>,
     orders: Vec<Value>,
     positions: Vec<Value>,
+    strategy: Option<Value>,
     halted_reason: Option<String>,
     #[serde(skip)]
     processed_event_keys: HashSet<String>,
@@ -158,6 +159,12 @@ impl GovernanceRuntime {
                     ..
                 } => {
                     self.record_fill(*generation, *sequence, state)?;
+                }
+                StreamEvent::StrategyState { halted_reason, .. } => {
+                    self.state.lock().strategy = Some(serde_json::to_value(event)?);
+                    if let Some(reason) = halted_reason {
+                        self.halt(format!("Nautilus strategy halted: {reason}"));
+                    }
                 }
                 StreamEvent::Quote { .. }
                 | StreamEvent::Trade { .. }
@@ -492,6 +499,39 @@ impl GovernanceRuntime {
             })
             .count();
         u32::try_from(count).context("hourly order count overflowed")
+    }
+
+    fn bounded_strategy_parameters(
+        &self,
+        mandate_revision: u64,
+        min_reprice_interval_ms: u64,
+        quote_offset_bps: u32,
+    ) -> Result<StrategyParameters> {
+        let snapshot = self.mandate.snapshot()?;
+        if snapshot.revision != mandate_revision {
+            bail!("trading mandate changed before strategy parameters were sent");
+        }
+        let mandate = snapshot
+            .mandate_for(VENUE, TradingNetwork::Testnet)
+            .context("testnet strategy has no active mandate")?;
+        let risk = self.risk_snapshot(false)?;
+        let position_headroom_usd = mandate
+            .max_position_usd
+            .checked_sub(risk.position_notional_usd)
+            .context("testnet strategy mandate has no position headroom")?;
+        let orders_used = self.orders_last_hour(unix_ms()?)?;
+        let order_budget = mandate
+            .max_orders_per_hour
+            .checked_sub(orders_used)
+            .context("testnet strategy mandate has no order-rate headroom")?;
+        Ok(StrategyParameters {
+            min_reprice_interval_ms,
+            quote_offset_bps,
+            order_quantity: "0.001".into(),
+            position_headroom_usd,
+            order_budget,
+            mandate_revision,
+        })
     }
 
     fn record_receipt(
@@ -1028,8 +1068,8 @@ enum StrategyInput {
     },
     Stop,
     SetParameters {
-        interval_ms: u64,
-        signal: i64,
+        min_reprice_interval_ms: u64,
+        quote_offset_bps: u32,
         prediction_id: String,
         decision_id: String,
     },
@@ -1063,18 +1103,26 @@ impl AgentTool for StrategyTool {
         cx.spawn(async move |_cx| {
             refresh?;
             let input = input.recv().await.map_err(|error| ToolOutput::error(error.to_string()))?;
-            let (command, prediction_id, emergency) = match input {
+            let (prediction_id, emergency) = match &input {
                 StrategyInput::Start { prediction_id, decision_id } => {
                     self.runtime.require_prediction(&prediction_id, &decision_id).map_err(|error| ToolOutput::error(error.to_string()))?;
-                    (NautilusCommand::StartStrategy { strategy_id: STRATEGY_ID.into() }, Some(prediction_id), false)
+                    (Some(prediction_id.clone()), false)
                 }
-                StrategyInput::Stop => (NautilusCommand::StopStrategy { strategy_id: STRATEGY_ID.into() }, None, true),
-                StrategyInput::SetParameters { interval_ms, signal, prediction_id, decision_id } => {
+                StrategyInput::Stop => (None, true),
+                StrategyInput::SetParameters { prediction_id, decision_id, .. } => {
                     self.runtime.require_prediction(&prediction_id, &decision_id).map_err(|error| ToolOutput::error(error.to_string()))?;
-                    (NautilusCommand::SetStrategyParameters { strategy_id: STRATEGY_ID.into(), parameters: StrategyParameters { interval_ms, signal } }, Some(prediction_id), false)
+                    (Some(prediction_id.clone()), false)
                 }
             };
             let revision = self.runtime.authorize(VenueActionClass::StrategyExecution, 0, emergency).map_err(|error| ToolOutput::error(error.to_string()))?;
+            let command = match input {
+                StrategyInput::Start { .. } => NautilusCommand::StartStrategy { strategy_id: STRATEGY_ID.into() },
+                StrategyInput::Stop => NautilusCommand::StopStrategy { strategy_id: STRATEGY_ID.into() },
+                StrategyInput::SetParameters { min_reprice_interval_ms, quote_offset_bps, .. } => {
+                    let parameters = self.runtime.bounded_strategy_parameters(revision, min_reprice_interval_ms, quote_offset_bps).map_err(|error| ToolOutput::error(error.to_string()))?;
+                    NautilusCommand::SetStrategyParameters { strategy_id: STRATEGY_ID.into(), parameters }
+                }
+            };
             let receipt = send_once(self.channel.as_ref(), CommandRequest { command_id: self.runtime.next_command_id("strategy"), command }).await?;
             self.runtime.record_receipt(&receipt, revision, prediction_id.as_deref()).map_err(|error| ToolOutput::error(error.to_string()))?;
             Ok(ToolOutput::ok(json!({"schema":"omega.nautilus.strategy.v1","mandate_revision":revision,"receipt":receipt})))
@@ -1289,6 +1337,11 @@ fn stream_event_key(event: &StreamEvent) -> String {
             sequence,
             ..
         } => format!("fill-{generation}-{sequence}"),
+        StreamEvent::StrategyState {
+            generation,
+            sequence,
+            ..
+        } => format!("strategy-state-{generation}-{sequence}"),
     }
 }
 
@@ -1483,6 +1536,38 @@ mod tests {
     }
 
     #[test]
+    fn in_engine_strategy_breach_halts_and_wakes_governance() -> Result<()> {
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let event = serde_json::from_value(json!({
+            "type": "strategy_state",
+            "schema": "omega.nautilus.stream.v1",
+            "generation": 1,
+            "sequence": 9,
+            "network": "testnet",
+            "strategy_id": STRATEGY_ID,
+            "phase": "halted",
+            "running": true,
+            "halted_reason": "position_limit",
+            "mandate_revision": 2,
+            "quote_ticks": 40,
+            "trade_ticks": 7,
+            "book_ticks": 31,
+            "action_count": 3,
+            "active_client_order_id": null,
+            "ts_init": 99
+        }))?;
+        runtime.ingest(&[event])?;
+        let state = runtime.state.lock();
+        assert_eq!(
+            state.halted_reason.as_deref(),
+            Some("Nautilus strategy halted: position_limit")
+        );
+        assert!(state.pending_wakeup.is_some());
+        assert!(state.strategy.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn unknown_account_mode_halts_governance() -> Result<()> {
         let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
         runtime.observe_account_modes(&json!({"account_type":"ALIEN","margin_mode":"cross"}))?;
@@ -1672,6 +1757,155 @@ mod tests {
             cancel.acknowledged,
             cancel.sent,
             entries.len(),
+        );
+        supervisor.stop()?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires explicit confirmation, testnet key, and a bounded live fill window"]
+    fn confirmed_testnet_tick_strategy_fill_reaches_the_ledger() -> Result<()> {
+        if std::env::var("OMEGA_NAUTILUS_TEST_CONFIRMED").as_deref() != Ok("YES") {
+            bail!(
+                "set OMEGA_NAUTILUS_TEST_CONFIRMED=YES after explicitly confirming the testnet strategy run"
+            );
+        }
+        let private_key = std::env::var("HYPERLIQUID_TESTNET_PRIVATE_KEY")
+            .context("HYPERLIQUID_TESTNET_PRIVATE_KEY must be configured")?;
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .context("repository root")?
+            .to_path_buf();
+        let config = nautilus_sidecar::NautilusConfig {
+            network: nautilus_sidecar::Network::Testnet,
+            python: repository_root.join("sidecar/nautilus/.venv/bin/python"),
+            engine: repository_root.join("sidecar/nautilus/engine.py"),
+            reconciliation_lookback_minutes: 60,
+            health_timeout: Duration::from_secs(40),
+        };
+        let mut supervisor = nautilus_sidecar::NautilusSupervisor::new(
+            config,
+            nautilus_sidecar::PrivateKey::new(private_key.into_bytes())?,
+        )?;
+        supervisor.start()?;
+
+        let runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        let account_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < account_deadline {
+            let frame = supervisor.take_stream_frame()?;
+            runtime.ingest(&frame.state)?;
+            if runtime.state.lock().account.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let risk = runtime.risk_snapshot(false)?;
+        let now = unix_ms()?;
+        let mandate = TradingMandate {
+            venue: VENUE.into(),
+            network: TradingNetwork::Testnet,
+            collateral_asset: AssetId::usdc(),
+            objective: "Bounded in-engine BTC testnet quote and fill proof".into(),
+            max_venue_balance: risk.venue_balance_micros.saturating_add(1_000_000_000),
+            max_position_usd: risk.position_notional_usd.saturating_add(1_000),
+            max_leverage: 2,
+            daily_loss_stop: 100_000_000,
+            max_orders_per_hour: 30,
+            min_liquidation_buffer_bps: 1_000,
+            allowed_strategies: BTreeSet::from([STRATEGY_ID.into()]),
+            review_cadence: MandateReviewCadence::Interval { seconds: 3_600 },
+            expires_at_ms: now.saturating_add(600_000),
+        };
+        let proposal = runtime.mandate.propose(mandate)?;
+        let approved =
+            trading_mandate::MandateStore::apply_ui_approved(&runtime.mandate, proposal, now)?;
+        let parameters = runtime.bounded_strategy_parameters(approved.revision, 30_000, 0)?;
+        let parameter_receipt = supervisor.send_command(CommandRequest {
+            command_id: "testnet-strategy-parameters-290".into(),
+            command: NautilusCommand::SetStrategyParameters {
+                strategy_id: STRATEGY_ID.into(),
+                parameters,
+            },
+        })?;
+        if !matches!(
+            parameter_receipt.outcome,
+            nautilus_sidecar::CommandOutcome::StrategyParametersApplied { .. }
+        ) {
+            bail!(
+                "testnet strategy parameters were not applied: {:?}",
+                parameter_receipt.outcome
+            );
+        }
+        let start_receipt = supervisor.send_command(CommandRequest {
+            command_id: "testnet-strategy-start-290".into(),
+            command: NautilusCommand::StartStrategy {
+                strategy_id: STRATEGY_ID.into(),
+            },
+        })?;
+        if !matches!(
+            start_receipt.outcome,
+            nautilus_sidecar::CommandOutcome::StrategyStarted { running: true }
+        ) {
+            bail!(
+                "testnet strategy did not start: {:?}",
+                start_receipt.outcome
+            );
+        }
+
+        let fill_deadline = std::time::Instant::now() + Duration::from_secs(300);
+        let mut strategy_fill = None;
+        while std::time::Instant::now() < fill_deadline {
+            let frame = supervisor.take_stream_frame()?;
+            for event in &frame.state {
+                if let StreamEvent::Fill {
+                    generation,
+                    sequence,
+                    state,
+                    ..
+                } = event
+                    && find_string(&Value::Object(state.clone()), &["client_order_id"])
+                        .is_some_and(|id| id.starts_with("O-290-"))
+                {
+                    strategy_fill = Some((*generation, *sequence));
+                }
+            }
+            runtime.ingest(&frame.state)?;
+            if strategy_fill.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stop_receipt = supervisor.send_command(CommandRequest {
+            command_id: "testnet-strategy-stop-290".into(),
+            command: NautilusCommand::StopStrategy {
+                strategy_id: STRATEGY_ID.into(),
+            },
+        })?;
+        if !matches!(
+            stop_receipt.outcome,
+            nautilus_sidecar::CommandOutcome::StrategyStopped { running: false }
+        ) {
+            bail!(
+                "testnet strategy did not stop cleanly: {:?}",
+                stop_receipt.outcome
+            );
+        }
+        let (fill_generation, fill_sequence) =
+            strategy_fill.context("bounded testnet strategy produced no fill in five minutes")?;
+        let entries = runtime.ledger.entries(&LedgerQuery::default())?;
+        let fill_entry = entries
+            .iter()
+            .find(|entry| {
+                entry.kind == LedgerEntryKind::Fill
+                    && entry.metadata["generation"] == fill_generation
+                    && entry.metadata["stream_sequence"] == fill_sequence
+            })
+            .context("strategy fill did not reach the trading ledger")?;
+        println!(
+            "testnet strategy fill evidence: generation={fill_generation} stream_sequence={fill_sequence} ledger_entry_id={} postings={}",
+            fill_entry.event_id,
+            fill_entry.postings.len(),
         );
         supervisor.stop()?;
         Ok(())

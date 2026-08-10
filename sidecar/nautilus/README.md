@@ -1,8 +1,9 @@
 # Omega Nautilus sidecar
 
 This component is the testnet-only NautilusTrader engine managed by Omega.
-It contains lifecycle and venue connectivity only; strategies and governance
-commands are separate layers.
+Its bounded BTC quote strategy runs quote, trade, and book reactions inside
+Nautilus. Omega supplies its mandate envelope and start, parameter, and stop
+commands above the tick loop.
 
 Install the pinned runtime with `./setup.sh`. Omega starts it only when
 `OMEGA_NAUTILUS_SIDECAR=1`; `OMEGA_NAUTILUS_NETWORK` defaults to `testnet` and

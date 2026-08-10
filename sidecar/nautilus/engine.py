@@ -151,6 +151,7 @@ def main() -> None:
     command_thread.start()
     node = builder.build()
     stream_publisher = StreamPublisher(event_output, args.generation)
+    command_bridge.configure_stream(stream_publisher)
     node.add_strategy(OmegaStreamStrategy(stream_publisher))
     emit("starting", args.generation)
     try:
