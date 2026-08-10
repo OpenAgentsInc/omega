@@ -239,6 +239,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0266",
     "OMEGA-DELTA-0267",
     "OMEGA-DELTA-0268",
+    "OMEGA-DELTA-0269",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30955,6 +30956,56 @@ mod tests {
         assert!(
             startup.contains("nautilus_sidecar::init(cx);"),
             "OMEGA-DELTA-0268: Omega no longer owns the Nautilus lifecycle"
+        );
+    }
+
+    /// Nautilus publishes one continuous versioned testnet stream whose app
+    /// consumer coalesces market snapshots without dropping execution state.
+    #[test]
+    fn nautilus_stream_is_typed_backpressured_and_renderable() {
+        let transport = without_comments(&read_repository_file(
+            "crates/nautilus_sidecar/src/nautilus_sidecar.rs",
+        ));
+        for required in [
+            "omega.nautilus.stream.v1",
+            "pub enum StreamEvent",
+            "Self::Account",
+            "Self::Order",
+            "Self::Position",
+            "Self::Fill",
+            "latest_quote",
+            "latest_book",
+            "lossless_state",
+            "take_frame(",
+            "book_levels(",
+            "cx.notify();",
+        ] {
+            assert!(
+                transport.contains(required),
+                "OMEGA-DELTA-0269: Nautilus stream lost `{required}`"
+            );
+        }
+
+        let strategy =
+            without_comments(&read_repository_file("sidecar/nautilus/stream_strategy.py"));
+        for required in [
+            "subscribe_quotes",
+            "subscribe_trades",
+            "subscribe_book_deltas",
+            "on_order_event",
+            "on_order_filled",
+            "on_position_event",
+            "lossless=True",
+            "deque(maxlen=2_048)",
+        ] {
+            assert!(
+                strategy.contains(required),
+                "OMEGA-DELTA-0269: Nautilus producer lost `{required}`"
+            );
+        }
+        assert!(
+            !strategy.contains("submit_order("),
+            "OMEGA-DELTA-0269: the observer strategy gained order placement"
         );
     }
 }

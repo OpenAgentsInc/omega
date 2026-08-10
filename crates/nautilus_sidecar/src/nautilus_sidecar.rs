@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead as _, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -6,7 +7,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use gpui::{App, Global, Subscription, TaskExt as _};
+use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, TaskExt as _};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -15,10 +16,15 @@ pub const ENABLE_ENVIRONMENT_VARIABLE: &str = "OMEGA_NAUTILUS_SIDECAR";
 pub const NETWORK_ENVIRONMENT_VARIABLE: &str = "OMEGA_NAUTILUS_NETWORK";
 const EVENT_PREFIX: &str = "OMEGA_NAUTILUS_EVENT ";
 const EVENT_SCHEMA: &str = "omega.nautilus.lifecycle.v1";
+const STREAM_PREFIX: &str = "OMEGA_NAUTILUS_STREAM ";
+const STREAM_SCHEMA: &str = "omega.nautilus.stream.v1";
 const DEFAULT_RECONCILIATION_LOOKBACK_MINUTES: u16 = 60;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(15);
 const MONITOR_INTERVAL: Duration = Duration::from_secs(2);
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const TRADE_BUFFER_CAPACITY: usize = 2_048;
+const TRADES_PER_FRAME: usize = 256;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +131,361 @@ impl LifecycleEvent {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BookAction {
+    Add,
+    Update,
+    Delete,
+    Clear,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BookSide {
+    Buy,
+    Sell,
+    NoOrderSide,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BookOrder {
+    pub side: BookSide,
+    pub price: String,
+    pub size: String,
+    pub order_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BookDelta {
+    #[serde(rename = "type")]
+    pub data_type: String,
+    pub instrument_id: String,
+    pub action: BookAction,
+    pub order: Option<BookOrder>,
+    pub flags: u8,
+    pub sequence: u64,
+    pub ts_event: u64,
+    pub ts_init: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamEvent {
+    Quote {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        instrument_id: String,
+        bid_price: String,
+        ask_price: String,
+        bid_size: String,
+        ask_size: String,
+        ts_event: u64,
+        ts_init: u64,
+    },
+    Trade {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        instrument_id: String,
+        price: String,
+        size: String,
+        aggressor_side: String,
+        trade_id: String,
+        ts_event: u64,
+        ts_init: u64,
+    },
+    Book {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        instrument_id: String,
+        deltas: Vec<BookDelta>,
+        ts_event: u64,
+        ts_init: u64,
+    },
+    Account {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        #[serde(flatten)]
+        state: serde_json::Map<String, serde_json::Value>,
+    },
+    Order {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        #[serde(flatten)]
+        state: serde_json::Map<String, serde_json::Value>,
+    },
+    OrderState {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        venue: String,
+        orders: Vec<serde_json::Value>,
+        ts_init: u64,
+    },
+    Position {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        #[serde(flatten)]
+        state: serde_json::Map<String, serde_json::Value>,
+    },
+    PositionState {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        venue: String,
+        positions: Vec<serde_json::Value>,
+        ts_init: u64,
+    },
+    Fill {
+        schema: String,
+        generation: u64,
+        sequence: u64,
+        network: Network,
+        #[serde(flatten)]
+        state: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+impl StreamEvent {
+    fn validate(&self, expected_generation: u64) -> Result<()> {
+        let (schema, generation, network) = match self {
+            Self::Quote {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::Trade {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::Book {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::Account {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::Order {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::OrderState {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::Position {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::PositionState {
+                schema,
+                generation,
+                network,
+                ..
+            }
+            | Self::Fill {
+                schema,
+                generation,
+                network,
+                ..
+            } => (schema, generation, network),
+        };
+        if schema != STREAM_SCHEMA {
+            bail!("Nautilus stream schema is not supported");
+        }
+        if *generation != expected_generation {
+            bail!("Nautilus stream event has a stale generation");
+        }
+        if *network != Network::Testnet {
+            bail!("Nautilus stream event is not testnet");
+        }
+        Ok(())
+    }
+
+    fn is_lossless_state(&self) -> bool {
+        matches!(
+            self,
+            Self::Account { .. }
+                | Self::Order { .. }
+                | Self::OrderState { .. }
+                | Self::Position { .. }
+                | Self::PositionState { .. }
+                | Self::Fill { .. }
+        )
+    }
+}
+
+#[derive(Default)]
+struct StreamBuffer {
+    latest_quote: Option<StreamEvent>,
+    latest_book: Option<StreamEvent>,
+    trades: VecDeque<StreamEvent>,
+    lossless_state: VecDeque<StreamEvent>,
+}
+
+impl StreamBuffer {
+    fn ingest(&mut self, event: StreamEvent) {
+        if event.is_lossless_state() {
+            self.lossless_state.push_back(event);
+        } else {
+            match event {
+                event @ StreamEvent::Quote { .. } => self.latest_quote = Some(event),
+                event @ StreamEvent::Book { .. } => self.latest_book = Some(event),
+                event @ StreamEvent::Trade { .. } => {
+                    if self.trades.len() == TRADE_BUFFER_CAPACITY {
+                        self.trades.pop_front();
+                    }
+                    self.trades.push_back(event);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn take_frame(&mut self) -> StreamFrame {
+        StreamFrame {
+            quote: self.latest_quote.take(),
+            book: self.latest_book.take(),
+            trades: self
+                .trades
+                .drain(..self.trades.len().min(TRADES_PER_FRAME))
+                .collect(),
+            state: self.lossless_state.drain(..).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StreamFrame {
+    pub quote: Option<StreamEvent>,
+    pub book: Option<StreamEvent>,
+    pub trades: Vec<StreamEvent>,
+    pub state: Vec<StreamEvent>,
+}
+
+impl StreamFrame {
+    fn is_empty(&self) -> bool {
+        self.quote.is_none()
+            && self.book.is_none()
+            && self.trades.is_empty()
+            && self.state.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderableBookLevel {
+    pub price: String,
+    pub size: String,
+}
+
+#[derive(Default)]
+pub struct NautilusStreamSource {
+    latest_quote: Option<StreamEvent>,
+    bids: HashMap<String, String>,
+    asks: HashMap<String, String>,
+    trade_count: u64,
+    state_event_count: u64,
+    frame_count: u64,
+}
+
+impl NautilusStreamSource {
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalNautilusStreamSource>()
+            .map(|source| source.0.clone())
+    }
+
+    pub fn latest_quote(&self) -> Option<&StreamEvent> {
+        self.latest_quote.as_ref()
+    }
+
+    pub fn book_levels(&self) -> (Vec<RenderableBookLevel>, Vec<RenderableBookLevel>) {
+        let levels = |side: &HashMap<String, String>| {
+            side.iter()
+                .map(|(price, size)| RenderableBookLevel {
+                    price: price.clone(),
+                    size: size.clone(),
+                })
+                .collect()
+        };
+        (levels(&self.bids), levels(&self.asks))
+    }
+
+    pub fn counts(&self) -> (u64, u64, u64) {
+        (self.trade_count, self.state_event_count, self.frame_count)
+    }
+
+    fn apply_frame(&mut self, frame: StreamFrame, cx: &mut Context<Self>) {
+        if let Some(quote) = frame.quote {
+            self.latest_quote = Some(quote);
+        }
+        if let Some(StreamEvent::Book { deltas, .. }) = frame.book {
+            for delta in deltas {
+                let Some(order) = delta.order else {
+                    if delta.action == BookAction::Clear {
+                        self.bids.clear();
+                        self.asks.clear();
+                    }
+                    continue;
+                };
+                let side = match order.side {
+                    BookSide::Buy => &mut self.bids,
+                    BookSide::Sell => &mut self.asks,
+                    BookSide::NoOrderSide => continue,
+                };
+                match delta.action {
+                    BookAction::Add | BookAction::Update => {
+                        side.insert(order.price, order.size);
+                    }
+                    BookAction::Delete => {
+                        side.remove(&order.price);
+                    }
+                    BookAction::Clear => side.clear(),
+                }
+            }
+        }
+        self.trade_count = self.trade_count.saturating_add(frame.trades.len() as u64);
+        self.state_event_count = self
+            .state_event_count
+            .saturating_add(frame.state.len() as u64);
+        self.frame_count = self.frame_count.saturating_add(1);
+        cx.notify();
+    }
+}
+
+struct GlobalNautilusStreamSource(Entity<NautilusStreamSource>);
+
+impl Global for GlobalNautilusStreamSource {}
+
 pub struct NautilusSupervisor {
     config: NautilusConfig,
     private_key: PrivateKey,
@@ -132,6 +493,7 @@ pub struct NautilusSupervisor {
     events: Option<mpsc::Receiver<Result<LifecycleEvent>>>,
     generation: u64,
     last_health: Option<LifecycleEvent>,
+    stream: Arc<Mutex<StreamBuffer>>,
 }
 
 impl NautilusSupervisor {
@@ -146,11 +508,24 @@ impl NautilusSupervisor {
             events: None,
             generation: 0,
             last_health: None,
+            stream: Arc::new(Mutex::new(StreamBuffer::default())),
         })
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    fn stream(&self) -> Arc<Mutex<StreamBuffer>> {
+        self.stream.clone()
+    }
+
+    pub fn take_stream_frame(&self) -> Result<StreamFrame> {
+        Ok(self
+            .stream
+            .lock()
+            .map_err(|_| anyhow!("Nautilus stream buffer lock is poisoned"))?
+            .take_frame())
     }
 
     // This whole synchronous lifecycle is run inside `smol::unblock`; using
@@ -191,6 +566,8 @@ impl NautilusSupervisor {
             .take()
             .ok_or_else(|| anyhow!("Nautilus sidecar stderr is unavailable"))?;
         let (sender, receiver) = mpsc::channel();
+        let stream = self.stream.clone();
+        let expected_generation = self.generation;
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let line = match line {
@@ -202,13 +579,29 @@ impl NautilusSupervisor {
                         return;
                     }
                 };
-                let Some(payload) = line.strip_prefix(EVENT_PREFIX) else {
-                    continue;
-                };
-                let event =
-                    serde_json::from_str(payload).context("decode Nautilus lifecycle event");
-                if sender.send(event).is_err() {
-                    return;
+                if let Some(payload) = line.strip_prefix(EVENT_PREFIX) {
+                    let event =
+                        serde_json::from_str(payload).context("decode Nautilus lifecycle event");
+                    if sender.send(event).is_err() {
+                        return;
+                    }
+                } else if let Some(payload) = line.strip_prefix(STREAM_PREFIX) {
+                    let event = serde_json::from_str::<StreamEvent>(payload)
+                        .context("decode Nautilus stream event")
+                        .and_then(|event| {
+                            event.validate(expected_generation)?;
+                            Ok(event)
+                        });
+                    match event {
+                        Ok(event) => match stream.lock() {
+                            Ok(mut stream) => stream.ingest(event),
+                            Err(_) => {
+                                log::error!("Nautilus stream buffer lock is poisoned");
+                                return;
+                            }
+                        },
+                        Err(error) => log::warn!("Rejected Nautilus stream event: {error:#}"),
+                    }
                 }
             }
         });
@@ -333,6 +726,8 @@ pub fn init(cx: &mut App) {
         }
     };
     let supervisor = Arc::new(Mutex::new(None::<NautilusSupervisor>));
+    let stream_source = cx.new(|_| NautilusStreamSource::default());
+    cx.set_global(GlobalNautilusStreamSource(stream_source.clone()));
     let shutting_down = Arc::new(AtomicBool::new(false));
     let quit_subscription = cx.on_app_quit({
         let supervisor = supervisor.clone();
@@ -368,6 +763,7 @@ pub fn init(cx: &mut App) {
             .await?
             .ok_or_else(|| anyhow!("Hyperliquid testnet credential is not configured"))?;
         let sidecar = NautilusSupervisor::new(config, PrivateKey::new(private_key)?)?;
+        let stream = sidecar.stream();
         {
             let supervisor = supervisor.clone();
             smol::unblock(move || -> Result<()> {
@@ -383,19 +779,30 @@ pub fn init(cx: &mut App) {
             })
             .await?;
         }
+        let mut last_monitor = Instant::now();
         while !shutting_down.load(Ordering::SeqCst) {
-            background_executor.timer(MONITOR_INTERVAL).await;
-            let supervisor = supervisor.clone();
-            smol::unblock(move || -> Result<()> {
-                supervisor
-                    .lock()
-                    .map_err(|_| anyhow!("Nautilus supervisor lock is poisoned"))?
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("Nautilus supervisor is unavailable"))?
-                    .ensure_healthy()?;
-                Ok(())
-            })
-            .await?;
+            background_executor.timer(FRAME_INTERVAL).await;
+            let frame = stream
+                .lock()
+                .map_err(|_| anyhow!("Nautilus stream buffer lock is poisoned"))?
+                .take_frame();
+            if !frame.is_empty() {
+                stream_source.update(cx, |source, cx| source.apply_frame(frame, cx));
+            }
+            if last_monitor.elapsed() >= MONITOR_INTERVAL {
+                let supervisor = supervisor.clone();
+                smol::unblock(move || -> Result<()> {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow!("Nautilus supervisor lock is poisoned"))?
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("Nautilus supervisor is unavailable"))?
+                        .ensure_healthy()?;
+                    Ok(())
+                })
+                .await?;
+                last_monitor = Instant::now();
+            }
         }
         Ok::<(), anyhow::Error>(())
     })
@@ -405,6 +812,8 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -429,6 +838,129 @@ mod tests {
         };
         assert!(event.validate(2).is_ok());
         assert!(event.validate(1).is_err());
+    }
+
+    fn quote(sequence: u64, bid_price: &str) -> StreamEvent {
+        serde_json::from_value(serde_json::json!({
+            "type": "quote",
+            "schema": STREAM_SCHEMA,
+            "generation": 3,
+            "sequence": sequence,
+            "network": "testnet",
+            "instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+            "bid_price": bid_price,
+            "ask_price": "65001.0",
+            "bid_size": "1.0",
+            "ask_size": "2.0",
+            "ts_event": sequence,
+            "ts_init": sequence,
+        }))
+        .expect("valid quote")
+    }
+
+    fn order_state(sequence: u64) -> StreamEvent {
+        serde_json::from_value(serde_json::json!({
+            "type": "order_state",
+            "schema": STREAM_SCHEMA,
+            "generation": 3,
+            "sequence": sequence,
+            "network": "testnet",
+            "venue": "HYPERLIQUID",
+            "orders": [],
+            "ts_init": sequence,
+        }))
+        .expect("valid order state")
+    }
+
+    #[test]
+    fn stream_events_are_versioned_generation_fenced_and_testnet_only() {
+        let event = quote(1, "65000.0");
+        assert!(event.validate(3).is_ok());
+        assert!(event.validate(2).is_err());
+
+        let mainnet = serde_json::json!({
+            "type": "quote",
+            "schema": STREAM_SCHEMA,
+            "generation": 3,
+            "sequence": 1,
+            "network": "mainnet",
+            "instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+            "bid_price": "65000.0",
+            "ask_price": "65001.0",
+            "bid_size": "1.0",
+            "ask_size": "2.0",
+            "ts_event": 1,
+            "ts_init": 1,
+        });
+        assert!(serde_json::from_value::<StreamEvent>(mainnet).is_err());
+    }
+
+    #[test]
+    fn market_snapshots_coalesce_while_state_events_are_lossless() {
+        let mut stream = StreamBuffer::default();
+        stream.ingest(quote(1, "65000.0"));
+        stream.ingest(order_state(2));
+        stream.ingest(quote(3, "65002.0"));
+        stream.ingest(order_state(4));
+
+        let frame = stream.take_frame();
+        assert!(matches!(
+            frame.quote,
+            Some(StreamEvent::Quote { sequence: 3, .. })
+        ));
+        assert_eq!(frame.state.len(), 2);
+        assert!(stream.take_frame().is_empty());
+    }
+
+    #[gpui::test]
+    async fn app_source_reconstructs_a_renderable_book_once_per_frame(cx: &mut TestAppContext) {
+        let source = cx.new(|_| NautilusStreamSource::default());
+        let book = serde_json::from_value(serde_json::json!({
+            "type": "book",
+            "schema": STREAM_SCHEMA,
+            "generation": 3,
+            "sequence": 5,
+            "network": "testnet",
+            "instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+            "deltas": [{
+                "type": "OrderBookDelta",
+                "instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+                "action": "ADD",
+                "order": {"side": "BUY", "price": "65000.0", "size": "1.25", "order_id": 0},
+                "flags": 0,
+                "sequence": 1,
+                "ts_event": 5,
+                "ts_init": 5
+            }],
+            "ts_event": 5,
+            "ts_init": 5
+        }))
+        .expect("valid book event");
+        source.update(cx, |source, cx| {
+            source.apply_frame(
+                StreamFrame {
+                    quote: Some(quote(4, "64999.0")),
+                    book: Some(book),
+                    trades: Vec::new(),
+                    state: vec![order_state(6)],
+                },
+                cx,
+            );
+        });
+
+        source.read_with(cx, |source, _| {
+            let (bids, asks) = source.book_levels();
+            assert_eq!(
+                bids,
+                vec![RenderableBookLevel {
+                    price: "65000.0".into(),
+                    size: "1.25".into(),
+                }]
+            );
+            assert!(asks.is_empty());
+            assert_eq!(source.counts(), (0, 1, 1));
+            assert!(source.latest_quote().is_some());
+        });
     }
 
     #[cfg(unix)]

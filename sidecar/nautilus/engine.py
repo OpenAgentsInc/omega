@@ -94,6 +94,8 @@ def main() -> None:
     from nautilus_trader.live import LiveNode
     from nautilus_trader.model import AccountId
     from nautilus_trader.model import TraderId
+    from stream_strategy import OmegaStreamStrategy
+    from stream_strategy import StreamPublisher
 
     trader_id = TraderId.from_str("OMEGA-001")
     account_id = AccountId.from_str("HYPERLIQUID-001")
@@ -121,12 +123,15 @@ def main() -> None:
     )
     event_output, monitor_thread = capture_engine_logs(args)
     node = builder.build()
+    stream_publisher = StreamPublisher(event_output, args.generation)
+    node.add_strategy(OmegaStreamStrategy(stream_publisher))
     emit("starting", args.generation)
     try:
         node.run()
     finally:
         node.stop()
         node.dispose()
+        stream_publisher.close()
         os.dup2(event_output, sys.stdout.fileno())
         monitor_thread.join(timeout=5)
         emit("stopped", args.generation)

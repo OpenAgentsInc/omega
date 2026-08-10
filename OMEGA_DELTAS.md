@@ -10547,3 +10547,21 @@ strategy lane, while governance remains above this process boundary.
 - **Enforced by:** `nautilus_sidecar` unit tests and
   `nautilus_lifecycle_is_app_owned_versioned_and_testnet_only` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0269 — Nautilus streams typed testnet state into renderable app frames
+
+The managed Nautilus engine publishes BTC Hyperliquid testnet quotes, trades,
+L2 book deltas, account state, orders, positions, and fills over one continuous
+local typed stream. Every event declares `omega.nautilus.stream.v1`, its engine
+generation, a monotonic sequence, and the testnet network. Omega rejects stale,
+unsupported, or non-testnet frames before they reach app state.
+
+The observer strategy only subscribes and reports; it cannot place orders and
+does not move governance into the tick loop. Quote and book snapshots coalesce,
+and trades use a bounded queue at the process boundary. Account, order,
+position, and fill events use a separate lossless queue. The app drains both
+classes once per display frame, reconstructs a renderable L2 ladder, and emits
+at most one UI notification for that frame.
+
+- **Enforced by:** `nautilus_sidecar` stream schema, generation, backpressure,
+  lossless-state, lifecycle, and testnet integration tests.
