@@ -7,7 +7,9 @@
 //! registers when `OMEGA_MARKET_PANEL=1`.
 
 mod discovery;
+mod network_transport;
 mod panel;
+mod receipt_ledger;
 mod session_flow;
 mod session_transport;
 
@@ -20,15 +22,27 @@ pub use discovery::{
     OfferingListing, ProviderListing, RELAY_URL_ENVIRONMENT_VARIABLE, SUBSCRIPTION_ID,
     validate_market_relay_information,
 };
+pub use network_transport::{
+    MultiRelayStatus, ProviderNetworkState, RelayAvailability, RelaySetPlan, fanout_exact_event,
+};
 pub use panel::MarketPanel;
+pub use receipt_ledger::{
+    RECEIPT_EXPORT_DIRECTORY, RECEIPT_EXPORT_SCHEMA, RECEIPT_LEDGER_SCHEMA,
+    RECEIPT_LEDGER_STRATEGY, ReceiptVerification, export_verified_receipt,
+    persist_verified_receipt, receipt_ledger_drafts, verify_receipts,
+    verify_receipts_with_provider_keys,
+};
 pub use session_flow::{
-    AdmitOutcome, CancelEntry, CloseEntry, MarketSession, QuoteCandidate,
-    SESSION_FLOW_TRACKING_ISSUE, SESSION_STORE_DIRECTORY, SESSION_STORE_SCHEMA,
+    AcknowledgmentEntry, AdmitOutcome, CancelEntry, CloseEntry, IntentProgress, MarketSession,
+    QuoteCandidate, SESSION_FLOW_TRACKING_ISSUE, SESSION_STORE_DIRECTORY, SESSION_STORE_SCHEMA,
     SessionFlowAvailability, SessionPhase, StatusEntry, StatusLane, StatusSlot, fold_status_lanes,
     load_stored_records, rfq_quote_set, select_quote, session_flow_availability,
     swp_profile_support, throwaway_session_signer, wrap_for_transport,
 };
-pub use session_transport::{SESSION_SUBSCRIPTION_ID, SessionSocketEvent, run_session_socket};
+pub use session_transport::{
+    SESSION_NETWORK_SUBSCRIPTION_ID, SESSION_SUBSCRIPTION_ID, SessionInbox, SessionSocketEvent,
+    run_session_socket,
+};
 
 actions!(
     market,

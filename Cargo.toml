@@ -364,7 +364,7 @@ http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
-immortal-client = { git = "https://github.com/OpenAgentsInc/immortal", rev = "5838b23a97fd32d9744ad36f1025275341243077", default-features = false, features = [
+immortal-client = { git = "https://github.com/OpenAgentsInc/immortal", rev = "b85b72d44d8f15cf28decf33fc8277588c9ed80c", default-features = false, features = [
     "mkt-swp-verify",
 ] }
 edit_prediction_types = { path = "crates/edit_prediction_types" }

@@ -26,8 +26,8 @@ use futures::StreamExt as _;
 use immortal_client::domain::{Event, MKT_CLOSE_KIND};
 use immortal_client::mkt_swp_client::{ParticipantRole, RequesterTerminalState};
 use market_ui::{
-    IngestOutcome, MarketDiscovery, MarketRelayGate, MarketSession, OfferingListing, SessionPhase,
-    SessionSocketEvent, StatusSlot, load_stored_records, run_session_socket,
+    IngestOutcome, MarketDiscovery, MarketRelayGate, MarketSession, OfferingListing, SessionInbox,
+    SessionPhase, SessionSocketEvent, StatusSlot, load_stored_records, run_session_socket,
     throwaway_session_signer, wrap_for_transport,
 };
 use serde_json::Value;
@@ -137,12 +137,26 @@ fn live_relay_negotiated_session() {
         let signer = throwaway_session_signer().expect("session key generates");
         let mut session =
             MarketSession::begin(signer.clone(), &offering, unix_now()).expect("session begins");
+        let provider_id = session.provider_id().to_owned();
+        let response_signer = session.response_signer().clone();
         let (outgoing_sender, outgoing_receiver) = async_channel::bounded(256);
+        let (response_outgoing_sender, response_outgoing_receiver) = async_channel::bounded(1);
         let (event_sender, event_receiver) = async_channel::bounded(256);
-        let socket = smol::spawn(run_session_socket(
+        let requester_socket = smol::spawn(run_session_socket(
             relay_url.clone(),
             signer,
+            provider_id.clone(),
+            SessionInbox::Requester,
             outgoing_receiver,
+            event_sender.clone(),
+            unix_now,
+        ));
+        let response_socket = smol::spawn(run_session_socket(
+            relay_url.clone(),
+            response_signer,
+            provider_id,
+            SessionInbox::Response,
+            response_outgoing_receiver,
             event_sender,
             unix_now,
         ));
@@ -151,6 +165,7 @@ fn live_relay_negotiated_session() {
         let mut ordered = false;
         let mut cancelled = false;
         let mut requester_closed = false;
+        let mut provider_network_events = Vec::new();
         loop {
             let closes = session.closes();
             if requester_closed
@@ -164,19 +179,33 @@ fn live_relay_negotiated_session() {
                 break;
             }
             match next_event(&event_receiver, deadline).await {
-                SessionSocketEvent::Authenticated => {}
-                SessionSocketEvent::SubscriptionLive => {
-                    let wraps = session.replay_wraps(unix_now()).expect("records re-wrap");
-                    for wrap in wraps {
-                        outgoing_sender
-                            .send(wrap)
-                            .await
-                            .expect("session socket accepts replay wraps");
+                SessionSocketEvent::Authenticated { .. } => {}
+                SessionSocketEvent::SubscriptionLive { inbox, .. } => {
+                    if inbox == SessionInbox::Requester {
+                        let wraps = session.replay_wraps(unix_now()).expect("records re-wrap");
+                        for wrap in wraps {
+                            outgoing_sender
+                                .send(wrap)
+                                .await
+                                .expect("session socket accepts replay wraps");
+                        }
                     }
+                }
+                SessionSocketEvent::ProviderNetwork { event, .. } => {
+                    if !provider_network_events
+                        .iter()
+                        .any(|existing: &Event| existing.id == event.id)
+                    {
+                        provider_network_events.push(event);
+                    }
+                    session
+                        .refresh_provider_network(&provider_network_events)
+                        .expect("provider network refreshes");
                 }
                 SessionSocketEvent::Delivered {
                     delivered,
                     observed_at,
+                    ..
                 } => {
                     session
                         .admit_delivery(&delivered, observed_at)
@@ -210,16 +239,22 @@ fn live_relay_negotiated_session() {
                     event_id,
                     accepted,
                     message,
+                    ..
                 } => {
                     assert!(accepted, "relay refused {event_id}: {message}");
                 }
-                SessionSocketEvent::Diagnostic(diagnostic) => {
-                    println!("diagnostic: {diagnostic}");
+                SessionSocketEvent::Diagnostic { relay_url, message } => {
+                    println!("diagnostic from {relay_url}: {message}");
+                }
+                SessionSocketEvent::Disconnected { inbox, reason, .. } => {
+                    panic!("{inbox:?} inbox disconnected: {reason}");
                 }
             }
         }
         drop(outgoing_sender);
-        socket.cancel().await;
+        drop(response_outgoing_sender);
+        requester_socket.cancel().await;
+        response_socket.cancel().await;
 
         assert_eq!(session.phase(), SessionPhase::Closed);
         let quotes = session.quotes();

@@ -10466,3 +10466,33 @@ changes move the appropriate output fields.
 - **Enforced by:** `carry_surface`, `lnmarkets_data`, and `lnmarkets` unit tests
   and `venue_carry_is_normalized_with_explicit_costs_and_cadence` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0266 — Market effects and receipts stay event-verifiable across the network
+
+Omega treats a NIP-MKT Order as one effectful intent: its signed revision,
+idempotency key, nonce, response key, acknowledgment deadline, and outcome
+deadline are validated before publication. A timeout may replay the exact
+signed intent or issue one typed read-only Re-drive; it never creates another
+business Order. Provider responses use the distinct session response key.
+
+Provider relay-set and key-rotation histories are signed protocol inputs, not
+configuration prose. The market transport subscribes independently across the
+effective relay set, fans out the same signed event, enforces the declared read
+and publish thresholds without weakening them, and reports one-relay-down
+operation as degraded. Incoming events are merged with Immortal's bounded
+event-ID conflict detector. Provider events, including a receipt spanning a
+mid-session rotation, are accepted only from the key active at their signed
+creation time; the stable provider identity remains the ledger counterparty.
+
+A Settlement Receipt enters the append-only trading ledger only after
+Immortal verifies the exact signed Order, acknowledgment, Quote, terminal
+Close, receipt, optional requester confirmation, and provider rotation chain.
+Missing links remain incomplete, invalid chains fail closed, and every leg and
+fee becomes an atomic, balanced, multi-asset posting group with the receipt ID
+and signed event references in metadata. The market panel labels the maximum
+confidence as `provider-signed`, explicitly does not claim native-rail
+settlement, and exports the signed proof events with hash-chained ledger rows.
+
+- **Enforced by:** `market_ui` and `trading_ledger` unit tests and
+  `nip_mkt_effects_receipts_and_provider_network_are_event_verifiable` in
+  `omega_deltas`.

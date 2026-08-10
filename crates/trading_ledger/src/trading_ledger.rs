@@ -14,7 +14,8 @@ use sha2::{Digest as _, Sha256};
 
 const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_IDENTIFIER_LENGTH: usize = 200;
-const MAX_ASSET_ID_LENGTH: usize = 32;
+const MAX_SIMPLE_ASSET_ID_LENGTH: usize = 32;
+const MAX_NETWORK_ASSET_ID_LENGTH: usize = 200;
 
 /// Ledger schema version stored in SQLite `user_version`. Version 1 databases
 /// hard-coded sats; version 2 postings carry an explicit asset; version 3 adds
@@ -44,21 +45,27 @@ impl AssetId {
         if id.is_empty() {
             bail!("an asset identifier must not be empty");
         }
-        if id.len() > MAX_ASSET_ID_LENGTH {
-            bail!("an asset identifier must not exceed {MAX_ASSET_ID_LENGTH} bytes");
-        }
-        let mut characters = id.chars();
-        if !characters
-            .next()
-            .is_some_and(|first| first.is_ascii_lowercase())
-        {
-            bail!("an asset identifier must start with a lowercase ASCII letter");
-        }
-        if !id.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-        }) {
+        let simple = id.len() <= MAX_SIMPLE_ASSET_ID_LENGTH
+            && id
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_lowercase())
+            && id.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+            });
+        let network = id.len() <= MAX_NETWORK_ASSET_ID_LENGTH
+            && id.starts_with("swp:")
+            && id
+                .split(':')
+                .all(|segment| !segment.is_empty() && segment.len() <= 80)
+            && id.chars().all(|character| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || matches!(character, ':' | '.' | '_' | '-')
+            });
+        if !simple && !network {
             bail!(
-                "an asset identifier may contain only lowercase ASCII letters, digits, and underscores"
+                "an asset identifier must be a simple ledger asset or a bounded MKT-SWP asset ID"
             );
         }
         Ok(Self(id))
@@ -97,6 +104,7 @@ impl From<AssetId> for String {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LedgerAccount {
     VenueBalance { venue: String },
+    MarketParticipant { role: String, participant: String },
     TradingProfit,
     FeeExpense,
     FundingIncome,
@@ -106,8 +114,15 @@ pub enum LedgerAccount {
 
 impl LedgerAccount {
     fn validate(&self) -> Result<()> {
-        if let Self::VenueBalance { venue } = self {
-            validate_identifier("venue", venue)?;
+        match self {
+            Self::VenueBalance { venue } => validate_identifier("venue", venue)?,
+            Self::MarketParticipant { role, participant } => {
+                if !matches!(role.as_str(), "requester" | "provider" | "external") {
+                    bail!("a market participant account has an unknown role");
+                }
+                validate_identifier("market participant", participant)?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -689,14 +704,39 @@ impl LedgerStore {
     }
 
     pub fn append(&self, draft: LedgerEntryDraft) -> Result<LedgerEntry> {
-        draft.validate()?;
+        self.append_batch(vec![draft])?
+            .into_iter()
+            .next()
+            .context("a one-entry ledger batch returned no entry")
+    }
+
+    /// Appends one logical group in a single SQLite transaction. Exact
+    /// replay returns the original entries, while any conflicting member
+    /// rolls the whole group back.
+    pub fn append_batch(&self, drafts: Vec<LedgerEntryDraft>) -> Result<Vec<LedgerEntry>> {
+        if drafts.is_empty() {
+            bail!("a ledger batch must contain at least one entry");
+        }
+        for draft in &drafts {
+            draft.validate()?;
+        }
         let mut connection = self.connection.lock();
         let transaction = connection.transaction()?;
-        let entries = load_entries(&transaction)?;
+        let mut entries = load_entries(&transaction)?;
         verify_entries(&entries)?;
-        let entry = append_verified(&transaction, draft, &entries)?;
+        let mut results = Vec::with_capacity(drafts.len());
+        for draft in drafts {
+            let entry = append_verified(&transaction, draft, &entries)?;
+            if !entries
+                .iter()
+                .any(|existing| existing.event_id == entry.event_id)
+            {
+                entries.push(entry.clone());
+            }
+            results.push(entry);
+        }
         transaction.commit()?;
-        Ok(entry)
+        Ok(results)
     }
 
     pub fn verify(&self) -> Result<()> {
@@ -1476,6 +1516,65 @@ mod tests {
     }
 
     #[test]
+    fn logical_batches_are_atomic_contiguous_and_idempotent() {
+        let store = LedgerStore::in_memory().expect("store");
+        let group = vec![
+            draft(
+                "receipt:leg:source",
+                1,
+                "mkt-swp",
+                LedgerEntryKind::Fill,
+                vec![],
+            ),
+            draft(
+                "receipt:fee:provider",
+                1,
+                "mkt-swp",
+                LedgerEntryKind::Order,
+                vec![],
+            ),
+        ];
+        let first = store.append_batch(group.clone()).expect("first batch");
+        assert_eq!(
+            first.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let replay = store.append_batch(group).expect("exact batch replay");
+        assert_eq!(replay, first);
+
+        let conflicting = vec![
+            draft(
+                "receipt:leg:destination",
+                2,
+                "mkt-swp",
+                LedgerEntryKind::Fill,
+                vec![],
+            ),
+            draft(
+                "receipt:fee:provider",
+                2,
+                "mkt-swp",
+                LedgerEntryKind::Order,
+                vec![],
+            ),
+        ];
+        assert!(
+            store
+                .append_batch(conflicting)
+                .expect_err("conflicting member rolls back the whole batch")
+                .to_string()
+                .contains("different content")
+        );
+        assert_eq!(
+            store
+                .entries(&LedgerQuery::default())
+                .expect("entries after rollback")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn unbalanced_or_single_sided_financial_entries_are_rejected() {
         let store = LedgerStore::in_memory().expect("store");
         let unbalanced = draft(
@@ -2190,9 +2289,70 @@ mod tests {
         assert!(AssetId::new("sats").is_ok());
         assert!(AssetId::new("usdc").is_ok());
         assert!(AssetId::new("usdt_perp2").is_ok());
-        for invalid in ["", "SATS", "1usd", "usd-c", "usd c", &"a".repeat(33)] {
+        let bitcoin_chain = "swp:1:bip122:00000000000000000000000000000000:btc:chain";
+        assert_eq!(
+            AssetId::new(bitcoin_chain).expect("MKT-SWP asset").as_str(),
+            bitcoin_chain
+        );
+        for invalid in [
+            "",
+            "SATS",
+            "1usd",
+            "usd-c",
+            "usd c",
+            &"a".repeat(33),
+            "swp::btc",
+            "swp:1:BTC",
+        ] {
             assert!(AssetId::new(invalid.to_owned()).is_err(), "{invalid:?}");
         }
         assert!(serde_json::from_str::<AssetId>("\"USDC\"").is_err());
+    }
+
+    #[test]
+    fn market_participant_accounts_are_typed_without_implying_custody() {
+        let requester = LedgerAccount::MarketParticipant {
+            role: "requester".into(),
+            participant: "11".repeat(32),
+        };
+        let provider = LedgerAccount::MarketParticipant {
+            role: "provider".into(),
+            participant: "22".repeat(32),
+        };
+        let store = LedgerStore::in_memory().expect("store");
+        store
+            .append(draft(
+                "receipt-leg",
+                1,
+                "mkt-swp-network",
+                LedgerEntryKind::Fill,
+                vec![posting(requester, -100), posting(provider, 100)],
+            ))
+            .expect("provider-signed claim posts between participants");
+        assert_eq!(store.venue_balance("nip-mkt").expect("venue balance"), 0);
+
+        let invalid = draft(
+            "bad-role",
+            2,
+            "mkt-swp-network",
+            LedgerEntryKind::Fill,
+            vec![
+                posting(
+                    LedgerAccount::MarketParticipant {
+                        role: "custodian".into(),
+                        participant: "relay".into(),
+                    },
+                    -1,
+                ),
+                posting(LedgerAccount::External, 1),
+            ],
+        );
+        assert!(
+            store
+                .append(invalid)
+                .expect_err("unknown participant role")
+                .to_string()
+                .contains("unknown role")
+        );
     }
 }

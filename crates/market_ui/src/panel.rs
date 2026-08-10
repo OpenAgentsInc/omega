@@ -3,7 +3,7 @@
 //! session flow (RFQ → Quote → Order → Status → Cancel → Close) over an
 //! authenticated gift-wrap lane.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,8 +17,9 @@ use gpui::{
     ParentElement, Render, Styled, Task, WeakEntity, Window, px,
 };
 use http_client::{AsyncBody, HttpClient, Request};
-use immortal_client::domain::Event;
+use immortal_client::domain::{Event, MktEventIdAdmission, MktEventIdDeduplicator};
 use immortal_client::mkt_swp_client::ParticipantRole;
+use trading_ledger::{LedgerEntry, LedgerStore};
 use ui::{Indicator, VizChip, VizChipTone, prelude::*};
 use workspace::{
     Workspace,
@@ -29,12 +30,18 @@ use crate::discovery::{
     ConnectionState, MAX_RELAY_INFORMATION_BYTES, MarketDiscovery, MarketDiscoveryConfig,
     MarketRelayGate, NIP11_ACCEPT_MEDIA_TYPE, OfferingListing, validate_market_relay_information,
 };
-use crate::session_flow::{
-    MarketSession, SESSION_STORE_DIRECTORY, SessionPhase, StatusSlot, throwaway_session_signer,
-    wrap_for_transport,
+use crate::network_transport::{
+    MultiRelayStatus, ProviderNetworkState, RelayAvailability, RelaySetPlan, fanout_exact_event,
 };
-use crate::session_transport::{SessionSocketEvent, run_session_socket};
-use crate::{Reconnect, ToggleFocus};
+use crate::session_flow::{
+    IntentProgress, MarketSession, SESSION_STORE_DIRECTORY, SessionPhase, StatusSlot,
+    throwaway_session_signer, wrap_for_transport,
+};
+use crate::session_transport::{SessionInbox, SessionSocketEvent, run_session_socket};
+use crate::{
+    RECEIPT_EXPORT_DIRECTORY, ReceiptVerification, Reconnect, ToggleFocus, export_verified_receipt,
+    persist_verified_receipt,
+};
 
 const PANEL_KEY: &str = "market";
 const MAX_SESSION_DIAGNOSTICS: usize = 8;
@@ -45,15 +52,23 @@ pub struct MarketPanel {
     gate: Option<MarketRelayGate>,
     discovery: MarketDiscovery,
     session: Option<SessionState>,
+    receipt_ledger: Option<LedgerStore>,
+    receipt_ledger_error: Option<String>,
     _connection_task: Option<Task<()>>,
 }
 
 struct SessionState {
     session: MarketSession,
-    outgoing: async_channel::Sender<Event>,
-    live: bool,
+    outgoing: BTreeMap<String, async_channel::Sender<Event>>,
+    relay_status: MultiRelayStatus,
+    network_event_ids: MktEventIdDeduplicator,
+    network_events: BTreeMap<String, Event>,
+    initial_replay_sent: bool,
+    _response_outgoing: BTreeMap<String, async_channel::Sender<Event>>,
     last_error: Option<String>,
     diagnostics: VecDeque<String>,
+    receipt_entries: BTreeMap<String, Vec<LedgerEntry>>,
+    last_export: Option<PathBuf>,
     _task: Task<()>,
 }
 
@@ -73,12 +88,21 @@ impl MarketPanel {
     }
 
     fn new(cx: &mut Context<Self>) -> Self {
+        let (receipt_ledger, receipt_ledger_error) = match LedgerStore::open_default() {
+            Ok(store) => (Some(store), None),
+            Err(error) => (
+                None,
+                Some(format!("could not open settlement receipt ledger: {error}")),
+            ),
+        };
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             config: MarketDiscoveryConfig::from_environment(),
             gate: None,
             discovery: MarketDiscovery::new(),
             session: None,
+            receipt_ledger,
+            receipt_ledger_error,
             _connection_task: None,
         };
         this.connect(cx);
@@ -130,6 +154,35 @@ impl MarketPanel {
                             if let Err(error) = this.discovery.ingest_text(&text, unix_now()) {
                                 log::warn!("market panel dropped a relay frame: {error}");
                             }
+                            if let Some(state) = this.session.as_mut() {
+                                let network_events = this
+                                    .discovery
+                                    .provider_network_events(state.session.provider_id());
+                                let mut merge_error = None;
+                                for event in network_events {
+                                    match state.network_event_ids.observe(&event) {
+                                        Ok(MktEventIdAdmission::New) => {
+                                            state.network_events.insert(event.id.clone(), event);
+                                        }
+                                        Ok(MktEventIdAdmission::Duplicate) => {}
+                                        Err(error) => {
+                                            merge_error = Some(error.to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                                if let Some(error) = merge_error {
+                                    Self::push_session_diagnostic(state, error);
+                                } else {
+                                    let merged =
+                                        state.network_events.values().cloned().collect::<Vec<_>>();
+                                    if let Err(error) =
+                                        state.session.refresh_provider_network(&merged)
+                                    {
+                                        Self::push_session_diagnostic(state, error);
+                                    }
+                                }
+                            }
                         }
                     }
                     cx.notify();
@@ -152,8 +205,23 @@ impl MarketPanel {
 
     fn start_session(&mut self, offering: &OfferingListing, cx: &mut Context<Self>) {
         let now = unix_now();
-        let session = throwaway_session_signer()
-            .and_then(|signer| MarketSession::begin(signer, offering, now));
+        let network_events = self.discovery.network_events();
+        let provider_network =
+            ProviderNetworkState::for_active_signer(&offering.pubkey, now, &network_events);
+        let provider_network = match provider_network {
+            Ok(network) => network,
+            Err(error) => {
+                self.discovery_diagnostic(error);
+                cx.notify();
+                return;
+            }
+        };
+        let relay_plan = provider_network.relay_plan_at(now).unwrap_or_else(|| {
+            RelaySetPlan::legacy_bootstrap(self.config.relay_websocket_url.clone())
+        });
+        let session = throwaway_session_signer().and_then(|signer| {
+            MarketSession::begin_with_network(signer, offering, provider_network, now)
+        });
         let session = match session {
             Ok(session) => session,
             Err(error) => {
@@ -163,17 +231,109 @@ impl MarketPanel {
             }
         };
         let signer = session.signer().clone();
-        let (outgoing_sender, outgoing_receiver) = async_channel::bounded(256);
+        let response_signer = session.response_signer().clone();
+        let provider_id = session.provider_id().to_owned();
+        let mut network_event_ids = MktEventIdDeduplicator::default();
+        let mut network_events = BTreeMap::new();
+        let mut relay_status = match MultiRelayStatus::new(relay_plan.clone()) {
+            Ok(status) => status,
+            Err(error) => {
+                self.discovery_diagnostic(error);
+                cx.notify();
+                return;
+            }
+        };
+        for event in session.provider_network_events() {
+            if let Err(error) = network_event_ids.observe(event) {
+                self.discovery_diagnostic(error.to_string());
+                cx.notify();
+                return;
+            }
+            if let Err(error) = relay_status.seed_event(event) {
+                self.discovery_diagnostic(error);
+                cx.notify();
+                return;
+            }
+            network_events.insert(event.id.clone(), event.clone());
+        }
+        let mut outgoing = BTreeMap::new();
+        let mut response_outgoing = BTreeMap::new();
+        let mut socket_inputs = Vec::with_capacity(relay_plan.relays.len());
+        for relay_url in &relay_plan.relays {
+            let (outgoing_sender, outgoing_receiver) = async_channel::bounded(256);
+            let (response_sender, response_receiver) = async_channel::bounded(1);
+            outgoing.insert(relay_url.clone(), outgoing_sender);
+            response_outgoing.insert(relay_url.clone(), response_sender);
+            socket_inputs.push((relay_url.clone(), outgoing_receiver, response_receiver));
+        }
         let (event_sender, event_receiver) = async_channel::bounded(256);
-        let relay_url = self.config.relay_websocket_url.clone();
         let task = cx.spawn(async move |this, cx| {
-            let socket_task = cx.background_spawn(run_session_socket(
-                relay_url,
-                signer,
-                outgoing_receiver,
-                event_sender,
-                unix_now,
-            ));
+            for (relay_url, outgoing_receiver, response_receiver) in socket_inputs {
+                let requester_events = event_sender.clone();
+                let requester_url = relay_url.clone();
+                let requester_signer = signer.clone();
+                let requester_provider_id = provider_id.clone();
+                cx.background_spawn(async move {
+                    let result = run_session_socket(
+                        requester_url.clone(),
+                        requester_signer,
+                        requester_provider_id,
+                        SessionInbox::Requester,
+                        outgoing_receiver,
+                        requester_events.clone(),
+                        unix_now,
+                    )
+                    .await;
+                    let reason = match result {
+                        Ok(()) => "requester inbox closed".to_owned(),
+                        Err(error) => error,
+                    };
+                    if requester_events
+                        .send(SessionSocketEvent::Disconnected {
+                            relay_url: requester_url,
+                            inbox: SessionInbox::Requester,
+                            reason,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                })
+                .detach();
+                let response_events = event_sender.clone();
+                let response_url = relay_url;
+                let relay_response_signer = response_signer.clone();
+                let response_provider_id = provider_id.clone();
+                cx.background_spawn(async move {
+                    let result = run_session_socket(
+                        response_url.clone(),
+                        relay_response_signer,
+                        response_provider_id,
+                        SessionInbox::Response,
+                        response_receiver,
+                        response_events.clone(),
+                        unix_now,
+                    )
+                    .await;
+                    let reason = match result {
+                        Ok(()) => "response inbox closed".to_owned(),
+                        Err(error) => error,
+                    };
+                    if response_events
+                        .send(SessionSocketEvent::Disconnected {
+                            relay_url: response_url,
+                            inbox: SessionInbox::Response,
+                            reason,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                })
+                .detach();
+            }
             while let Ok(event) = event_receiver.recv().await {
                 let updated = this.update(cx, |this, cx| {
                     this.handle_session_event(event, cx);
@@ -182,25 +342,19 @@ impl MarketPanel {
                     return;
                 }
             }
-            let reason = match socket_task.await {
-                Ok(()) => "session connection closed".to_owned(),
-                Err(error) => error,
-            };
-            this.update(cx, |this, cx| {
-                if let Some(session) = this.session.as_mut() {
-                    session.live = false;
-                    session.last_error = Some(reason);
-                }
-                cx.notify();
-            })
-            .ok();
         });
         self.session = Some(SessionState {
             session,
-            outgoing: outgoing_sender,
-            live: false,
+            outgoing,
+            relay_status,
+            network_event_ids,
+            network_events,
+            initial_replay_sent: false,
+            _response_outgoing: response_outgoing,
             last_error: None,
             diagnostics: VecDeque::new(),
+            receipt_entries: BTreeMap::new(),
+            last_export: None,
             _task: task,
         });
         self.persist_session();
@@ -212,44 +366,128 @@ impl MarketPanel {
             return;
         };
         match event {
-            SessionSocketEvent::Authenticated => {}
-            SessionSocketEvent::SubscriptionLive => {
-                state.live = true;
+            SessionSocketEvent::Authenticated { .. } => {}
+            SessionSocketEvent::SubscriptionLive { relay_url, inbox } => {
+                if let Err(error) = state.relay_status.subscription_live(&relay_url, inbox) {
+                    Self::push_session_diagnostic(state, error);
+                    cx.notify();
+                    return;
+                }
                 // Replay every own signed record as fresh wraps; identical
-                // inner bytes are idempotent for the counterparty.
-                match state.session.replay_wraps(unix_now()) {
-                    Ok(wraps) => {
-                        for wrap in wraps {
-                            if state.outgoing.try_send(wrap).is_err() {
-                                state.last_error = Some("session publish queue is full".to_owned());
-                                break;
+                // signed wraps fan out to all relays as one exact-byte batch.
+                if inbox == SessionInbox::Requester
+                    && !state.initial_replay_sent
+                    && state.relay_status.read_availability(inbox) != RelayAvailability::Unavailable
+                {
+                    match state.session.replay_wraps(unix_now()) {
+                        Ok(wraps) => {
+                            for wrap in wraps {
+                                if let Err(failed) = fanout_exact_event(&wrap, &state.outgoing) {
+                                    Self::push_session_diagnostic(
+                                        state,
+                                        format!(
+                                            "session replay queue failed for relays: {}",
+                                            failed.join(", ")
+                                        ),
+                                    );
+                                    break;
+                                }
+                            }
+                            state.initial_replay_sent = true;
+                        }
+                        Err(error) => state.last_error = Some(error),
+                    }
+                }
+            }
+            SessionSocketEvent::ProviderNetwork { relay_url, event } => {
+                match state.relay_status.observe_event(&relay_url, &event) {
+                    Ok(MktEventIdAdmission::Duplicate) => {}
+                    Ok(MktEventIdAdmission::New) => match state.network_event_ids.observe(&event) {
+                        Ok(MktEventIdAdmission::Duplicate) => {}
+                        Ok(MktEventIdAdmission::New) => {
+                            state.network_events.insert(event.id.clone(), event);
+                            let events = state.network_events.values().cloned().collect::<Vec<_>>();
+                            if let Err(error) = state.session.refresh_provider_network(&events) {
+                                Self::push_session_diagnostic(
+                                    state,
+                                    format!("relay {relay_url} provider network: {error}"),
+                                );
                             }
                         }
-                    }
-                    Err(error) => state.last_error = Some(error),
+                        Err(error) => Self::push_session_diagnostic(
+                            state,
+                            format!("relay {relay_url} provider network: {error}"),
+                        ),
+                    },
+                    Err(error) => Self::push_session_diagnostic(
+                        state,
+                        format!("relay {relay_url} provider network: {error}"),
+                    ),
                 }
             }
             SessionSocketEvent::Delivered {
+                relay_url,
+                inbox: _,
                 delivered,
                 observed_at,
-            } => match state.session.admit_delivery(&delivered, observed_at) {
-                Ok(_) => self.persist_session(),
-                Err(error) => Self::push_session_diagnostic(state, error),
+            } => match state
+                .relay_status
+                .observe_event(&relay_url, delivered.record().event())
+            {
+                Ok(MktEventIdAdmission::Duplicate) => {}
+                Ok(MktEventIdAdmission::New) => {
+                    match state.session.admit_delivery(&delivered, observed_at) {
+                        Ok(_) => {
+                            self.persist_session();
+                            self.sync_verified_receipts();
+                        }
+                        Err(error) => Self::push_session_diagnostic(state, error),
+                    }
+                }
+                Err(error) => Self::push_session_diagnostic(
+                    state,
+                    format!("relay {relay_url} event merge: {error}"),
+                ),
             },
             SessionSocketEvent::PublishResult {
+                relay_url,
                 event_id,
                 accepted,
                 message,
             } => {
+                if let Err(error) = state
+                    .relay_status
+                    .publish_result(&relay_url, &event_id, accepted)
+                {
+                    Self::push_session_diagnostic(state, error);
+                }
                 if !accepted {
                     Self::push_session_diagnostic(
                         state,
-                        format!("relay refused {event_id}: {message}"),
+                        format!("relay {relay_url} refused {event_id}: {message}"),
                     );
                 }
             }
-            SessionSocketEvent::Diagnostic(diagnostic) => {
-                Self::push_session_diagnostic(state, diagnostic);
+            SessionSocketEvent::Diagnostic { relay_url, message } => {
+                Self::push_session_diagnostic(state, format!("relay {relay_url}: {message}"));
+            }
+            SessionSocketEvent::Disconnected {
+                relay_url,
+                inbox,
+                reason,
+            } => {
+                if let Err(error) = state.relay_status.disconnected(&relay_url, inbox) {
+                    Self::push_session_diagnostic(state, error);
+                }
+                let availability = state.relay_status.read_availability(inbox);
+                if availability == RelayAvailability::Unavailable {
+                    state.last_error = Some(format!("relay {relay_url}: {reason}"));
+                } else {
+                    Self::push_session_diagnostic(
+                        state,
+                        format!("degraded relay {relay_url}: {reason}"),
+                    );
+                }
             }
         }
         cx.notify();
@@ -268,17 +506,28 @@ impl MarketPanel {
         };
         let now = unix_now();
         for record in records {
-            match wrap_for_transport(
-                &record,
-                state.session.signer(),
-                state.session.provider_pubkey(),
-                now,
-            ) {
+            let provider_recipient = state.session.provider_transport_pubkey(now).to_owned();
+            match wrap_for_transport(&record, state.session.signer(), &provider_recipient, now) {
                 Ok(wraps) => {
                     for wrap in wraps {
-                        if state.outgoing.try_send(wrap.event).is_err() {
-                            state.last_error = Some("session publish queue is full".to_owned());
-                            return;
+                        if let Err(failed) = fanout_exact_event(&wrap.event, &state.outgoing) {
+                            let successes = state
+                                .relay_status
+                                .plan()
+                                .relays
+                                .len()
+                                .saturating_sub(failed.len());
+                            if successes < state.relay_status.plan().publish_minimum {
+                                state.last_error = Some(format!(
+                                    "session publish queue missed signed relay threshold: {}",
+                                    failed.join(", ")
+                                ));
+                                return;
+                            }
+                            Self::push_session_diagnostic(
+                                state,
+                                format!("degraded relay publish queues: {}", failed.join(", ")),
+                            );
                         }
                     }
                 }
@@ -289,6 +538,7 @@ impl MarketPanel {
             }
         }
         self.persist_session();
+        self.sync_verified_receipts();
     }
 
     fn order_selected_quote(&mut self, cx: &mut Context<Self>) {
@@ -321,6 +571,26 @@ impl MarketPanel {
         cx.notify();
     }
 
+    fn replay_stuck_intent(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.session.as_mut() {
+            match state.session.replay_stuck_intent(unix_now()) {
+                Ok(record) => self.publish_session_records(vec![record]),
+                Err(error) => state.last_error = Some(error),
+            }
+        }
+        cx.notify();
+    }
+
+    fn request_redrive(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.session.as_mut() {
+            match state.session.request_redrive(unix_now()) {
+                Ok(record) => self.publish_session_records(vec![record]),
+                Err(error) => state.last_error = Some(error),
+            }
+        }
+        cx.notify();
+    }
+
     fn end_session(&mut self, cx: &mut Context<Self>) {
         self.persist_session();
         self.session = None;
@@ -334,6 +604,66 @@ impl MarketPanel {
         if let Err(error) = state.session.persist(&session_store_directory()) {
             state.last_error = Some(error);
         }
+    }
+
+    fn sync_verified_receipts(&mut self) {
+        let Some(store) = self.receipt_ledger.as_ref() else {
+            return;
+        };
+        let Some(state) = self.session.as_mut() else {
+            return;
+        };
+        for verification in state.session.receipt_verifications() {
+            let Some(receipt_id) = verification.receipt_id().map(str::to_owned) else {
+                continue;
+            };
+            match persist_verified_receipt(
+                store,
+                state.session.requester_pubkey(),
+                state.session.provider_id(),
+                &verification,
+            ) {
+                Ok(entries) => {
+                    state.receipt_entries.insert(receipt_id, entries);
+                }
+                Err(error) => Self::push_session_diagnostic(state, error),
+            }
+        }
+    }
+
+    fn export_receipt(&mut self, receipt_id: &str, cx: &mut Context<Self>) {
+        let Some(state) = self.session.as_mut() else {
+            return;
+        };
+        let verifications = state.session.receipt_verifications();
+        let Some(verification) = verifications
+            .iter()
+            .find(|verification| verification.receipt_id() == Some(receipt_id))
+        else {
+            state.last_error = Some("verified receipt is no longer available".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(entries) = state.receipt_entries.get(receipt_id) else {
+            state.last_error = Some("verified receipt has not entered the ledger".to_owned());
+            cx.notify();
+            return;
+        };
+        let directory = paths::data_dir().join(RECEIPT_EXPORT_DIRECTORY);
+        match export_verified_receipt(
+            &directory,
+            state.session.records(),
+            state.session.provider_network_events(),
+            verification,
+            entries,
+        ) {
+            Ok(path) => {
+                state.last_export = Some(path);
+                state.last_error = None;
+            }
+            Err(error) => state.last_error = Some(error),
+        }
+        cx.notify();
     }
 
     fn discovery_diagnostic(&mut self, diagnostic: String) {
@@ -365,13 +695,49 @@ impl MarketPanel {
         let session = &state.session;
         let now = unix_now();
         let phase = session.phase();
+        let intent_progress = session.intent_progress(now);
+        let receipt_verifications = session.receipt_verifications();
         let selected = session.selected_quote(now);
+        let requester_availability = state
+            .relay_status
+            .read_availability(SessionInbox::Requester);
+        let response_availability = state.relay_status.read_availability(SessionInbox::Response);
         let short_id: String = session.session_id().chars().take(8).collect();
         let phase_tone = match phase {
             SessionPhase::AwaitingQuotes | SessionPhase::QuoteReceived => VizChipTone::Neutral,
             SessionPhase::OrderInFlight | SessionPhase::Active => VizChipTone::Active,
             SessionPhase::CancelRequested => VizChipTone::Warn,
             SessionPhase::Closed => VizChipTone::Ok,
+        };
+        let (proof_label, proof_tone) = match &intent_progress {
+            IntentProgress::NotOrdered => ("quote only".to_owned(), VizChipTone::Neutral),
+            IntentProgress::AwaitingAcknowledgment {
+                timed_out: false, ..
+            } => ("awaiting ack".to_owned(), VizChipTone::Active),
+            IntentProgress::AwaitingAcknowledgment {
+                timed_out: true, ..
+            } => ("ack overdue".to_owned(), VizChipTone::Warn),
+            IntentProgress::Rejected { error_code, .. } => {
+                (format!("rejected · {error_code}"), VizChipTone::Warn)
+            }
+            IntentProgress::AwaitingOutcome {
+                timed_out: false, ..
+            } => ("ack verified".to_owned(), VizChipTone::Ok),
+            IntentProgress::AwaitingOutcome {
+                timed_out: true, ..
+            } => ("outcome overdue".to_owned(), VizChipTone::Warn),
+            IntentProgress::OutcomeReceived { .. } => match receipt_verifications.last() {
+                Some(ReceiptVerification::ProviderSigned { .. }) => {
+                    ("receipt provider-signed".to_owned(), VizChipTone::Ok)
+                }
+                Some(ReceiptVerification::Incomplete { .. }) => {
+                    ("receipt incomplete".to_owned(), VizChipTone::Warn)
+                }
+                Some(ReceiptVerification::Invalid { .. }) => {
+                    ("receipt invalid".to_owned(), VizChipTone::Warn)
+                }
+                None => ("awaiting receipt".to_owned(), VizChipTone::Warn),
+            },
         };
 
         let mut section = v_flex().gap_1p5().child(
@@ -382,22 +748,63 @@ impl MarketPanel {
                     h_flex()
                         .gap_2()
                         .items_center()
+                        .flex_wrap()
                         .child(
                             Label::new("Session")
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
-                        .child(Indicator::dot().color(if state.live {
-                            Color::Success
-                        } else {
-                            Color::Warning
+                        .child(Indicator::dot().color(match requester_availability {
+                            RelayAvailability::Available => Color::Success,
+                            RelayAvailability::Degraded | RelayAvailability::Unavailable => {
+                                Color::Warning
+                            }
                         }))
                         .child(
                             Label::new(format!("{short_id} · {}", session.offering_label()))
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
-                        .child(VizChip::new(phase.label()).tone(phase_tone).scale(1.0)),
+                        .child(VizChip::new(phase.label()).tone(phase_tone).scale(1.0))
+                        .child(VizChip::new(proof_label).tone(proof_tone).scale(1.0))
+                        .child(
+                            VizChip::new(match response_availability {
+                                RelayAvailability::Available => "response relays live",
+                                RelayAvailability::Degraded => "response relays degraded",
+                                RelayAvailability::Unavailable => "response relays waiting",
+                            })
+                            .tone(match response_availability {
+                                RelayAvailability::Available => VizChipTone::Ok,
+                                RelayAvailability::Degraded | RelayAvailability::Unavailable => {
+                                    VizChipTone::Warn
+                                }
+                            })
+                            .scale(1.0),
+                        )
+                        .child(
+                            VizChip::new(format!(
+                                "{} {} relay{} · p{}/r{}",
+                                if state.relay_status.plan().is_signed() {
+                                    "signed"
+                                } else {
+                                    "bootstrap"
+                                },
+                                state.relay_status.plan().relays.len(),
+                                if state.relay_status.plan().relays.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                },
+                                state.relay_status.plan().publish_minimum,
+                                state.relay_status.plan().read_minimum,
+                            ))
+                            .tone(if state.relay_status.plan().is_signed() {
+                                VizChipTone::Ok
+                            } else {
+                                VizChipTone::Neutral
+                            })
+                            .scale(1.0),
+                        ),
                 )
                 .child(
                     Button::new("market-session-end", "End")
@@ -570,6 +977,117 @@ impl MarketPanel {
             section = section.child(row);
         }
 
+        if !receipt_verifications.is_empty() {
+            section = section.child(
+                Label::new("Receipts")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            );
+            for (receipt_index, verification) in receipt_verifications.iter().enumerate() {
+                let short_event_id: String =
+                    verification.receipt_event_id().chars().take(8).collect();
+                match verification {
+                    ReceiptVerification::Incomplete { detail, .. } => {
+                        section = section.child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            VizChip::new("incomplete")
+                                                .kind(39_613)
+                                                .tone(VizChipTone::Warn)
+                                                .scale(1.0),
+                                        )
+                                        .child(
+                                            Label::new(short_event_id)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        ),
+                                )
+                                .child(
+                                    Label::new(detail.clone())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        );
+                    }
+                    ReceiptVerification::Invalid { detail, .. } => {
+                        section = section.child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            VizChip::new("invalid")
+                                                .kind(39_613)
+                                                .tone(VizChipTone::Warn)
+                                                .scale(1.0),
+                                        )
+                                        .child(
+                                            Label::new(short_event_id)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        ),
+                                )
+                                .child(
+                                    Label::new(detail.clone())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Error),
+                                ),
+                        );
+                    }
+                    ReceiptVerification::ProviderSigned { receipt, .. } => {
+                        let receipt_id = receipt.receipt_id.clone();
+                        let ledger_count =
+                            state.receipt_entries.get(&receipt_id).map_or(0, Vec::len);
+                        section = section.child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .flex_wrap()
+                                .child(
+                                    VizChip::new("provider-signed")
+                                        .kind(39_613)
+                                        .tone(VizChipTone::Ok)
+                                        .scale(1.0),
+                                )
+                                .child(Label::new(format!(
+                                    "{} · {} legs · {} fees · {} ledger rows",
+                                    receipt.outcome,
+                                    receipt.legs.len(),
+                                    receipt.fees.len(),
+                                    ledger_count,
+                                )))
+                                .child(
+                                    Label::new("external settlement not independently proven")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .when(ledger_count > 0, |row| {
+                                    row.child(
+                                        Button::new(
+                                            ("market-receipt-export", receipt_index),
+                                            "Export",
+                                        )
+                                        .label_size(LabelSize::Small)
+                                        .on_click(
+                                            cx.listener(move |this, _, _window, cx| {
+                                                this.export_receipt(&receipt_id, cx);
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        );
+                    }
+                }
+            }
+        }
+
         let mut controls = h_flex().gap_2().items_center();
         if session.can_cancel() {
             controls = controls.child(
@@ -585,6 +1103,20 @@ impl MarketPanel {
                     .on_click(cx.listener(|this, _, _window, cx| this.close_session(cx))),
             );
         }
+        if session.can_replay_stuck_intent(now) {
+            controls = controls.child(
+                Button::new("market-session-replay-intent", "Replay exact intent")
+                    .label_size(LabelSize::Small)
+                    .on_click(cx.listener(|this, _, _window, cx| this.replay_stuck_intent(cx))),
+            );
+        }
+        if session.can_redrive(now) {
+            controls = controls.child(
+                Button::new("market-session-redrive", "Re-drive")
+                    .label_size(LabelSize::Small)
+                    .on_click(cx.listener(|this, _, _window, cx| this.request_redrive(cx))),
+            );
+        }
         section = section.child(controls);
 
         if let Some(error) = &state.last_error {
@@ -597,6 +1129,13 @@ impl MarketPanel {
         if let Some(diagnostic) = state.diagnostics.back() {
             section = section.child(
                 Label::new(diagnostic.clone())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            );
+        }
+        if let Some(path) = &state.last_export {
+            section = section.child(
+                Label::new(format!("Receipt export: {}", path.display()))
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             );
@@ -744,6 +1283,13 @@ impl Render for MarketPanel {
                     ),
             )
             .when_some(self.failure_reason(), |this, reason| {
+                this.child(
+                    Label::new(reason)
+                        .size(LabelSize::Small)
+                        .color(Color::Error),
+                )
+            })
+            .when_some(self.receipt_ledger_error.clone(), |this, reason| {
                 this.child(
                     Label::new(reason)
                         .size(LabelSize::Small)

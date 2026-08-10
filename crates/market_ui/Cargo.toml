@@ -26,7 +26,9 @@ immortal-client.workspace = true
 log.workspace = true
 paths.workspace = true
 rand.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+trading_ledger.workspace = true
 ui.workspace = true
 workspace.workspace = true
 

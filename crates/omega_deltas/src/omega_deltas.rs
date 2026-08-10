@@ -236,6 +236,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0263",
     "OMEGA-DELTA-0264",
     "OMEGA-DELTA-0265",
+    "OMEGA-DELTA-0266",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -30754,6 +30755,87 @@ mod tests {
             assert!(
                 lnmarkets.contains(required),
                 "OMEGA-DELTA-0265: LN Markets carry adoption lost `{required}`"
+            );
+        }
+    }
+
+    #[test]
+    fn nip_mkt_effects_receipts_and_provider_network_are_event_verifiable() {
+        let flow = without_comments(&read_repository_file(
+            "crates/market_ui/src/session_flow.rs",
+        ));
+        for required in [
+            "sign_effectful_order(",
+            "validate_mkt_hardening_event",
+            "response_pubkey",
+            "replay_stuck_intent(",
+            "request_redrive(",
+            "MktEventIdDeduplicator",
+            "mid_session_rotation_selects_signer_by_event_time",
+        ] {
+            assert!(
+                flow.contains(required),
+                "OMEGA-DELTA-0266: effectful market session lost `{required}`"
+            );
+        }
+
+        let network = without_comments(&read_repository_file(
+            "crates/market_ui/src/network_transport.rs",
+        ));
+        for required in [
+            "verify_mkt_key_rotation_chain",
+            "verify_mkt_relay_set_chain",
+            "MktRelaySetClient",
+            "active_pubkey_at(",
+            "fanout_exact_event(",
+            "publish_minimum",
+            "read_minimum",
+            "one_relay_down_remains_typed_degraded_at_threshold_one",
+            "stricter_signed_threshold_is_never_weakened",
+        ] {
+            assert!(
+                network.contains(required),
+                "OMEGA-DELTA-0266: provider network projection lost `{required}`"
+            );
+        }
+
+        let receipt = without_comments(&read_repository_file(
+            "crates/market_ui/src/receipt_ledger.rs",
+        ));
+        for required in [
+            "verify_mkt_receipt_chain_parts_with_provider_keys",
+            "ReceiptVerification::Incomplete",
+            "ReceiptVerification::ProviderSigned",
+            "persist_verified_receipt(",
+            "append_batch(",
+            "receipt_verification_honors_provider_rotation_mid_chain",
+            "exact_events_verify_export_and_missing_links_stay_incomplete",
+        ] {
+            assert!(
+                receipt.contains(required),
+                "OMEGA-DELTA-0266: receipt evidence boundary lost `{required}`"
+            );
+        }
+
+        let panel = without_comments(&read_repository_file("crates/market_ui/src/panel.rs"));
+        assert!(
+            panel.contains("external settlement not independently proven")
+                && panel.contains("receipt provider-signed"),
+            "OMEGA-DELTA-0266: receipt confidence labels became overstated"
+        );
+
+        let ledger = without_comments(&read_repository_file(
+            "crates/trading_ledger/src/trading_ledger.rs",
+        ));
+        for required in [
+            "MarketParticipant",
+            "pub fn append_batch(",
+            "logical_batches_are_atomic_contiguous_and_idempotent",
+            "market_participant_accounts_are_typed_without_implying_custody",
+        ] {
+            assert!(
+                ledger.contains(required),
+                "OMEGA-DELTA-0266: receipt ledger support lost `{required}`"
             );
         }
     }

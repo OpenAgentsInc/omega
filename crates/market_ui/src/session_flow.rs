@@ -22,9 +22,10 @@
 //!
 //! ```json
 //! {
-//!   "schema": "omega.market.session.v1",
+//!   "schema": "omega.market.session.v2",
 //!   "session_id": "<64-lower-hex>",
 //!   "requester_pubkey": "<64-lower-hex>",
+//!   "response_pubkey": "<64-lower-hex>",
 //!   "provider_pubkey": "<64-lower-hex>",
 //!   "offering_address": "39601:<provider>:<offering-id>",
 //!   "records": [
@@ -45,12 +46,15 @@
 //! is deliberately not stored.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use immortal_client::domain::{
-    Event, MKT_CANCEL_KIND, MKT_CLOSE_KIND, MKT_QUOTE_KIND, MKT_STATUS_KIND, MKT_SWP_PROFILE_ID,
-    MKT_SWP_PROFILE_VERSION, MKT_SWP_SWAP_CONTRACT_KIND, MktProfileSupport,
+    Event, MKT_CANCEL_KIND, MKT_CLOSE_KIND, MKT_HARDENING_PROTOCOL_REVISION, MKT_HARDENING_SCHEMA,
+    MKT_ORDER_KIND, MKT_QUOTE_KIND, MKT_STATUS_KIND, MKT_SWP_INTENT_ACK_KIND, MKT_SWP_PROFILE_ID,
+    MKT_SWP_PROFILE_VERSION, MKT_SWP_REDRIVE_KIND, MKT_SWP_SWAP_CONTRACT_KIND, MktEventIdAdmission,
+    MktEventIdDeduplicator, MktHardeningRecordKind, MktProfileSupport, Tag,
+    validate_mkt_hardening_event, validate_mkt_private_base, validate_mkt_private_raw,
 };
 use immortal_client::market::{
     DeliveredMktRecord, MarketSigner, WrapMaterial, WrappedMktRecord, wrap_mkt_record,
@@ -65,15 +69,20 @@ use serde_json::{Map, Value, json};
 use ui::prelude::SharedString;
 
 use crate::discovery::OfferingListing;
+use crate::network_transport::ProviderNetworkState;
+use crate::receipt_ledger::{ReceiptVerification, verify_receipts_with_provider_keys};
 
 pub const SESSION_FLOW_TRACKING_ISSUE: &str = "OpenAgentsInc/omega#244";
-pub const SESSION_STORE_SCHEMA: &str = "omega.market.session.v1";
+pub const SESSION_STORE_SCHEMA: &str = "omega.market.session.v2";
 pub const SESSION_STORE_DIRECTORY: &str = "market_sessions";
 
+const LEGACY_SESSION_STORE_SCHEMA: &str = "omega.market.session.v1";
 const RFQ_LIFETIME_SECONDS: u64 = 900;
 const CANCEL_REASON: &str = "omega_requester_cancelled";
 const MAX_QUOTE_CANDIDATES: usize = 64;
 const MAX_SESSION_RECORDS: usize = 256;
+const ACK_DEADLINE_SECONDS: u64 = 30;
+const OUTCOME_DEADLINE_SECONDS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionFlowAvailability {
@@ -174,6 +183,16 @@ pub fn throwaway_session_signer() -> Result<MarketSigner, String> {
         }
     }
     Err("could not generate a session keypair".to_owned())
+}
+
+fn throwaway_response_signer(excluded_pubkeys: &[&str]) -> Result<MarketSigner, String> {
+    for _ in 0..32 {
+        let signer = throwaway_session_signer()?;
+        if !excluded_pubkeys.contains(&signer.pubkey()) {
+            return Ok(signer);
+        }
+    }
+    Err("could not generate a distinct response keypair".to_owned())
 }
 
 fn random_wrap_material(now: u64) -> WrapMaterial {
@@ -510,6 +529,37 @@ pub struct CloseEntry {
     pub outcome: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcknowledgmentEntry {
+    pub event_id: String,
+    pub intent_event_id: String,
+    pub disposition: String,
+    pub accepted_at: u64,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentProgress {
+    NotOrdered,
+    AwaitingAcknowledgment {
+        deadline_at: u64,
+        timed_out: bool,
+    },
+    Rejected {
+        acknowledgment_event_id: String,
+        error_code: String,
+    },
+    AwaitingOutcome {
+        acknowledgment_event_id: String,
+        deadline_at: u64,
+        timed_out: bool,
+    },
+    OutcomeReceived {
+        acknowledgment_event_id: String,
+        outcome_event_id: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPhase {
     AwaitingQuotes,
@@ -546,10 +596,11 @@ pub enum AdmitOutcome {
 /// [`MarketSession::admit_delivery`].
 pub struct MarketSession {
     signer: MarketSigner,
+    response_signer: MarketSigner,
     factory: SwapRecordFactory,
     offering_label: String,
     records: Vec<Event>,
-    record_ids: BTreeSet<String>,
+    event_ids: MktEventIdDeduplicator,
     deliveries: Vec<SignedRecordDelivery>,
     wrap_ids: Vec<Option<String>>,
     rfq: Event,
@@ -558,6 +609,7 @@ pub struct MarketSession {
     accepted_quote: Option<QuoteCandidate>,
     provider_contract_received: bool,
     cancel_request_id: Option<String>,
+    provider_network: ProviderNetworkState,
 }
 
 impl MarketSession {
@@ -569,6 +621,42 @@ impl MarketSession {
         offering: &OfferingListing,
         now: u64,
     ) -> Result<Self, String> {
+        let response_signer =
+            throwaway_response_signer(&[signer.pubkey(), offering.pubkey.as_str()])?;
+        let provider_network = ProviderNetworkState::verify(&offering.pubkey, &[])?;
+        Self::begin_with_response_signer(signer, response_signer, offering, provider_network, now)
+    }
+
+    pub fn begin_with_network(
+        signer: MarketSigner,
+        offering: &OfferingListing,
+        provider_network: ProviderNetworkState,
+        now: u64,
+    ) -> Result<Self, String> {
+        if provider_network.active_pubkey_at(now) != offering.pubkey {
+            return Err(
+                "offering signer is not the provider key active at session start".to_owned(),
+            );
+        }
+        let response_signer =
+            throwaway_response_signer(&[signer.pubkey(), offering.pubkey.as_str()])?;
+        Self::begin_with_response_signer(signer, response_signer, offering, provider_network, now)
+    }
+
+    fn begin_with_response_signer(
+        signer: MarketSigner,
+        response_signer: MarketSigner,
+        offering: &OfferingListing,
+        provider_network: ProviderNetworkState,
+        now: u64,
+    ) -> Result<Self, String> {
+        if response_signer.pubkey() == signer.pubkey()
+            || response_signer.pubkey() == offering.pubkey
+        {
+            return Err(
+                "the response key must be distinct from both session identities".to_owned(),
+            );
+        }
         let config = SwapClientConfig {
             session_id: random_hex_32(),
             requester_pubkey: signer.pubkey().to_owned(),
@@ -589,10 +677,11 @@ impl MarketSession {
         let rfq = sign_request(&signer, &request)?;
         let mut session = Self {
             signer,
+            response_signer,
             factory,
             offering_label: offering.offering_id.clone(),
             records: Vec::new(),
-            record_ids: BTreeSet::new(),
+            event_ids: MktEventIdDeduplicator::new(MAX_SESSION_RECORDS),
             deliveries: Vec::new(),
             wrap_ids: Vec::new(),
             rfq: rfq.clone(),
@@ -601,6 +690,7 @@ impl MarketSession {
             accepted_quote: None,
             provider_contract_received: false,
             cancel_request_id: None,
+            provider_network,
         };
         session.admit_own(rfq, now)?;
         Ok(session)
@@ -618,12 +708,38 @@ impl MarketSession {
         &self.factory.config().provider_pubkey
     }
 
+    pub fn provider_id(&self) -> &str {
+        self.provider_network.provider_id()
+    }
+
+    pub fn provider_transport_pubkey(&self, now: u64) -> &str {
+        self.provider_network.active_pubkey_at(now)
+    }
+
+    pub fn provider_network_events(&self) -> &[Event] {
+        self.provider_network.events()
+    }
+
+    pub fn refresh_provider_network(&mut self, events: &[Event]) -> Result<(), String> {
+        let provider_id = self.provider_id().to_owned();
+        self.provider_network = ProviderNetworkState::verify(&provider_id, events)?;
+        Ok(())
+    }
+
     pub fn offering_label(&self) -> &str {
         &self.offering_label
     }
 
     pub fn signer(&self) -> &MarketSigner {
         &self.signer
+    }
+
+    pub fn response_signer(&self) -> &MarketSigner {
+        &self.response_signer
+    }
+
+    pub fn response_pubkey(&self) -> &str {
+        self.response_signer.pubkey()
     }
 
     pub fn quotes(&self) -> &[QuoteCandidate] {
@@ -640,6 +756,10 @@ impl MarketSession {
 
     pub fn records(&self) -> &[Event] {
         &self.records
+    }
+
+    pub fn receipt_verifications(&self) -> Vec<ReceiptVerification> {
+        verify_receipts_with_provider_keys(&self.records, self.provider_network.key_chain())
     }
 
     pub fn status_lanes(&self) -> Vec<StatusLane> {
@@ -687,6 +807,128 @@ impl MarketSession {
             .collect()
     }
 
+    pub fn acknowledgments(&self) -> Vec<AcknowledgmentEntry> {
+        self.records
+            .iter()
+            .filter(|event| event.kind == MKT_SWP_INTENT_ACK_KIND)
+            .filter_map(project_acknowledgment)
+            .collect()
+    }
+
+    pub fn order_acknowledgment(&self) -> Option<AcknowledgmentEntry> {
+        let order_id = self.order.as_ref().map(|order| order.id.as_str())?;
+        self.acknowledgments()
+            .into_iter()
+            .find(|acknowledgment| acknowledgment.intent_event_id == order_id)
+    }
+
+    pub fn intent_progress(&self, now: u64) -> IntentProgress {
+        let Some(order) = self.order.as_ref() else {
+            return IntentProgress::NotOrdered;
+        };
+        let Some(acknowledgment) = self.order_acknowledgment() else {
+            let deadline_at = order.created_at.saturating_add(ACK_DEADLINE_SECONDS);
+            return IntentProgress::AwaitingAcknowledgment {
+                deadline_at,
+                timed_out: now > deadline_at,
+            };
+        };
+        if acknowledgment.disposition == "rejected" {
+            return IntentProgress::Rejected {
+                acknowledgment_event_id: acknowledgment.event_id,
+                error_code: acknowledgment
+                    .error_code
+                    .unwrap_or_else(|| "mkt-v2-intent-invalid".to_owned()),
+            };
+        }
+        if let Some(outcome) = self.terminal_outcome() {
+            return IntentProgress::OutcomeReceived {
+                acknowledgment_event_id: acknowledgment.event_id,
+                outcome_event_id: outcome.id.clone(),
+            };
+        }
+        let deadline_at = order.created_at.saturating_add(OUTCOME_DEADLINE_SECONDS);
+        IntentProgress::AwaitingOutcome {
+            acknowledgment_event_id: acknowledgment.event_id,
+            deadline_at,
+            timed_out: now > deadline_at,
+        }
+    }
+
+    pub fn can_replay_stuck_intent(&self, now: u64) -> bool {
+        match self.intent_progress(now) {
+            IntentProgress::AwaitingAcknowledgment {
+                timed_out: true, ..
+            } => true,
+            IntentProgress::AwaitingOutcome {
+                timed_out: true, ..
+            } => self
+                .records
+                .iter()
+                .any(|event| event.kind == MKT_SWP_REDRIVE_KIND),
+            _ => false,
+        }
+    }
+
+    pub fn can_redrive(&self, now: u64) -> bool {
+        let outcome_deadline_passed = self
+            .order
+            .as_ref()
+            .is_some_and(|order| now > order.created_at.saturating_add(OUTCOME_DEADLINE_SECONDS));
+        outcome_deadline_passed
+            && matches!(
+                self.intent_progress(now),
+                IntentProgress::AwaitingOutcome { .. } | IntentProgress::OutcomeReceived { .. }
+            )
+            && !self
+                .records
+                .iter()
+                .any(|event| event.kind == MKT_SWP_REDRIVE_KIND)
+    }
+
+    pub fn replay_stuck_intent(&self, now: u64) -> Result<Event, String> {
+        match self.intent_progress(now) {
+            IntentProgress::AwaitingAcknowledgment {
+                timed_out: true, ..
+            } => self
+                .order
+                .clone()
+                .ok_or_else(|| "the session has no order to replay".to_owned()),
+            IntentProgress::AwaitingOutcome {
+                timed_out: true, ..
+            } => self
+                .records
+                .iter()
+                .rev()
+                .find(|event| event.kind == MKT_SWP_REDRIVE_KIND)
+                .cloned()
+                .ok_or_else(|| "the session has no re-drive to replay".to_owned()),
+            _ => Err("no timed-out intent is eligible for exact replay".to_owned()),
+        }
+    }
+
+    fn terminal_outcome(&self) -> Option<&Event> {
+        self.records
+            .iter()
+            .filter(|event| event.kind == MKT_CLOSE_KIND)
+            .max_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+    }
+
+    fn last_known_status_or_close(&self) -> Option<&Event> {
+        self.records
+            .iter()
+            .filter(|event| matches!(event.kind, MKT_STATUS_KIND | MKT_CLOSE_KIND))
+            .max_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+    }
+
     fn author_role(&self, pubkey: &str) -> ParticipantRole {
         if pubkey == self.requester_pubkey() {
             ParticipantRole::Requester
@@ -732,7 +974,7 @@ impl MarketSession {
             .iter()
             .find(|event| {
                 event.kind == MKT_CANCEL_KIND
-                    && event.pubkey == *self.provider_pubkey()
+                    && self.provider_network.validate_provider_event(event).is_ok()
                     && event.tag_values("action").next() == Some("effective")
             })
             .map(|event| event.id.clone())
@@ -746,6 +988,17 @@ impl MarketSession {
             .max()
             .unwrap_or(0);
         now.max(latest.saturating_add(1))
+    }
+
+    fn sign_hardened_event(
+        &self,
+        created_at: u64,
+        kind: u16,
+        tags: Vec<Tag>,
+        content: Value,
+        observed_at: u64,
+    ) -> Result<Event, String> {
+        sign_and_validate_hardened(&self.signer, created_at, kind, tags, content, observed_at)
     }
 
     fn admit_own(&mut self, event: Event, observed_at: u64) -> Result<(), String> {
@@ -762,10 +1015,27 @@ impl MarketSession {
         delivery: SignedRecordDelivery,
         wrap_id: Option<String>,
     ) -> Result<(), String> {
+        match self
+            .event_ids
+            .observe(&event)
+            .map_err(|error| error.to_string())?
+        {
+            MktEventIdAdmission::New => self.push_record_unchecked(event, delivery, wrap_id),
+            MktEventIdAdmission::Duplicate => {
+                Err("a locally admitted record duplicated an existing event".to_owned())
+            }
+        }
+    }
+
+    fn push_record_unchecked(
+        &mut self,
+        event: Event,
+        delivery: SignedRecordDelivery,
+        wrap_id: Option<String>,
+    ) -> Result<(), String> {
         if self.records.len() >= MAX_SESSION_RECORDS {
             return Err("the session record history is full".to_owned());
         }
-        self.record_ids.insert(event.id.clone());
         self.records.push(event);
         self.deliveries.push(delivery);
         self.wrap_ids.push(wrap_id);
@@ -785,18 +1055,17 @@ impl MarketSession {
             return Ok(AdmitOutcome::OtherSession);
         }
         let event = record.event().clone();
-        if self.record_ids.contains(&event.id) {
-            return Ok(AdmitOutcome::Replay);
-        }
         let expected_sender = if event.pubkey == *self.requester_pubkey() {
             self.requester_pubkey()
-        } else if event.pubkey == *self.provider_pubkey() {
-            self.provider_pubkey()
         } else {
-            return Err("record signer is not a session participant".to_owned());
+            self.provider_network.validate_provider_event(&event)?;
+            event.pubkey.as_str()
         };
         if delivered.sender() != expected_sender {
             return Err("gift-wrap sender does not match the record signer".to_owned());
+        }
+        if event.kind == MKT_SWP_INTENT_ACK_KIND {
+            self.validate_acknowledgment(&event)?;
         }
         if event.kind == MKT_QUOTE_KIND {
             if self.quotes.len() >= MAX_QUOTE_CANDIDATES {
@@ -805,13 +1074,66 @@ impl MarketSession {
             let candidate = QuoteCandidate::from_event(&event, &self.rfq.id)?;
             self.quotes.push(candidate);
         }
-        if event.kind == MKT_SWP_SWAP_CONTRACT_KIND && event.pubkey == *self.provider_pubkey() {
+        if event.kind == MKT_SWP_SWAP_CONTRACT_KIND
+            && self
+                .provider_network
+                .validate_provider_event(&event)
+                .is_ok()
+        {
             self.provider_contract_received = true;
         }
         let delivery = SignedRecordDelivery::from_delivered(delivered, observed_at)
             .map_err(|error| format!("delivery failed validation: {error}"))?;
-        self.push_record(event, delivery, Some(delivered.wrap_event_id().to_owned()))?;
+        match self
+            .event_ids
+            .observe(&event)
+            .map_err(|error| error.to_string())?
+        {
+            MktEventIdAdmission::Duplicate => return Ok(AdmitOutcome::Replay),
+            MktEventIdAdmission::New => {}
+        }
+        self.push_record_unchecked(event, delivery, Some(delivered.wrap_event_id().to_owned()))?;
         Ok(AdmitOutcome::Admitted)
+    }
+
+    fn validate_acknowledgment(&self, event: &Event) -> Result<(), String> {
+        self.provider_network.validate_provider_event(event)?;
+        let acknowledgment = project_acknowledgment(event)
+            .ok_or_else(|| "intent acknowledgment projection failed".to_owned())?;
+        if self.acknowledgments().iter().any(|existing| {
+            existing.intent_event_id == acknowledgment.intent_event_id
+                && existing.event_id != acknowledgment.event_id
+        }) {
+            return Err("intent has conflicting acknowledgment events".to_owned());
+        }
+        let intent = self
+            .records
+            .iter()
+            .find(|candidate| candidate.id == acknowledgment.intent_event_id)
+            .ok_or_else(|| "intent acknowledgment references an unknown intent".to_owned())?;
+        if !matches!(intent.kind, MKT_ORDER_KIND | MKT_SWP_REDRIVE_KIND) {
+            return Err("intent acknowledgment references a non-intent record".to_owned());
+        }
+        let intent_envelope = validate_mkt_private_base(intent)
+            .map_err(|error| format!("acknowledged intent envelope failed: {error}"))?;
+        let intent_record = validate_mkt_hardening_event(intent, &intent_envelope, None)
+            .map_err(|error| format!("acknowledged intent failed: {error}"))?;
+        let acknowledgment_envelope = validate_mkt_private_base(event)
+            .map_err(|error| format!("acknowledgment envelope failed: {error}"))?;
+        let acknowledgment_record =
+            validate_mkt_hardening_event(event, &acknowledgment_envelope, None)
+                .map_err(|error| format!("acknowledgment failed: {error}"))?;
+        if acknowledgment_record.idempotency_key != intent_record.idempotency_key {
+            return Err("acknowledgment idempotency key differs from its intent".to_owned());
+        }
+        if acknowledgment_record.response_pubkey != self.response_pubkey()
+            || intent_record.response_pubkey != self.response_pubkey()
+        {
+            return Err(
+                "acknowledgment response key differs from the pinned session key".to_owned(),
+            );
+        }
+        Ok(())
     }
 
     /// Accepts the policy-selected quote: constructs, signs, and admits the
@@ -837,7 +1159,8 @@ impl MarketSession {
                 selection: None,
             })
             .map_err(|error| format!("could not construct the order: {error}"))?;
-        let order = sign_request(&self.signer, &order_request)?;
+        let order =
+            sign_effectful_order(&self.signer, &order_request, self.response_pubkey(), now)?;
 
         let status_request = self
             .factory
@@ -883,6 +1206,78 @@ impl MarketSession {
         self.order = Some(order.clone());
         self.accepted_quote = Some(quote);
         Ok(vec![order, status, contract])
+    }
+
+    /// Creates one requester-signed read-only Re-drive Intent. It references
+    /// the accepted Order acknowledgment and the newest provider outcome the
+    /// requester knows. Calling this again is refused; a missing re-drive
+    /// acknowledgment is handled by exact replay through
+    /// [`MarketSession::replay_stuck_intent`].
+    pub fn request_redrive(&mut self, now: u64) -> Result<Event, String> {
+        if !self.can_redrive(now) {
+            return Err("the session is not eligible for a re-drive".to_owned());
+        }
+        let order = self
+            .order
+            .as_ref()
+            .ok_or_else(|| "the session has no order".to_owned())?;
+        let acknowledgment = self
+            .order_acknowledgment()
+            .ok_or_else(|| "the session has no accepted order acknowledgment".to_owned())?;
+        let idempotency_key = random_hex_32();
+        let nonce = random_hex_32();
+        let mut tags = vec![
+            Tag::new(vec!["d".into(), idempotency_key.clone()]),
+            Tag::new(vec!["session".into(), self.session_id().to_owned()]),
+            Tag::new(vec![
+                "profile".into(),
+                MKT_SWP_PROFILE_ID.into(),
+                MKT_SWP_PROFILE_VERSION.to_string(),
+            ]),
+            Tag::new(vec![
+                "p".into(),
+                self.provider_pubkey().to_owned(),
+                String::new(),
+                "provider".into(),
+            ]),
+            Tag::new(vec!["alt".into(), "MKT-SWP Re-drive Intent".into()]),
+            Tag::new(vec!["intent".into(), "redrive".into()]),
+            Tag::new(vec!["nonce".into(), nonce.clone()]),
+            Tag::new(vec!["nonce_at".into(), now.to_string()]),
+            Tag::new(vec!["response".into(), self.response_pubkey().to_owned()]),
+            event_reference(&order.id, "order"),
+            event_reference(&acknowledgment.event_id, "ack"),
+        ];
+        let last_known = self.last_known_status_or_close().map(|event| {
+            let marker = if event.kind == MKT_CLOSE_KIND {
+                "close"
+            } else {
+                "status"
+            };
+            tags.push(event_reference(&event.id, marker));
+            event.id.clone()
+        });
+        let content = json!({
+            "schema": MKT_HARDENING_SCHEMA,
+            "protocol_rev": MKT_HARDENING_PROTOCOL_REVISION,
+            "profile": MKT_SWP_PROFILE_ID,
+            "profile_version": MKT_SWP_PROFILE_VERSION,
+            "session_id": self.session_id(),
+            "intent": {
+                "idempotency_key": idempotency_key,
+                "nonce": nonce,
+                "nonce_at": now,
+                "response_pubkey": self.response_pubkey(),
+                "ack_deadline_seconds": ACK_DEADLINE_SECONDS,
+                "outcome_deadline_seconds": OUTCOME_DEADLINE_SECONDS,
+                "order_event_id": order.id,
+                "ack_event_id": acknowledgment.event_id,
+                "last_known_event_id": last_known,
+            }
+        });
+        let event = self.sign_hardened_event(now, MKT_SWP_REDRIVE_KIND, tags, content, now)?;
+        self.admit_own(event.clone(), now)?;
+        Ok(event)
     }
 
     /// Constructs, signs, and admits a cancellation request. Returns the
@@ -1043,10 +1438,14 @@ impl MarketSession {
             .collect::<Result<Vec<_>, String>>()?;
         Ok(json!({
             "schema": SESSION_STORE_SCHEMA,
+            "protocol_rev": MKT_HARDENING_PROTOCOL_REVISION,
             "session_id": self.session_id(),
             "requester_pubkey": self.requester_pubkey(),
+            "response_pubkey": self.response_pubkey(),
             "provider_pubkey": self.provider_pubkey(),
+            "provider_id": self.provider_id(),
             "offering_address": self.factory.config().offering_address,
+            "provider_network_events": self.provider_network_events(),
             "records": records,
         }))
     }
@@ -1069,6 +1468,123 @@ impl MarketSession {
     }
 }
 
+fn sign_effectful_order(
+    signer: &MarketSigner,
+    request: &MktSigningRequest,
+    response_pubkey: &str,
+    observed_at: u64,
+) -> Result<Event, String> {
+    if request.kind != MKT_ORDER_KIND {
+        return Err("only an Order can become an effectful revision-2 intent".to_owned());
+    }
+    if request.pubkey != signer.pubkey() {
+        return Err("Order signing request belongs to another requester key".to_owned());
+    }
+    let idempotency_key = exactly_one_tag_value(&request.tags, "d")?;
+    let nonce = random_hex_32();
+    let mut tags = request.tags.clone();
+    tags.extend([
+        Tag::new(vec!["intent".into(), "effectful".into()]),
+        Tag::new(vec!["nonce".into(), nonce.clone()]),
+        Tag::new(vec!["nonce_at".into(), observed_at.to_string()]),
+        Tag::new(vec!["response".into(), response_pubkey.to_owned()]),
+    ]);
+    let mut content: Value = serde_json::from_str(&request.content)
+        .map_err(|error| format!("Order signing content is not JSON: {error}"))?;
+    let object = content
+        .as_object_mut()
+        .ok_or_else(|| "Order signing content is not an object".to_owned())?;
+    object.insert("schema".into(), Value::String(MKT_HARDENING_SCHEMA.into()));
+    object.insert(
+        "protocol_rev".into(),
+        Value::from(MKT_HARDENING_PROTOCOL_REVISION),
+    );
+    object.insert(
+        "intent".into(),
+        json!({
+            "idempotency_key": idempotency_key,
+            "nonce": nonce,
+            "nonce_at": observed_at,
+            "response_pubkey": response_pubkey,
+            "ack_deadline_seconds": ACK_DEADLINE_SECONDS,
+            "outcome_deadline_seconds": OUTCOME_DEADLINE_SECONDS,
+        }),
+    );
+    sign_and_validate_hardened(
+        signer,
+        request.created_at,
+        request.kind,
+        tags,
+        content,
+        observed_at,
+    )
+}
+
+fn sign_and_validate_hardened(
+    signer: &MarketSigner,
+    created_at: u64,
+    kind: u16,
+    tags: Vec<Tag>,
+    content: Value,
+    observed_at: u64,
+) -> Result<Event, String> {
+    let content = serde_json::to_string(&content)
+        .map_err(|error| format!("could not serialize revision-2 content: {error}"))?;
+    let event = signer.sign(created_at, kind, tags, content);
+    let raw = serde_json::to_vec(&event)
+        .map_err(|error| format!("could not serialize revision-2 event: {error}"))?;
+    let validated = validate_mkt_private_raw(&raw, &swp_profile_support())
+        .map_err(|error| format!("revision-2 event failed validation: {error}"))?;
+    let record =
+        validate_mkt_hardening_event(validated.event(), validated.envelope(), Some(observed_at))
+            .map_err(|error| format!("revision-2 intent failed validation: {error}"))?;
+    let expected_kind = if kind == MKT_ORDER_KIND {
+        MktHardeningRecordKind::EffectfulIntent
+    } else {
+        MktHardeningRecordKind::RedriveIntent
+    };
+    if record.kind != expected_kind {
+        return Err("revision-2 event validated as another intent kind".to_owned());
+    }
+    Ok(event)
+}
+
+fn exactly_one_tag_value(tags: &[Tag], name: &str) -> Result<String, String> {
+    let values = tags
+        .iter()
+        .filter(|tag| tag.name() == Some(name))
+        .filter_map(Tag::value)
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [value] => Ok((*value).to_owned()),
+        _ => Err(format!("signing request requires exactly one {name} tag")),
+    }
+}
+
+fn event_reference(event_id: &str, marker: &str) -> Tag {
+    Tag::new(vec![
+        "e".into(),
+        event_id.to_owned(),
+        String::new(),
+        marker.to_owned(),
+    ])
+}
+
+fn project_acknowledgment(event: &Event) -> Option<AcknowledgmentEntry> {
+    let envelope = validate_mkt_private_base(event).ok()?;
+    let record = validate_mkt_hardening_event(event, &envelope, None).ok()?;
+    if record.kind != MktHardeningRecordKind::Acknowledgment {
+        return None;
+    }
+    Some(AcknowledgmentEntry {
+        event_id: event.id.clone(),
+        intent_event_id: record.intent_event_id?,
+        disposition: record.disposition?,
+        accepted_at: record.accepted_at?,
+        error_code: record.error_code,
+    })
+}
+
 fn sign_request(signer: &MarketSigner, request: &MktSigningRequest) -> Result<Event, String> {
     let event = signer.sign(
         request.created_at,
@@ -1088,7 +1604,10 @@ pub fn load_stored_records(path: &Path) -> Result<Vec<Event>, String> {
         .map_err(|error| format!("could not read the session store: {error}"))?;
     let document: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("session store is not JSON: {error}"))?;
-    if document.get("schema").and_then(Value::as_str) != Some(SESSION_STORE_SCHEMA) {
+    if !matches!(
+        document.get("schema").and_then(Value::as_str),
+        Some(SESSION_STORE_SCHEMA) | Some(LEGACY_SESSION_STORE_SCHEMA)
+    ) {
         return Err("session store has an unknown schema".to_owned());
     }
     let records = document
@@ -1130,8 +1649,11 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use immortal_client::domain::MKT_RFQ_KIND;
-    use immortal_client::market::unwrap_mkt_record;
+    use immortal_client::domain::{
+        MKT_KEY_ROTATION_SCHEMA, MKT_NETWORK_VERSION, MKT_RFQ_KIND, MKT_SWP_KEY_ROTATION_KIND,
+        MktKeyRotation, canonical_mkt_key_rotation_content, mkt_key_rotation_id,
+    };
+    use immortal_client::market::{unwrap_mkt_record, unwrap_mkt_record_raw};
 
     use super::*;
 
@@ -1143,6 +1665,143 @@ mod tests {
             profile: "mkt-swp:1".to_owned(),
             provider_address: format!("39600:{}:local", provider.pubkey()),
         }
+    }
+
+    fn hardened_order(
+        session: &MarketSession,
+        created_at: u64,
+        idempotency_key: &str,
+        nonce: &str,
+    ) -> Event {
+        sign_and_validate_hardened(
+            session.signer(),
+            created_at,
+            MKT_ORDER_KIND,
+            vec![
+                Tag::new(vec!["d".into(), idempotency_key.into()]),
+                Tag::new(vec!["session".into(), session.session_id().into()]),
+                Tag::new(vec![
+                    "profile".into(),
+                    MKT_SWP_PROFILE_ID.into(),
+                    MKT_SWP_PROFILE_VERSION.to_string(),
+                ]),
+                Tag::new(vec![
+                    "p".into(),
+                    session.provider_pubkey().into(),
+                    String::new(),
+                    "provider".into(),
+                ]),
+                Tag::new(vec!["alt".into(), "MKT-SWP Order".into()]),
+                event_reference(&"33".repeat(32), "quote"),
+                Tag::new(vec!["intent".into(), "effectful".into()]),
+                Tag::new(vec!["nonce".into(), nonce.into()]),
+                Tag::new(vec!["nonce_at".into(), created_at.to_string()]),
+                Tag::new(vec!["response".into(), session.response_pubkey().into()]),
+            ],
+            json!({
+                "schema": MKT_HARDENING_SCHEMA,
+                "protocol_rev": MKT_HARDENING_PROTOCOL_REVISION,
+                "profile": MKT_SWP_PROFILE_ID,
+                "profile_version": MKT_SWP_PROFILE_VERSION,
+                "session_id": session.session_id(),
+                "intent": {
+                    "idempotency_key": idempotency_key,
+                    "nonce": nonce,
+                    "nonce_at": created_at,
+                    "response_pubkey": session.response_pubkey(),
+                    "ack_deadline_seconds": ACK_DEADLINE_SECONDS,
+                    "outcome_deadline_seconds": OUTCOME_DEADLINE_SECONDS,
+                },
+                "mkt_swp": {},
+            }),
+            created_at,
+        )
+        .expect("effectful Order")
+    }
+
+    fn acknowledgment(
+        provider: &MarketSigner,
+        session: &MarketSession,
+        intent: &Event,
+        created_at: u64,
+    ) -> Event {
+        provider.sign(
+            created_at,
+            MKT_SWP_INTENT_ACK_KIND,
+            vec![
+                Tag::new(vec!["d".into(), "44".repeat(32)]),
+                Tag::new(vec!["session".into(), session.session_id().into()]),
+                Tag::new(vec![
+                    "profile".into(),
+                    MKT_SWP_PROFILE_ID.into(),
+                    MKT_SWP_PROFILE_VERSION.to_string(),
+                ]),
+                Tag::new(vec![
+                    "p".into(),
+                    session.requester_pubkey().into(),
+                    String::new(),
+                    "requester".into(),
+                ]),
+                Tag::new(vec!["alt".into(), "MKT-SWP Intent Acknowledgment".into()]),
+                event_reference(&intent.id, "intent"),
+                Tag::new(vec!["ack".into(), "accepted".into()]),
+                Tag::new(vec!["response".into(), session.response_pubkey().into()]),
+                Tag::new(vec!["expiration".into(), (created_at + 300).to_string()]),
+            ],
+            json!({
+                "schema": MKT_HARDENING_SCHEMA,
+                "protocol_rev": MKT_HARDENING_PROTOCOL_REVISION,
+                "profile": MKT_SWP_PROFILE_ID,
+                "profile_version": MKT_SWP_PROFILE_VERSION,
+                "session_id": session.session_id(),
+                "ack": {
+                    "intent_event_id": intent.id,
+                    "idempotency_key": intent.tag_values("d").next(),
+                    "disposition": "accepted",
+                    "accepted_at": created_at,
+                    "error_code": Value::Null,
+                }
+            })
+            .to_string(),
+        )
+    }
+
+    fn key_rotation(
+        old: &MarketSigner,
+        new: &MarketSigner,
+        created_at: u64,
+        effective_at: u64,
+    ) -> Event {
+        let mut rotation = MktKeyRotation {
+            schema: MKT_KEY_ROTATION_SCHEMA.to_owned(),
+            version: MKT_NETWORK_VERSION,
+            rotation_id: String::new(),
+            provider_id: old.pubkey().to_owned(),
+            generation: 1,
+            previous_rotation_event_id: None,
+            old_pubkey: old.pubkey().to_owned(),
+            new_pubkey: new.pubkey().to_owned(),
+            effective_at,
+        };
+        rotation.rotation_id = mkt_key_rotation_id(&rotation).expect("rotation digest");
+        old.sign(
+            created_at,
+            MKT_SWP_KEY_ROTATION_KIND,
+            vec![
+                Tag::new(vec!["d".into(), rotation.rotation_id.clone()]),
+                Tag::new(vec!["provider".into(), rotation.provider_id.clone()]),
+                Tag::new(vec!["generation".into(), "1".into()]),
+                Tag::new(vec!["effective_at".into(), effective_at.to_string()]),
+                Tag::new(vec![
+                    "p".into(),
+                    new.pubkey().to_owned(),
+                    String::new(),
+                    "successor".into(),
+                ]),
+                Tag::new(vec!["alt".into(), "MKT Provider Key Rotation".into()]),
+            ],
+            canonical_mkt_key_rotation_content(&rotation).expect("canonical rotation"),
+        )
     }
 
     fn candidate(output: &str, fee: &str, pubkey: &str, expires_at: u64) -> QuoteCandidate {
@@ -1363,5 +2022,148 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, session.records()[0].id);
         std::fs::remove_dir_all(&directory).expect("test store directory is removable");
+    }
+
+    #[test]
+    fn revision_two_order_ack_timeout_and_redrive_keep_one_effectful_intent() {
+        let requester = MarketSigner::from_secret_bytes([3; 32]).expect("requester key");
+        let response = MarketSigner::from_secret_bytes([5; 32]).expect("response key");
+        let provider = MarketSigner::from_secret_bytes([7; 32]).expect("provider key");
+        let provider_network =
+            ProviderNetworkState::verify(provider.pubkey(), &[]).expect("provider network");
+        let mut session = MarketSession::begin_with_response_signer(
+            requester,
+            response,
+            &offering(&provider),
+            provider_network,
+            1_000,
+        )
+        .expect("session");
+        let order = hardened_order(&session, 1_001, &"aa".repeat(32), &"bb".repeat(32));
+        session
+            .admit_own(order.clone(), 1_001)
+            .expect("admit Order");
+        session.order = Some(order.clone());
+        assert_eq!(
+            session.intent_progress(1_032),
+            IntentProgress::AwaitingAcknowledgment {
+                deadline_at: 1_031,
+                timed_out: true,
+            }
+        );
+        assert_eq!(
+            session.replay_stuck_intent(1_032).expect("exact replay"),
+            order
+        );
+
+        let ack = acknowledgment(&provider, &session, &order, 1_002);
+        let wraps = wrap_for_transport(&ack, &provider, session.response_pubkey(), 1_002)
+            .expect("ack wraps");
+        let raw_wrap = serde_json::to_vec(&wraps[0].event).expect("raw wrap");
+        let delivered =
+            unwrap_mkt_record_raw(&raw_wrap, session.response_signer(), &swp_profile_support())
+                .expect("response-key delivery validates");
+        assert_eq!(
+            session
+                .admit_delivery(&delivered, 1_002)
+                .expect("ack admitted"),
+            AdmitOutcome::Admitted
+        );
+        assert!(matches!(
+            session.intent_progress(1_010),
+            IntentProgress::AwaitingOutcome {
+                timed_out: false,
+                ..
+            }
+        ));
+        assert!(session.can_redrive(1_302));
+        let redrive = session.request_redrive(1_302).expect("re-drive");
+        assert_eq!(redrive.kind, MKT_SWP_REDRIVE_KIND);
+        assert_eq!(
+            redrive
+                .tags
+                .iter()
+                .find(|tag| {
+                    tag.name() == Some("e")
+                        && tag.as_slice().get(3).map(String::as_str) == Some("order")
+                })
+                .and_then(Tag::value),
+            Some(order.id.as_str())
+        );
+        assert!(!session.can_redrive(1_303));
+        assert_eq!(
+            session.replay_stuck_intent(1_303).expect("re-drive replay"),
+            redrive
+        );
+        assert_eq!(
+            session
+                .records()
+                .iter()
+                .filter(|event| event.kind == MKT_ORDER_KIND)
+                .count(),
+            1,
+            "re-drive never creates another business Order"
+        );
+    }
+
+    #[test]
+    fn mid_session_rotation_selects_signer_by_event_time() {
+        let requester = MarketSigner::from_secret_bytes([3; 32]).expect("requester key");
+        let response = MarketSigner::from_secret_bytes([5; 32]).expect("response key");
+        let provider = MarketSigner::from_secret_bytes([7; 32]).expect("provider key");
+        let successor = MarketSigner::from_secret_bytes([8; 32]).expect("successor key");
+        let provider_network =
+            ProviderNetworkState::verify(provider.pubkey(), &[]).expect("provider network");
+        let mut session = MarketSession::begin_with_response_signer(
+            requester,
+            response,
+            &offering(&provider),
+            provider_network,
+            1_000,
+        )
+        .expect("session");
+        let order = hardened_order(&session, 1_001, &"aa".repeat(32), &"bb".repeat(32));
+        session
+            .admit_own(order.clone(), 1_001)
+            .expect("admit Order");
+        session.order = Some(order.clone());
+
+        let rotation = key_rotation(&provider, &successor, 1_050, 1_100);
+        session
+            .refresh_provider_network(&[rotation])
+            .expect("rotation chain");
+        assert_eq!(session.provider_transport_pubkey(1_099), provider.pubkey());
+        assert_eq!(session.provider_transport_pubkey(1_100), successor.pubkey());
+
+        let stale_ack = acknowledgment(&provider, &session, &order, 1_100);
+        let stale_wrap =
+            wrap_for_transport(&stale_ack, &provider, session.response_pubkey(), 1_100)
+                .expect("stale ack wraps");
+        let raw_stale = serde_json::to_vec(&stale_wrap[0].event).expect("raw stale wrap");
+        let delivered_stale = unwrap_mkt_record_raw(
+            &raw_stale,
+            session.response_signer(),
+            &swp_profile_support(),
+        )
+        .expect("stale ack unwraps before identity policy");
+        assert!(session.admit_delivery(&delivered_stale, 1_100).is_err());
+
+        let fresh_ack = acknowledgment(&successor, &session, &order, 1_100);
+        let fresh_wrap =
+            wrap_for_transport(&fresh_ack, &successor, session.response_pubkey(), 1_100)
+                .expect("fresh ack wraps");
+        let raw_fresh = serde_json::to_vec(&fresh_wrap[0].event).expect("raw fresh wrap");
+        let delivered_fresh = unwrap_mkt_record_raw(
+            &raw_fresh,
+            session.response_signer(),
+            &swp_profile_support(),
+        )
+        .expect("fresh ack unwraps");
+        assert_eq!(
+            session
+                .admit_delivery(&delivered_fresh, 1_100)
+                .expect("successor ack admitted"),
+            AdmitOutcome::Admitted
+        );
     }
 }

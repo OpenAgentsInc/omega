@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 
 use immortal_client::domain::{
-    Event, MKT_OFFERING_KIND, MKT_PROVIDER_PROFILE_KIND, ReplacementDecision,
-    compare_replacement_order, validate_mkt_public_event,
+    Event, MKT_OFFERING_KIND, MKT_PROVIDER_PROFILE_KIND, MKT_SWP_KEY_ROTATION_KIND,
+    MKT_SWP_RELAY_SET_KIND, ReplacementDecision, compare_replacement_order,
+    validate_mkt_public_event,
 };
 use serde_json::{Value, json};
 
@@ -212,14 +213,19 @@ impl MarketDiscovery {
         self.connection = ConnectionState::Disconnected(reason);
     }
 
-    /// The single NIP-01 REQ this surface sends: bounded provider-profile and
-    /// offering heads.
+    /// The single bounded NIP-01 REQ includes market discovery heads and the
+    /// immutable provider-network histories needed to verify sessions.
     pub fn subscription_request(&self) -> String {
         json!([
             "REQ",
             SUBSCRIPTION_ID,
             {
-                "kinds": [MKT_PROVIDER_PROFILE_KIND, MKT_OFFERING_KIND],
+                "kinds": [
+                    MKT_PROVIDER_PROFILE_KIND,
+                    MKT_OFFERING_KIND,
+                    MKT_SWP_KEY_ROTATION_KIND,
+                    MKT_SWP_RELAY_SET_KIND
+                ],
                 "limit": self.effective_limit,
             }
         ])
@@ -289,7 +295,13 @@ impl MarketDiscovery {
             self.push_diagnostic(format!("rejected event: {error:?}"));
             return IngestOutcome::RejectedEvent;
         }
-        if event.kind != MKT_PROVIDER_PROFILE_KIND && event.kind != MKT_OFFERING_KIND {
+        if !matches!(
+            event.kind,
+            MKT_PROVIDER_PROFILE_KIND
+                | MKT_OFFERING_KIND
+                | MKT_SWP_KEY_ROTATION_KIND
+                | MKT_SWP_RELAY_SET_KIND
+        ) {
             self.push_diagnostic(format!("unexpected kind {}", event.kind));
             return IngestOutcome::RejectedEvent;
         }
@@ -352,6 +364,32 @@ impl MarketDiscovery {
             .values()
             .filter(|event| event.kind == MKT_OFFERING_KIND)
             .map(OfferingListing::from_validated_event)
+            .collect()
+    }
+
+    pub fn provider_network_events(&self, provider_id: &str) -> Vec<Event> {
+        self.heads
+            .values()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    MKT_SWP_KEY_ROTATION_KIND | MKT_SWP_RELAY_SET_KIND
+                ) && event.tag_values("provider").next() == Some(provider_id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn network_events(&self) -> Vec<Event> {
+        self.heads
+            .values()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    MKT_SWP_KEY_ROTATION_KIND | MKT_SWP_RELAY_SET_KIND
+                )
+            })
+            .cloned()
             .collect()
     }
 
@@ -596,7 +634,12 @@ mod tests {
         assert_eq!(request[1], SUBSCRIPTION_ID);
         assert_eq!(
             request[2]["kinds"],
-            json!([MKT_PROVIDER_PROFILE_KIND, MKT_OFFERING_KIND])
+            json!([
+                MKT_PROVIDER_PROFILE_KIND,
+                MKT_OFFERING_KIND,
+                MKT_SWP_KEY_ROTATION_KIND,
+                MKT_SWP_RELAY_SET_KIND,
+            ])
         );
         assert_eq!(request[2]["limit"], json!(100));
     }
