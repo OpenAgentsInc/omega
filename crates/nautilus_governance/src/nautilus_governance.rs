@@ -1960,8 +1960,14 @@ fn log_error(context: &str, error: &anyhow::Error) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nautilus_sidecar::{OfficialVenueState, evaluate_official_venue_state};
-    use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+    use nautilus_sidecar::{
+        OfficialOpenOrder, OfficialPosition, OfficialVenueState, evaluate_official_venue_state,
+    };
+    use std::{
+        collections::{BTreeSet, HashSet},
+        path::PathBuf,
+        time::Duration,
+    };
     use trading_mandate::TradingMandate;
 
     fn cost_quote(sequence: u64, bid: &str, ask: &str) -> StreamEvent {
@@ -2189,33 +2195,305 @@ mod tests {
         format_decimal_units(ticked / tick_units, 1)
     }
 
+    struct MeasurementFillAccumulator {
+        client_order_id: String,
+        target_quantity_units: i128,
+        quantity_units: i128,
+        quote_value_units: i128,
+        fee_micros: i128,
+        processed_fill_ids: HashSet<String>,
+        aggregate: Option<StreamEvent>,
+        latest_quote: Option<StreamEvent>,
+        engine_positions: Option<Vec<Value>>,
+        engine_orders_are_zero: Option<bool>,
+        engine_position_sequence: Option<u64>,
+        engine_order_sequence: Option<u64>,
+        latest_fill_sequence: Option<u64>,
+    }
+
+    impl MeasurementFillAccumulator {
+        fn new(client_order_id: &str, requested_quantity: &str) -> Result<Self> {
+            Ok(Self {
+                client_order_id: client_order_id.into(),
+                target_quantity_units: i128::from(decimal_to_units(requested_quantity, 8)?),
+                quantity_units: 0,
+                quote_value_units: 0,
+                fee_micros: 0,
+                processed_fill_ids: HashSet::new(),
+                aggregate: None,
+                latest_quote: None,
+                engine_positions: None,
+                engine_orders_are_zero: None,
+                engine_position_sequence: None,
+                engine_order_sequence: None,
+                latest_fill_sequence: None,
+            })
+        }
+
+        fn after_zero_position_preflight(
+            client_order_id: &str,
+            requested_quantity: &str,
+        ) -> Result<Self> {
+            let mut accumulator = Self::new(client_order_id, requested_quantity)?;
+            accumulator.engine_positions = Some(Vec::new());
+            Ok(accumulator)
+        }
+
+        fn ingest(&mut self, event: &StreamEvent) -> Result<()> {
+            match event {
+                StreamEvent::Quote { .. } => {
+                    self.latest_quote = Some(event.clone());
+                    return Ok(());
+                }
+                StreamEvent::PositionState {
+                    sequence,
+                    positions,
+                    ..
+                } => {
+                    self.engine_positions = Some(positions.clone());
+                    self.engine_position_sequence = Some(*sequence);
+                    return Ok(());
+                }
+                StreamEvent::OrderState {
+                    sequence, orders, ..
+                } => {
+                    self.engine_orders_are_zero = Some(!orders.iter().any(|order| {
+                        find_string(order, &["status"]).is_some_and(|status| {
+                            matches!(
+                                status.to_ascii_uppercase().as_str(),
+                                "INITIALIZED"
+                                    | "SUBMITTED"
+                                    | "ACCEPTED"
+                                    | "OPEN"
+                                    | "TRIGGERED"
+                                    | "PENDING_UPDATE"
+                                    | "PENDING_CANCEL"
+                                    | "PARTIALLY_FILLED"
+                            )
+                        })
+                    }));
+                    self.engine_order_sequence = Some(*sequence);
+                    return Ok(());
+                }
+                _ => {}
+            }
+            let StreamEvent::Fill {
+                generation,
+                sequence,
+                state,
+                ..
+            } = event
+            else {
+                return Ok(());
+            };
+            let state_value = Value::Object(state.clone());
+            if find_string(&state_value, &["client_order_id"]).as_deref()
+                != Some(self.client_order_id.as_str())
+            {
+                return Ok(());
+            }
+            let identity = find_string(&state_value, &["trade_id"])
+                .unwrap_or_else(|| format!("{generation}-{sequence}"));
+            if !self.processed_fill_ids.insert(identity) {
+                return Ok(());
+            }
+            self.latest_fill_sequence = Some(
+                self.latest_fill_sequence
+                    .map_or(*sequence, |latest| latest.max(*sequence)),
+            );
+            let fill_quantity = find_string(&state_value, &["last_qty", "quantity", "size"])
+                .context("measurement fill has no quantity")?;
+            let fill_price = find_string(&state_value, &["last_px", "price"])
+                .context("measurement fill has no price")?;
+            let commission = find_string(&state_value, &["commission", "fee"])
+                .unwrap_or_else(|| "0 USDC".into());
+            let fill_quantity_units = i128::from(decimal_to_units(&fill_quantity, 8)?);
+            if fill_quantity_units <= 0 {
+                bail!("measurement fill quantity must be positive");
+            }
+            self.quantity_units = self
+                .quantity_units
+                .checked_add(fill_quantity_units)
+                .context("aggregate fill quantity overflowed")?;
+            self.quote_value_units = self
+                .quote_value_units
+                .checked_add(
+                    fill_quantity_units
+                        .checked_mul(i128::from(decimal_to_units(&fill_price, 8)?))
+                        .context("aggregate fill value overflowed")?,
+                )
+                .context("aggregate fill value overflowed")?;
+            self.fee_micros = self
+                .fee_micros
+                .checked_add(i128::from(decimal_to_units(
+                    commission
+                        .split_whitespace()
+                        .next()
+                        .context("measurement commission is empty")?,
+                    USDC_SCALE,
+                )?))
+                .context("aggregate fill commission overflowed")?;
+            let mut combined = event.clone();
+            if let StreamEvent::Fill { state, .. } = &mut combined {
+                state.insert(
+                    "last_qty".into(),
+                    Value::String(format_decimal_units(self.quantity_units, 8)?),
+                );
+                state.insert(
+                    "last_px".into(),
+                    Value::String(format_decimal_units(
+                        self.quote_value_units / self.quantity_units,
+                        8,
+                    )?),
+                );
+                state.insert(
+                    "commission".into(),
+                    Value::String(format!(
+                        "{} USDC",
+                        format_decimal_units(self.fee_micros, USDC_SCALE)?
+                    )),
+                );
+            }
+            self.aggregate = Some(combined);
+            Ok(())
+        }
+
+        fn is_complete(&self) -> bool {
+            self.quantity_units >= self.target_quantity_units
+        }
+
+        fn observed_quantity(&self) -> Result<String> {
+            format_decimal_units(self.quantity_units, 8)
+        }
+
+        fn reset_order_settlement_observation(&mut self) {
+            self.engine_orders_are_zero = None;
+            self.engine_order_sequence = None;
+        }
+
+        fn engine_projection_is_fresh(&self) -> bool {
+            let Some(position_sequence) = self.engine_position_sequence else {
+                return self.latest_fill_sequence.is_none() && self.engine_positions.is_some();
+            };
+            let Some(order_sequence) = self.engine_order_sequence else {
+                return false;
+            };
+            self.latest_fill_sequence.is_none_or(|fill_sequence| {
+                position_sequence >= fill_sequence && order_sequence >= fill_sequence
+            })
+        }
+    }
+
+    fn official_btc_position_units(state: &OfficialVenueState) -> Result<i128> {
+        state.positions.iter().try_fold(0_i128, |total, position| {
+            if position.coin != "BTC" {
+                bail!(
+                    "official testnet settlement found unexpected {} exposure",
+                    position.coin
+                );
+            }
+            total
+                .checked_add(i128::from(decimal_to_units(&position.size, 8)?))
+                .context("official position quantity overflowed")
+        })
+    }
+
+    fn engine_btc_position_units(positions: &[Value]) -> Result<i128> {
+        positions.iter().try_fold(0_i128, |total, position| {
+            let instrument = find_string(position, &["instrument_id", "instrument"])
+                .context("Nautilus position has no instrument")?;
+            if !instrument.starts_with("BTC-") {
+                bail!("Nautilus settlement found unexpected {instrument} exposure");
+            }
+            let signed_quantity = find_string(position, &["signed_qty"]).or_else(|| {
+                let quantity = find_string(position, &["quantity", "size"])?;
+                let side = find_string(position, &["side", "position_side"])?;
+                Some(if side.eq_ignore_ascii_case("short") {
+                    format!("-{quantity}")
+                } else {
+                    quantity
+                })
+            });
+            let signed_quantity = signed_quantity.context("Nautilus position has no quantity")?;
+            total
+                .checked_add(i128::from(decimal_to_units(&signed_quantity, 8)?))
+                .context("Nautilus position quantity overflowed")
+        })
+    }
+
+    fn measurement_settlement_matches(
+        official: &OfficialVenueState,
+        engine_positions: &[Value],
+        engine_orders_are_zero: bool,
+        expected_quantity_units: i128,
+    ) -> Result<bool> {
+        Ok(official.network == nautilus_sidecar::Network::Testnet
+            && official.open_orders.is_empty()
+            && official_btc_position_units(official)? == expected_quantity_units
+            && engine_orders_are_zero
+            && engine_btc_position_units(engine_positions)? == expected_quantity_units)
+    }
+
+    fn settle_measurement_entry(
+        supervisor: &nautilus_sidecar::NautilusSupervisor,
+        runtime: &GovernanceRuntime,
+        owner_address: &str,
+        accumulator: &mut MeasurementFillAccumulator,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut matching_observations = 0_u8;
+        while std::time::Instant::now() < deadline {
+            let frame = supervisor.take_stream_frame()?;
+            runtime.ingest(&frame.state)?;
+            if let Some(quote) = &frame.quote {
+                accumulator.ingest(quote)?;
+            }
+            for event in &frame.state {
+                accumulator.ingest(event)?;
+            }
+            let Some(positions) = accumulator.engine_positions.as_deref() else {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let Some(orders_are_zero) = accumulator.engine_orders_are_zero else {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            if !accumulator.engine_projection_is_fresh() {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            let official = official_testnet_state(owner_address)?;
+            if measurement_settlement_matches(
+                &official,
+                positions,
+                orders_are_zero,
+                accumulator.quantity_units,
+            )? {
+                matching_observations += 1;
+                if matching_observations == 2 {
+                    return Ok(());
+                }
+            } else {
+                matching_observations = 0;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        bail!(
+            "measurement entry did not settle to the same official, Nautilus, and fill quantity before the exit boundary"
+        )
+    }
+
     fn wait_for_measurement_fill(
         supervisor: &nautilus_sidecar::NautilusSupervisor,
         runtime: &GovernanceRuntime,
-        client_order_id: &str,
-        requested_quantity: &str,
+        accumulator: &mut MeasurementFillAccumulator,
         timeout: Duration,
-    ) -> Result<(Option<StreamEvent>, Option<StreamEvent>)> {
+    ) -> Result<()> {
         let deadline = std::time::Instant::now() + timeout;
-        let mut latest_quote = None;
-        let target_quantity_units = i128::from(decimal_to_units(requested_quantity, 8)?);
-        let mut quantity_units = 0_i128;
-        let mut quote_value_units = 0_i128;
-        let mut fee_micros = 0_i128;
-        let mut aggregate = None;
         while std::time::Instant::now() < deadline {
             let frame = supervisor.take_stream_frame()?;
-            if frame.quote.is_some() {
-                latest_quote = frame.quote;
-            }
-            let matching = frame.state.iter().filter(|event| {
-                if let StreamEvent::Fill { state, .. } = event {
-                    find_string(&Value::Object(state.clone()), &["client_order_id"]).as_deref()
-                        == Some(client_order_id)
-                } else {
-                    false
-                }
-            });
             let fills = frame
                 .state
                 .iter()
@@ -2223,63 +2501,18 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>();
             runtime.ingest(&fills)?;
-            for fill in matching {
-                let StreamEvent::Fill { state, .. } = fill else {
-                    continue;
-                };
-                let state_value = Value::Object(state.clone());
-                let fill_quantity = find_string(&state_value, &["last_qty", "quantity", "size"])
-                    .context("measurement fill has no quantity")?;
-                let fill_price = find_string(&state_value, &["last_px", "price"])
-                    .context("measurement fill has no price")?;
-                let commission = find_string(&state_value, &["commission", "fee"])
-                    .unwrap_or_else(|| "0 USDC".into());
-                let fill_quantity_units = i128::from(decimal_to_units(&fill_quantity, 8)?);
-                quantity_units = quantity_units
-                    .checked_add(fill_quantity_units)
-                    .context("aggregate fill quantity overflowed")?;
-                quote_value_units = quote_value_units
-                    .checked_add(
-                        fill_quantity_units
-                            .checked_mul(i128::from(decimal_to_units(&fill_price, 8)?))
-                            .context("aggregate fill value overflowed")?,
-                    )
-                    .context("aggregate fill value overflowed")?;
-                fee_micros = fee_micros
-                    .checked_add(i128::from(decimal_to_units(
-                        commission
-                            .split_whitespace()
-                            .next()
-                            .context("measurement commission is empty")?,
-                        USDC_SCALE,
-                    )?))
-                    .context("aggregate fill commission overflowed")?;
-                let mut combined = fill.clone();
-                if let StreamEvent::Fill { state, .. } = &mut combined {
-                    state.insert(
-                        "last_qty".into(),
-                        Value::String(format_decimal_units(quantity_units, 8)?),
-                    );
-                    state.insert(
-                        "last_px".into(),
-                        Value::String(format_decimal_units(quote_value_units / quantity_units, 8)?),
-                    );
-                    state.insert(
-                        "commission".into(),
-                        Value::String(format!(
-                            "{} USDC",
-                            format_decimal_units(fee_micros, USDC_SCALE)?
-                        )),
-                    );
-                }
-                aggregate = Some(combined);
+            if let Some(quote) = &frame.quote {
+                accumulator.ingest(quote)?;
             }
-            if quantity_units >= target_quantity_units {
-                return Ok((aggregate, latest_quote));
+            for event in &frame.state {
+                accumulator.ingest(event)?;
+            }
+            if accumulator.is_complete() {
+                return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok((aggregate, latest_quote))
+        Ok(())
     }
 
     fn submit_measurement_order(
@@ -2355,6 +2588,139 @@ mod tests {
         let mut mixed = vec![sample; 5];
         mixed[4].requested_notional_usd = 10;
         assert!(CostFloorSummary::stable(&mixed, 3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn measurement_accumulator_includes_late_split_fills_once() -> Result<()> {
+        let fill =
+            |sequence, trade_id: &str, quantity: &str, price: &str, fee: &str| StreamEvent::Fill {
+                schema: "omega.nautilus.stream.v1".into(),
+                generation: 1,
+                sequence,
+                network: nautilus_sidecar::Network::Testnet,
+                state: serde_json::from_value(json!({
+                    "trade_id":trade_id,
+                    "instrument_id":"BTC-USD-PERP.HYPERLIQUID",
+                    "client_order_id":"O-305-LATE",
+                    "order_side":"BUY",
+                    "liquidity_side":"MAKER",
+                    "last_qty":quantity,
+                    "last_px":price,
+                    "commission":format!("{fee} USDC"),
+                }))
+                .expect("valid fill state"),
+            };
+        let before_cancel = fill(10, "TRADE-A", "0.0004", "65000", "0.001");
+        let after_cancel = fill(11, "TRADE-B", "0.0006", "65010", "0.002");
+        let preflight =
+            MeasurementFillAccumulator::after_zero_position_preflight("O-305-LATE", "0.001")?;
+        assert_eq!(preflight.engine_positions, Some(Vec::new()));
+        assert_eq!(preflight.engine_orders_are_zero, None);
+        let mut accumulator = MeasurementFillAccumulator::new("O-305-LATE", "0.001")?;
+        accumulator.ingest(&StreamEvent::PositionState {
+            schema: "omega.nautilus.stream.v1".into(),
+            generation: 1,
+            sequence: 8,
+            network: nautilus_sidecar::Network::Testnet,
+            venue: "HYPERLIQUID".into(),
+            positions: vec![json!({
+                "instrument_id":"BTC-USD-PERP.HYPERLIQUID",
+                "signed_qty":"0.0004"
+            })],
+            ts_init: 8,
+        })?;
+        accumulator.ingest(&StreamEvent::OrderState {
+            schema: "omega.nautilus.stream.v1".into(),
+            generation: 1,
+            sequence: 9,
+            network: nautilus_sidecar::Network::Testnet,
+            venue: "HYPERLIQUID".into(),
+            orders: Vec::new(),
+            ts_init: 9,
+        })?;
+        assert_eq!(
+            accumulator
+                .engine_positions
+                .as_deref()
+                .map(|positions| positions.len()),
+            Some(1)
+        );
+        assert_eq!(accumulator.engine_orders_are_zero, Some(true));
+        assert!(accumulator.engine_projection_is_fresh());
+        accumulator.ingest(&before_cancel)?;
+        accumulator.ingest(&before_cancel)?;
+        assert_eq!(accumulator.observed_quantity()?, "0.00040000");
+        accumulator.ingest(&after_cancel)?;
+        assert!(!accumulator.engine_projection_is_fresh());
+        accumulator.ingest(&StreamEvent::PositionState {
+            schema: "omega.nautilus.stream.v1".into(),
+            generation: 1,
+            sequence: 12,
+            network: nautilus_sidecar::Network::Testnet,
+            venue: "HYPERLIQUID".into(),
+            positions: vec![json!({
+                "instrument_id":"BTC-USD-PERP.HYPERLIQUID",
+                "signed_qty":"0.001"
+            })],
+            ts_init: 12,
+        })?;
+        accumulator.ingest(&StreamEvent::OrderState {
+            schema: "omega.nautilus.stream.v1".into(),
+            generation: 1,
+            sequence: 13,
+            network: nautilus_sidecar::Network::Testnet,
+            venue: "HYPERLIQUID".into(),
+            orders: Vec::new(),
+            ts_init: 13,
+        })?;
+        assert!(accumulator.engine_projection_is_fresh());
+        assert!(accumulator.is_complete());
+        assert_eq!(accumulator.observed_quantity()?, "0.00100000");
+        let aggregate = accumulator.aggregate.context("aggregate fill missing")?;
+        let StreamEvent::Fill { state, .. } = aggregate else {
+            bail!("aggregate has the wrong event type");
+        };
+        assert_eq!(state["last_px"], "65006.00000000");
+        assert_eq!(state["commission"], "0.003000 USDC");
+        Ok(())
+    }
+
+    #[test]
+    fn measurement_settlement_requires_exact_dual_position_and_no_orders() -> Result<()> {
+        let official = OfficialVenueState {
+            network: nautilus_sidecar::Network::Testnet,
+            open_orders: Vec::new(),
+            positions: vec![OfficialPosition {
+                coin: "BTC".into(),
+                size: "0.001".into(),
+            }],
+        };
+        let positions = vec![json!({
+            "instrument_id":"BTC-USD-PERP.HYPERLIQUID",
+            "signed_qty":"0.001"
+        })];
+        assert!(measurement_settlement_matches(
+            &official, &positions, true, 100_000
+        )?);
+        assert!(!measurement_settlement_matches(
+            &official, &positions, true, 40_000
+        )?);
+        assert!(!measurement_settlement_matches(
+            &official, &positions, false, 100_000
+        )?);
+        let mut resting = official;
+        resting.open_orders.push(OfficialOpenOrder {
+            coin: "BTC".into(),
+            oid: 305,
+            cloid: Some("O-305-LATE".into()),
+            side: "B".into(),
+            sz: "0.0006".into(),
+            limit_px: "65000".into(),
+        });
+        assert!(!measurement_settlement_matches(
+            &resting, &positions, true, 100_000
+        )?);
         Ok(())
     }
 
@@ -3026,52 +3392,23 @@ mod tests {
                 path == CostPath::MakerTaker,
                 false,
             )?;
-            let (entry_fill, latest_quote) = wait_for_measurement_fill(
+            let mut entry_accumulator =
+                MeasurementFillAccumulator::after_zero_position_preflight(&entry_id, quantity)?;
+            wait_for_measurement_fill(
                 &supervisor,
                 &runtime,
-                &entry_id,
-                quantity,
+                &mut entry_accumulator,
                 if path == CostPath::MakerTaker {
                     Duration::from_secs(45)
                 } else {
                     Duration::from_secs(20)
                 },
             )?;
-            let Some(entry_fill) = entry_fill else {
-                if path == CostPath::MakerTaker {
-                    let cancel = supervisor.send_command(CommandRequest {
-                        command_id: format!("cost-floor-cancel-{}", unix_ms()?),
-                        command: NautilusCommand::CancelOrder {
-                            client_order_id: entry_id,
-                        },
-                    })?;
-                    if !matches!(
-                        cancel.outcome,
-                        nautilus_sidecar::CommandOutcome::OrderCanceled { .. }
-                    ) {
-                        bail!(
-                            "unfilled maker cancel was not confirmed: {:?}",
-                            cancel.outcome
-                        );
-                    }
-                }
-                incomplete_maker_attempts.push((requested_notional_usd, attempt));
-                require_official_and_engine_zero(&supervisor, &runtime, &owner_address)?;
-                continue;
-            };
-            let observed_quantity = if let StreamEvent::Fill { state, .. } = &entry_fill {
-                find_string(&Value::Object(state.clone()), &["last_qty"])
-                    .context("entry fill has no quantity")?
-            } else {
-                bail!("entry fill has the wrong event type");
-            };
-            let complete_size =
-                decimal_to_units(&observed_quantity, 8)? == decimal_to_units(quantity, 8)?;
-            if !complete_size && path == CostPath::MakerTaker {
+            if path == CostPath::MakerTaker && !entry_accumulator.is_complete() {
                 let cancel = supervisor.send_command(CommandRequest {
                     command_id: format!("cost-floor-partial-cancel-{}", unix_ms()?),
                     command: NautilusCommand::CancelOrder {
-                        client_order_id: entry_id,
+                        client_order_id: entry_id.clone(),
                     },
                 })?;
                 if !matches!(
@@ -3083,9 +3420,27 @@ mod tests {
                         cancel.outcome
                     );
                 }
+                entry_accumulator.reset_order_settlement_observation();
                 incomplete_maker_attempts.push((requested_notional_usd, attempt));
             }
-            let exit_quote = if let Some(quote) = latest_quote {
+            settle_measurement_entry(
+                &supervisor,
+                &runtime,
+                &owner_address,
+                &mut entry_accumulator,
+                Duration::from_secs(30),
+            )?;
+            if entry_accumulator.quantity_units == 0 {
+                continue;
+            }
+            let complete_size = entry_accumulator.is_complete()
+                && entry_accumulator.quantity_units == entry_accumulator.target_quantity_units;
+            let observed_quantity = entry_accumulator.observed_quantity()?;
+            let entry_fill = entry_accumulator
+                .aggregate
+                .clone()
+                .context("settled entry exposure has no matching fill evidence")?;
+            let exit_quote = if let Some(quote) = entry_accumulator.latest_quote.clone() {
                 quote
             } else {
                 next_testnet_quote(&supervisor, Duration::from_secs(60))?
@@ -3103,14 +3458,22 @@ mod tests {
                 false,
                 true,
             )?;
-            let (exit_fill, _) = wait_for_measurement_fill(
+            let mut exit_accumulator =
+                MeasurementFillAccumulator::new(&exit_id, &observed_quantity)?;
+            wait_for_measurement_fill(
                 &supervisor,
                 &runtime,
-                &exit_id,
-                &observed_quantity,
+                &mut exit_accumulator,
                 Duration::from_secs(20),
             )?;
-            let exit_fill = exit_fill.context("reduce-only testnet exit fill did not arrive")?;
+            if !exit_accumulator.is_complete()
+                || exit_accumulator.quantity_units != exit_accumulator.target_quantity_units
+            {
+                bail!("reduce-only testnet exit did not fill the exact settled entry quantity");
+            }
+            let exit_fill = exit_accumulator
+                .aggregate
+                .context("reduce-only testnet exit fill did not arrive")?;
             require_official_and_engine_zero(&supervisor, &runtime, &owner_address)?;
             if complete_size {
                 let sample = CostFloorSample::from_legs(

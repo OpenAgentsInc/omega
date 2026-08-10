@@ -31579,6 +31579,9 @@ mod tests {
             "open_orders=0",
             "processed_venue_fill_ids",
             "processed_fill_ids",
+            "settle_measurement_entry",
+            "matching_observations == 2",
+            "measurement entry did not settle to the same official, Nautilus, and fill quantity",
             "append_economically_idempotent",
             "already names different economic content",
         ] {

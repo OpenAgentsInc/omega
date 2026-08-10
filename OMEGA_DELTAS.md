@@ -10783,7 +10783,12 @@ The credentialed measurement harness can represent testnet only. Every entry
 has one reduce-only exit and all fill events enter the shared ledger. Taker and
 risk-reducing orders are IOC, while each maker GTC has a unique client order ID
 and may be canceled exactly once by that ID. An ambiguous cancel ends the run
-instead of retrying. Restart reconciliation deduplicates filled venue orders.
+instead of retrying. After a confirmed maker cancel, the same per-attempt fill
+accumulator continues through settlement so fills observed across the cancel
+boundary cannot be omitted or counted twice. Before the one reduce-only exit,
+two consecutive observations must agree on the exact accumulated entry quantity,
+zero official open orders, zero Nautilus live orders, and matching official plus
+Nautilus positions. Restart reconciliation deduplicates filled venue orders.
 Before every new exposure and after every segment, the harness must obtain both
 an official Hyperliquid `openOrders` plus clearinghouse zero-exposure snapshot
 and Nautilus zero-position plus zero-live-order observations. A mismatch stops
