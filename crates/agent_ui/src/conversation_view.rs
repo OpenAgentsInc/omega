@@ -3327,6 +3327,7 @@ impl ConversationView {
                         for index in missing_range {
                             active.sync_elicitation_state_for_entry(index, window, cx);
                         }
+                        active.record_first_model_token(cx);
                         active.sync_editor_mode(cx);
                         active.sync_generating_indicator(cx);
                     });
@@ -3342,6 +3343,7 @@ impl ConversationView {
                     list_state.remeasure_items(*index..*index + 1);
                     active.update(cx, |active, cx| {
                         active.sync_elicitation_state_for_entry(*index, window, cx);
+                        active.record_first_model_token(cx);
                         active.auto_expand_streaming_thought(cx);
                         active.sync_generating_indicator(cx);
                     });

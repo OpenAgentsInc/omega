@@ -89,6 +89,8 @@ struct MessageGenerationInfo {
     total_tokens: Option<u64>,
     cost: Option<MessageCost>,
     duration: Option<Duration>,
+    time_to_first_token: Option<Duration>,
+    generation_duration: Option<Duration>,
     recorded_for_message: bool,
 }
 
@@ -108,9 +110,39 @@ impl MessageGenerationInfo {
             total_tokens: None,
             cost: None,
             duration: None,
+            time_to_first_token: None,
+            generation_duration: None,
             recorded_for_message: false,
         }
     }
+}
+
+fn tokens_per_second(output_tokens: Option<u64>, duration: Option<Duration>) -> Option<f64> {
+    // The first token is accounted for by TTFT, so decode throughput spans the
+    // intervals between the remaining tokens.
+    let token_intervals = output_tokens?.checked_sub(1)?;
+    let seconds = duration?.as_secs_f64();
+    if token_intervals == 0 || seconds <= 0.0 {
+        return None;
+    }
+    Some(token_intervals as f64 / seconds)
+}
+
+fn performance_duration_label(duration: Option<Duration>) -> SharedString {
+    let Some(duration) = duration else {
+        return "Unavailable".into();
+    };
+    if duration < Duration::from_secs(1) {
+        let milliseconds = duration.as_secs_f64() * 1_000.0;
+        if milliseconds < 1.0 {
+            return "<1 ms".into();
+        }
+        return format!("{milliseconds:.0} ms").into();
+    }
+    if duration < Duration::from_secs(60) {
+        return format!("{:.2} s", duration.as_secs_f64()).into();
+    }
+    duration_alt_display(duration).into()
 }
 
 fn message_token_usage(
@@ -196,6 +228,12 @@ impl MessageInfoPopover {
         )
         .into()
     }
+
+    fn tokens_per_second_label(info: &MessageGenerationInfo) -> SharedString {
+        tokens_per_second(info.output_tokens, info.generation_duration)
+            .map(|tokens_per_second| format!("{tokens_per_second:.1} tok/s").into())
+            .unwrap_or_else(|| "Unavailable".into())
+    }
 }
 
 impl Focusable for MessageInfoPopover {
@@ -223,6 +261,7 @@ impl Render for MessageInfoPopover {
             .duration
             .map(duration_alt_display)
             .unwrap_or_else(|| "Unavailable".to_owned());
+        let tokens_per_second = Self::tokens_per_second_label(&info);
 
         Popover::new().child(
             v_flex()
@@ -259,7 +298,16 @@ impl Render for MessageInfoPopover {
                     Self::optional_count(info.total_tokens),
                 ))
                 .child(Self::row("Cost", Self::cost_label(info.cost.as_ref())))
-                .child(Self::row("Duration", duration))
+                .child(Self::row("Tokens per second", tokens_per_second))
+                .child(Self::row(
+                    "Time to first token",
+                    performance_duration_label(info.time_to_first_token),
+                ))
+                .child(Self::row(
+                    "Generation duration",
+                    performance_duration_label(info.generation_duration),
+                ))
+                .child(Self::row("Total duration", duration))
                 .when(!info.recorded_for_message, |this| {
                     this.child(
                         Label::new("Detailed usage was not recorded for this message.")
@@ -1015,6 +1063,8 @@ pub struct TurnFields {
     pub turn_generation: usize,
     pub turn_started_at: Option<Instant>,
     pub turn_tokens: Option<u64>,
+    first_token_at: Option<Instant>,
+    turn_start_entry_count: usize,
     starting_token_usage: Option<acp_thread::TokenUsage>,
     starting_cost: Option<MessageCost>,
 }
@@ -1842,6 +1892,8 @@ impl ThreadView {
         self.turn_fields.turn_generation += 1;
         let generation = self.turn_fields.turn_generation;
         self.turn_fields.turn_started_at = Some(Instant::now());
+        self.turn_fields.first_token_at = None;
+        self.turn_fields.turn_start_entry_count = self.thread.read(cx).entries().len();
         self.turn_fields.last_turn_duration = None;
         self.turn_fields.last_turn_tokens = None;
         self.turn_fields.turn_tokens = Some(0);
@@ -1865,11 +1917,11 @@ impl ThreadView {
         if self.turn_fields.turn_generation != generation {
             return;
         }
-        self.turn_fields.last_turn_duration = self
-            .turn_fields
-            .turn_started_at
-            .take()
-            .map(|started| started.elapsed());
+        let ended_at = Instant::now();
+        let started_at = self.turn_fields.turn_started_at.take();
+        let first_token_at = self.turn_fields.first_token_at.take();
+        self.turn_fields.last_turn_duration =
+            started_at.map(|started_at| ended_at.saturating_duration_since(started_at));
         self.turn_fields.last_turn_tokens = self.turn_fields.turn_tokens.take();
         self.turn_fields._turn_timer_task = None;
 
@@ -1882,6 +1934,14 @@ impl ThreadView {
         });
         let cost = message_cost(self.turn_fields.starting_cost.as_ref(), ending_cost);
         let duration = self.turn_fields.last_turn_duration;
+        let time_to_first_token =
+            started_at
+                .zip(first_token_at)
+                .map(|(started_at, first_token_at)| {
+                    first_token_at.saturating_duration_since(started_at)
+                });
+        let generation_duration =
+            first_token_at.map(|first_token_at| ended_at.saturating_duration_since(first_token_at));
         let executor = disclosure_for_thread_identity(
             &self.agent_id,
             self.thread.read(cx).omega_executor_disclosure(cx),
@@ -1902,12 +1962,33 @@ impl ThreadView {
                     total_tokens,
                     cost,
                     duration,
+                    time_to_first_token,
+                    generation_duration,
                     recorded_for_message: true,
                 },
             );
         }
         self.turn_fields.starting_token_usage = None;
         self.turn_fields.starting_cost = None;
+    }
+
+    pub fn record_first_model_token(&mut self, cx: &App) {
+        if self.turn_fields.turn_started_at.is_none() || self.turn_fields.first_token_at.is_some() {
+            return;
+        }
+        let has_assistant_output = self
+            .thread
+            .read(cx)
+            .entries()
+            .get(self.turn_fields.turn_start_entry_count..)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, AgentThreadEntry::AssistantMessage(_)))
+            });
+        if has_assistant_output {
+            self.turn_fields.first_token_at = Some(Instant::now());
+        }
     }
 
     pub fn update_turn_tokens(&mut self, cx: &App) {
@@ -16381,6 +16462,36 @@ mod tests {
             message_token_usage(Some(&starting), Some(ending)),
             (Some(70), Some(20), Some(90))
         );
+    }
+
+    #[test]
+    fn message_info_reports_decode_throughput_after_the_first_token() {
+        let speed = tokens_per_second(Some(42), Some(Duration::from_millis(500)))
+            .expect("multiple output tokens over a nonzero duration have a decode rate");
+        assert!((speed - 82.0).abs() < f64::EPSILON);
+        assert_eq!(
+            tokens_per_second(Some(1), Some(Duration::from_secs(1))),
+            None
+        );
+        assert_eq!(tokens_per_second(Some(42), Some(Duration::ZERO)), None);
+        assert_eq!(tokens_per_second(None, Some(Duration::from_secs(1))), None);
+    }
+
+    #[test]
+    fn message_info_formats_subsecond_performance_timings() {
+        assert_eq!(
+            performance_duration_label(Some(Duration::from_micros(500))).as_ref(),
+            "<1 ms"
+        );
+        assert_eq!(
+            performance_duration_label(Some(Duration::from_millis(347))).as_ref(),
+            "347 ms"
+        );
+        assert_eq!(
+            performance_duration_label(Some(Duration::from_millis(1250))).as_ref(),
+            "1.25 s"
+        );
+        assert_eq!(performance_duration_label(None).as_ref(), "Unavailable");
     }
 
     #[test]
