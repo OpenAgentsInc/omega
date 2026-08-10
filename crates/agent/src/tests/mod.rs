@@ -1998,6 +1998,82 @@ async fn local_only_thread_omits_tools(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn text_only_chat_uses_a_compact_prompt_and_bypasses_agent_prompt_cache(
+    cx: &mut TestAppContext,
+) {
+    const USER_MESSAGE: &str = "compact history sentinel";
+    const PROMPT_BYTE_CEILING: usize = 512;
+
+    let ThreadTest {
+        model,
+        thread,
+        project_context,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    project_context.update(cx, |project_context, _cx| {
+        project_context.shell = "agent-context-sentinel".into();
+    });
+    assert!(cx.update(|cx| thread.read(cx).text_only_chat_identity().is_none()));
+    let agentic_request = thread
+        .update(cx, |thread, cx| {
+            thread.build_completion_request(CompletionIntent::UserPrompt, cx)
+        })
+        .expect("the agentic request should build");
+    let MessageContent::Text(agentic_prompt) = &agentic_request.messages[0].content[0] else {
+        panic!("the agentic system prompt should be text");
+    };
+    assert!(agentic_prompt.contains("agent-context-sentinel"));
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.add_tool(EchoTool);
+            thread.set_local_only(true, cx);
+            thread.set_text_only_chat_identity(Some("Muse Glimmer (Local)".into()), cx);
+            thread.send(ClientUserMessageId::new(), [USER_MESSAGE], cx)
+        })
+        .expect("the compact chat turn should start");
+    cx.run_until_parked();
+
+    let completion = fake_model
+        .pending_completions()
+        .pop()
+        .expect("the local model should receive one completion");
+    assert!(completion.tools.is_empty());
+    let MessageContent::Text(compact_prompt) = &completion.messages[0].content[0] else {
+        panic!("the compact system prompt should be text");
+    };
+    assert!(
+        compact_prompt.len() <= PROMPT_BYTE_CEILING,
+        "compact prompt was {} bytes",
+        compact_prompt.len()
+    );
+    assert!(compact_prompt.contains("Muse Glimmer (Local)"));
+    for excluded in [
+        "agent-context-sentinel",
+        "Omega coding agent",
+        "## Tool Use",
+        "## Skills",
+        "## Instruction Files",
+        "AGENTS.md",
+        "Installed executor catalog",
+    ] {
+        assert!(
+            !compact_prompt.contains(excluded),
+            "compact prompt unexpectedly contained {excluded:?}: {compact_prompt}"
+        );
+    }
+    assert!(completion.messages.iter().any(|message| {
+        message.role == Role::User
+            && message.content.iter().any(
+                |content| matches!(content, MessageContent::Text(text) if text.contains(USER_MESSAGE)),
+            )
+    }));
+    fake_model.end_completion_stream(&completion);
+}
+
+#[gpui::test]
 async fn model_without_tool_support_omits_tools(cx: &mut TestAppContext) {
     let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
     let fake_model = model.as_fake();

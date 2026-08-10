@@ -175,6 +175,11 @@ const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const MUSE_GLIMMER_PROVIDER_ID: &str = "muse-glimmer";
 const MUSE_GLIMMER_MODEL_ID: &str = "muse-glimmer";
 const MUSE_GLIMMER_MODEL_OVERRIDE: &str = "muse-glimmer/muse-glimmer";
+
+fn text_only_chat_identity_for_agent(agent: &Agent) -> Option<&'static str> {
+    matches!(agent, Agent::MuseGlimmerLocal).then_some("Muse Glimmer (Local)")
+}
+
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const OMEGA_SIDEBAR_WIDTH: f32 = 256.;
 const OMEGA_SIDEBAR_RESIZE_DURATION: Duration = Duration::from_millis(200);
@@ -11967,7 +11972,8 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) -> AgentThread {
         let is_new_thread = resume_thread_id.is_none() && resume_session_id.is_none();
-        let is_muse_glimmer = matches!(agent, Agent::MuseGlimmerLocal);
+        let text_only_chat_identity = text_only_chat_identity_for_agent(&agent);
+        let is_muse_glimmer = text_only_chat_identity.is_some();
         let model_override = is_muse_glimmer
             .then(|| MUSE_GLIMMER_MODEL_OVERRIDE.to_string())
             .or(model_override);
@@ -12058,9 +12064,10 @@ impl AgentPanel {
                     if let Some(model) = model_override.as_deref() {
                         apply_native_model_override(&native_thread, model, cx);
                     }
-                    if is_muse_glimmer {
+                    if let Some(identity) = text_only_chat_identity {
                         native_thread.update(cx, |thread, cx| {
                             thread.set_local_only(true, cx);
+                            thread.set_text_only_chat_identity(Some(identity.into()), cx);
                         });
                     }
                     applied.set(true);
@@ -29298,6 +29305,13 @@ mod tests {
                 ))
             );
             assert!(native_thread.read(cx).is_local_only());
+            assert_eq!(
+                native_thread
+                    .read(cx)
+                    .text_only_chat_identity()
+                    .map(ToString::to_string),
+                Some("Muse Glimmer (Local)".to_string())
+            );
             let model = native_thread
                 .read(cx)
                 .model()
@@ -29363,6 +29377,14 @@ mod tests {
                 "restoration must reapply the no-cloud policy"
             );
             assert_eq!(
+                native_thread
+                    .read(cx)
+                    .text_only_chat_identity()
+                    .map(ToString::to_string),
+                Some("Muse Glimmer (Local)".to_string()),
+                "restoration must reapply the compact chat prompt"
+            );
+            assert_eq!(
                 native_thread.read(cx).routed_model_pair(),
                 Some((
                     MUSE_GLIMMER_PROVIDER_ID.to_string(),
@@ -29381,6 +29403,10 @@ mod tests {
                 .active_conversation_view()
                 .expect("Omega selection should reveal its conversation");
             assert_eq!(active.read(cx).agent_key(), &Agent::NativeAgent);
+            assert!(
+                text_only_chat_identity_for_agent(active.read(cx).agent_key()).is_none(),
+                "Omega Agent must keep its existing agentic system prompt"
+            );
             let rows = panel.composer_executor_rows(cx);
             assert!(
                 rows.iter()

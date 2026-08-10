@@ -1474,6 +1474,7 @@ pub struct Thread {
     model: ThreadModel,
     summarization_model: Option<Arc<dyn LanguageModel>>,
     local_only: bool,
+    text_only_chat_identity: Option<SharedString>,
     thinking_enabled: bool,
     thinking_effort: Option<String>,
     speed: Option<Speed>,
@@ -1518,6 +1519,13 @@ pub struct Thread {
     /// keeps naming the configured model while another one answers, which is
     /// the disagreement `OMEGA-DELTA-0131` forbids.
     turn_fallback_model: Option<Arc<dyn LanguageModel>>,
+}
+
+fn text_only_chat_system_prompt(identity: &str) -> SharedString {
+    format!(
+        "You are {identity}, a local, text-only assistant in Omega. Answer the user's messages directly using only the conversation. You have no tools and cannot inspect project files, execute commands, access the network, or take actions. Do not claim to have done so. If a request requires an unavailable action, explain the limitation and provide useful text guidance."
+    )
+    .into()
 }
 
 impl Thread {
@@ -1641,6 +1649,7 @@ impl Thread {
             model,
             summarization_model: None,
             local_only: false,
+            text_only_chat_identity: None,
             thinking_enabled: enable_thinking,
             speed,
             thinking_effort,
@@ -1673,6 +1682,7 @@ impl Thread {
         self.thinking_effort = parent.thinking_effort.clone();
         self.summarization_model = parent.summarization_model.clone();
         self.local_only = parent.local_only;
+        self.text_only_chat_identity = parent.text_only_chat_identity.clone();
         self.profile_id = parent.profile_id.clone();
         self.profile_downgraded_for_restricted_workspace =
             parent.profile_downgraded_for_restricted_workspace;
@@ -2050,6 +2060,7 @@ impl Thread {
             model,
             summarization_model: None,
             local_only: false,
+            text_only_chat_identity: None,
             thinking_enabled: db_thread.thinking_enabled,
             thinking_effort: db_thread.thinking_effort,
             speed: db_thread.speed,
@@ -2419,6 +2430,26 @@ impl Thread {
         self.local_only = local_only;
         if local_only {
             self.summarization_model = self.model().cloned();
+        }
+        cx.notify();
+    }
+
+    pub fn text_only_chat_identity(&self) -> Option<&SharedString> {
+        self.text_only_chat_identity.as_ref()
+    }
+
+    pub fn set_text_only_chat_identity(
+        &mut self,
+        identity: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.text_only_chat_identity = identity.clone();
+        for subagent in &self.running_subagents {
+            subagent
+                .update(cx, |thread, cx| {
+                    thread.set_text_only_chat_identity(identity.clone(), cx)
+                })
+                .log_err();
         }
         cx.notify();
     }
@@ -5224,6 +5255,10 @@ impl Thread {
         let end_ix = end_ix.min(self.messages.len());
         log::trace!("Building request messages from {} thread messages", end_ix);
 
+        let text_only_system_prompt = self
+            .text_only_chat_identity
+            .as_deref()
+            .map(text_only_chat_system_prompt);
         let user_agents_md = UserAgentsMd::global(cx).and_then(|s| s.content().cloned());
         let active_sequence = self.thread_log.borrow().active_sequence;
         let persisted_layout = self
@@ -5233,7 +5268,11 @@ impl Thread {
             .ok()
             .flatten()
             .filter(|layout| layout.tool_order == available_tools);
-        let system_prompt = if let Some(layout) = persisted_layout {
+        // A restored text-only thread may carry an agentic layout recorded
+        // before its owner reapplies this runtime policy.
+        let system_prompt = if let Some(system_prompt) = text_only_system_prompt {
+            system_prompt
+        } else if let Some(layout) = persisted_layout {
             layout.system_prompt
         } else {
             let system_prompt = SystemPromptTemplate {
