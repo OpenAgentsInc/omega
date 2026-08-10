@@ -241,6 +241,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0268",
     "OMEGA-DELTA-0269",
     "OMEGA-DELTA-0270",
+    "OMEGA-DELTA-0271",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -29069,7 +29070,7 @@ mod tests {
 
         let omega_manifest = without_comments(&read_repository_file("crates/omega/Cargo.toml"));
         for required in [
-            "default = [\"lnmarkets\"]",
+            "default = [\"lnmarkets\", \"nautilus_governance\"]",
             "lnmarkets = [\"dep:lnmarkets\"]",
             "lnmarkets = { workspace = true, optional = true }",
         ] {
@@ -31076,6 +31077,44 @@ mod tests {
         assert!(
             !bridge.contains("MCP") && !bridge.contains("mainnet"),
             "OMEGA-DELTA-0270: hot command bridge gained MCP or mainnet"
+        );
+    }
+
+    #[test]
+    fn nautilus_governance_is_confirmed_mandated_reconciled_and_off_hot_loop() {
+        let governance = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ));
+        for required in [
+            "hosts: &[]",
+            "TradingNetwork::Testnet",
+            "authorize_always_prompt",
+            "require_prediction",
+            "require_effectful",
+            "mandate.authorize",
+            "send_once",
+            "do not retry",
+            "LedgerEntryKind::Fill",
+            "LedgerEntryKind::BalanceAdjustment",
+            "reconcile_asset",
+            "pending_wakeup",
+            "ReviewAccountingStore",
+        ] {
+            assert!(
+                governance.contains(required),
+                "OMEGA-DELTA-0271: Nautilus governance lost `{required}`"
+            );
+        }
+        let mandate = without_comments(&read_repository_file(
+            "crates/trading_mandate/src/trading_mandate.rs",
+        ));
+        assert!(
+            mandate.contains("Testnet") && mandate.contains("\"testnet\""),
+            "OMEGA-DELTA-0271: the mandate cannot represent testnet"
+        );
+        assert!(
+            !governance.contains("submit_order(") && !governance.contains("on_quote_tick"),
+            "OMEGA-DELTA-0271: governance entered the venue hot loop"
         );
     }
 }

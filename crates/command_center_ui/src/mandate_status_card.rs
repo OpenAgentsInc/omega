@@ -184,6 +184,7 @@ impl RenderOnce for MandateStatusCard {
         };
         let network = match self.network {
             TradingNetwork::Signet => "signet",
+            TradingNetwork::Testnet => "testnet",
             TradingNetwork::Mainnet => "mainnet",
         };
 

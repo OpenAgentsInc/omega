@@ -756,6 +756,7 @@ impl Render for LnMarketsSettingsPage {
                                     .map(|(index, network)| {
                                         let label = match network {
                                             TradingNetwork::Signet => "Signet",
+                                            TradingNetwork::Testnet => "Testnet",
                                             TradingNetwork::Mainnet => "Mainnet",
                                         };
                                         Button::new(("trading-mandate-network", index), label)
@@ -1001,6 +1002,7 @@ fn default_expiry_text() -> String {
 fn mandate_approval_detail(mandate: &TradingMandate) -> String {
     let network = match mandate.network {
         TradingNetwork::Signet => "signet",
+        TradingNetwork::Testnet => "testnet",
         TradingNetwork::Mainnet => "mainnet",
     };
     let cadence = match &mandate.review_cadence {

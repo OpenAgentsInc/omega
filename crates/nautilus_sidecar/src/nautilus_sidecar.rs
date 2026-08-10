@@ -27,6 +27,7 @@ const MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const TRADE_BUFFER_CAPACITY: usize = 2_048;
 const TRADES_PER_FRAME: usize = 256;
+const STATE_SNAPSHOT_CAPACITY: usize = 2_048;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -527,6 +528,7 @@ pub struct NautilusStreamSource {
     trade_count: u64,
     state_event_count: u64,
     frame_count: u64,
+    state: VecDeque<StreamEvent>,
 }
 
 impl NautilusStreamSource {
@@ -553,6 +555,13 @@ impl NautilusStreamSource {
 
     pub fn counts(&self) -> (u64, u64, u64) {
         (self.trade_count, self.state_event_count, self.frame_count)
+    }
+
+    /// Lossless venue/account state retained for governance consumers. The
+    /// sidecar remains the sole stdout reader; governance observes this typed
+    /// projection and never competes with the hot stream loop.
+    pub fn state_snapshot(&self) -> Vec<StreamEvent> {
+        self.state.iter().cloned().collect()
     }
 
     fn apply_frame(&mut self, frame: StreamFrame, cx: &mut Context<Self>) {
@@ -588,6 +597,12 @@ impl NautilusStreamSource {
         self.state_event_count = self
             .state_event_count
             .saturating_add(frame.state.len() as u64);
+        for event in frame.state {
+            if self.state.len() == STATE_SNAPSHOT_CAPACITY {
+                self.state.pop_front();
+            }
+            self.state.push_back(event);
+        }
         self.frame_count = self.frame_count.saturating_add(1);
         cx.notify();
     }
@@ -597,7 +612,8 @@ struct GlobalNautilusStreamSource(Entity<NautilusStreamSource>);
 
 impl Global for GlobalNautilusStreamSource {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
     OrderAccepted {
         client_order_id: String,
@@ -648,7 +664,7 @@ pub enum UnknownReason {
     MalformedOutcome,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CommandReceipt {
     pub command_id: String,
     pub command_type: CommandType,

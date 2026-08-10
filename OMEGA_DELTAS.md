@@ -10592,3 +10592,34 @@ unrepresentable or refuse it before execution.
 - **Enforced by:** `nautilus_sidecar` unit and Hyperliquid testnet integration
   tests and `nautilus_commands_are_typed_local_and_single_attempt` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0271 — Nautilus effects remain mandate-gated governance
+
+Omega exposes Hyperliquid testnet account, position, exposure, strategy,
+discrete-order, and emergency risk controls as governance tools above the
+Nautilus boundary. The plugin declares no network hosts: it reads the typed
+sidecar state projection and sends each approved mutation once through the
+local command channel. Discrete placement and cancellation always require a
+fresh human confirmation. Start, parameter, and risk-increasing placement
+also require a stored prediction linked to the exact decision; stop, cancel,
+reduce, and flatten retain their emergency prediction exemption.
+
+Every effect passes a current venue-capability probe and the testnet trading
+mandate before the command write. Unknown account or margin modes, stale
+capabilities, missing mandates, and reconciliation differences fail closed.
+Transport failure after a single send is reported as unknown and is never
+retried blindly. Scheduled governance reviews must record a forecast even
+when the result is no change, and their measured tokens, tools, and wall time
+enter review accounting.
+
+The stream's bounded typed state projection remains outside the hot loop.
+Fills append balanced base and quote postings to the multi-asset ledger;
+command receipts append their mandate revision and prediction reference.
+The first observed account balance establishes an explicit balanced opening
+projection, and later engine balances reconcile against it. A gap halts new
+risk and emits an event wakeup while emergency risk reduction remains
+available.
+
+- **Enforced by:** `nautilus_governance`, `nautilus_sidecar`,
+  `trading_mandate`, and `omega_deltas` tests, including
+  `nautilus_governance_is_confirmed_mandated_reconciled_and_off_hot_loop`.

@@ -16,8 +16,9 @@ default-run = "omega"
 workspace = true
 
 [features]
-default = ["lnmarkets"]
+default = ["lnmarkets", "nautilus_governance"]
 lnmarkets = ["dep:lnmarkets"]
+nautilus_governance = ["dep:nautilus_governance"]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features omega/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
@@ -149,6 +150,7 @@ lsp_locations.workspace = true
 markdown.workspace = true
 market_ui.workspace = true
 nautilus_sidecar.workspace = true
+nautilus_governance = { workspace = true, optional = true }
 menu.workspace = true
 migrator.workspace = true
 mimalloc = { version = "0.1", optional = true }

@@ -642,6 +642,7 @@ fn validate_digest(label: &str, value: &str) -> Result<()> {
 fn network_name(network: TradingNetwork) -> &'static str {
     match network {
         TradingNetwork::Signet => "signet",
+        TradingNetwork::Testnet => "testnet",
         TradingNetwork::Mainnet => "mainnet",
     }
 }

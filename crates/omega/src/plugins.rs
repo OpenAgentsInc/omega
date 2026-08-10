@@ -11,6 +11,10 @@ pub fn builtin_plugins() -> Vec<Box<dyn OmegaPlugin>> {
     let mut plugins: Vec<Box<dyn OmegaPlugin>> = Vec::new();
     #[cfg(feature = "lnmarkets")]
     plugins.push(Box::new(lnmarkets::LnMarketsPlugin::new()));
+    #[cfg(feature = "nautilus_governance")]
+    plugins.push(Box::new(
+        nautilus_governance::NautilusGovernancePlugin::new(),
+    ));
     plugins
 }
 

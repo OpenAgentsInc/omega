@@ -10441,6 +10441,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "nautilus_governance"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "agent-client-protocol",
+ "anyhow",
+ "gpui",
+ "language_model",
+ "log",
+ "nautilus_sidecar",
+ "parking_lot",
+ "plugin_api",
+ "prediction_events",
+ "review_accounting",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "trading_ledger",
+ "trading_mandate",
+ "ui",
+]
+
+[[package]]
 name = "nautilus_sidecar"
 version = "0.1.0"
 dependencies = [
@@ -11417,6 +11441,7 @@ dependencies = [
  "menu",
  "migrator",
  "mimalloc",
+ "nautilus_governance",
  "nautilus_sidecar",
  "node_runtime",
  "notifications",

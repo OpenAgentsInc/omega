@@ -27,6 +27,7 @@ pub const MANDATE_SCHEMA_VERSION: i64 = 2;
 #[serde(rename_all = "snake_case")]
 pub enum TradingNetwork {
     Signet,
+    Testnet,
     Mainnet,
 }
 
@@ -34,6 +35,7 @@ impl TradingNetwork {
     fn label(self) -> &'static str {
         match self {
             Self::Signet => "signet",
+            Self::Testnet => "testnet",
             Self::Mainnet => "mainnet",
         }
     }
@@ -41,6 +43,7 @@ impl TradingNetwork {
     fn parse(label: &str) -> Result<Self> {
         match label {
             "signet" => Ok(Self::Signet),
+            "testnet" => Ok(Self::Testnet),
             "mainnet" => Ok(Self::Mainnet),
             other => bail!("unknown trading network {other:?}"),
         }
@@ -1144,6 +1147,23 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<TradingMandate>(encoded).expect("round trip"),
             usdc_mandate()
+        );
+    }
+
+    #[test]
+    fn testnet_is_a_durable_mandate_scope() {
+        let mut mandate = usdc_mandate();
+        mandate.network = TradingNetwork::Testnet;
+        let store = MandateStore::in_memory().expect("store");
+        let snapshot = approve(&store, mandate.clone(), 1);
+        assert_eq!(
+            snapshot.mandate_for("hyperliquid", TradingNetwork::Testnet),
+            Some(&mandate)
+        );
+        assert!(
+            snapshot
+                .mandate_for("hyperliquid", TradingNetwork::Mainnet)
+                .is_none()
         );
     }
 
