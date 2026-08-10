@@ -837,6 +837,94 @@ impl LedgerStore {
         Ok(ReconciliationOutcome::Mismatch { alert })
     }
 
+    /// Resolves the latest verified reconciliation alert by appending a
+    /// balanced correction. The historical alert remains intact, and the
+    /// correction is refused if either the ledger projection or the observed
+    /// venue balance changed after the alert was recorded.
+    pub fn resolve_reconciliation_gap(
+        &self,
+        event_id: impl Into<String>,
+        occurred_at_ms: i64,
+        strategy_id: impl Into<String>,
+        venue: impl Into<String>,
+        asset: AssetId,
+        observed: i64,
+    ) -> Result<LedgerEntry> {
+        let event_id = event_id.into();
+        let strategy_id = strategy_id.into();
+        let venue = venue.into();
+        validate_identifier("event ID", &event_id)?;
+        validate_identifier("strategy ID", &strategy_id)?;
+        validate_identifier("venue", &venue)?;
+        if occurred_at_ms < 0 {
+            bail!("reconciliation resolution timestamp must not be negative");
+        }
+        if observed < 0 {
+            bail!("observed venue balance must not be negative");
+        }
+
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let entries = load_entries(&transaction)?;
+        verify_entries(&entries)?;
+        let alert = entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                LedgerEntryKind::ReconciliationMismatch(mismatch)
+                    if mismatch.venue == venue && mismatch.asset == asset =>
+                {
+                    Some((entry, mismatch))
+                }
+                _ => None,
+            })
+            .context("no reconciliation alert exists for this venue and asset")?;
+        let expected = venue_balance_from_entries(&entries, &venue, &asset)?;
+        if expected != alert.1.expected {
+            bail!("reconciliation alert is stale or has already been resolved");
+        }
+        if observed != alert.1.observed {
+            bail!("observed venue balance changed after the reconciliation alert");
+        }
+        let difference = observed
+            .checked_sub(expected)
+            .context("reconciliation resolution difference overflowed")?;
+        if difference == 0 {
+            bail!("reconciliation alert no longer has a balance difference");
+        }
+
+        let mut draft = LedgerEntryDraft::new(
+            event_id,
+            occurred_at_ms,
+            strategy_id,
+            LedgerEntryKind::BalanceAdjustment,
+        );
+        draft.postings = vec![
+            LedgerPosting::new(
+                LedgerAccount::VenueBalance {
+                    venue: venue.clone(),
+                },
+                difference,
+                asset.clone(),
+            ),
+            LedgerPosting::new(LedgerAccount::BalanceAdjustment, -difference, asset.clone()),
+        ];
+        draft.metadata = serde_json::json!({
+            "schema": "omega.trading_ledger.reconciliation_resolution.v1",
+            "reason_code": "verified_external_activity",
+            "venue": venue,
+            "asset": asset,
+            "expected": expected,
+            "observed": observed,
+            "difference": difference,
+            "alert_sequence": alert.0.sequence,
+            "alert_hash": alert.0.entry_hash,
+        });
+        let resolution = append_verified(&transaction, draft, &entries)?;
+        transaction.commit()?;
+        Ok(resolution)
+    }
+
     pub fn profit_report(&self, query: &LedgerQuery) -> Result<ProfitReport> {
         let entries = self.entries(query)?;
         let mut strategies = BTreeMap::<String, ProfitAccumulator>::new();
@@ -1937,6 +2025,120 @@ mod tests {
                 .expect("entries")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn reconciliation_resolution_is_append_only_balanced_and_alert_bound() {
+        let store = LedgerStore::in_memory().expect("store");
+        store
+            .append(draft(
+                "opening",
+                1,
+                "system",
+                LedgerEntryKind::BalanceAdjustment,
+                vec![
+                    LedgerPosting::new(venue(), 100, AssetId::usdc()),
+                    LedgerPosting::new(LedgerAccount::BalanceAdjustment, -100, AssetId::usdc()),
+                ],
+            ))
+            .expect("opening balance");
+        store
+            .reconcile_asset("snapshot-1", 2, "system", "lnmarkets", AssetId::usdc(), 90)
+            .expect("reconciliation alert");
+
+        let resolution = store
+            .resolve_reconciliation_gap(
+                "resolution-1",
+                3,
+                "system",
+                "lnmarkets",
+                AssetId::usdc(),
+                90,
+            )
+            .expect("append-only resolution");
+
+        assert_eq!(resolution.sequence, 3);
+        assert_eq!(resolution.kind, LedgerEntryKind::BalanceAdjustment);
+        assert_eq!(
+            resolution
+                .postings
+                .iter()
+                .map(|posting| posting.amount)
+                .sum::<i64>(),
+            0
+        );
+        assert_eq!(
+            resolution.metadata["schema"],
+            "omega.trading_ledger.reconciliation_resolution.v1"
+        );
+        assert_eq!(resolution.metadata["alert_sequence"], 2);
+        assert_eq!(
+            store
+                .venue_asset_balance("lnmarkets", &AssetId::usdc())
+                .expect("resolved balance"),
+            90
+        );
+        assert!(matches!(
+            store
+                .reconcile_asset("snapshot-2", 4, "system", "lnmarkets", AssetId::usdc(), 90,)
+                .expect("matched after resolution"),
+            ReconciliationOutcome::Matched { .. }
+        ));
+        assert!(
+            store
+                .resolve_reconciliation_gap(
+                    "resolution-2",
+                    5,
+                    "system",
+                    "lnmarkets",
+                    AssetId::usdc(),
+                    90,
+                )
+                .expect_err("duplicate resolution")
+                .to_string()
+                .contains("stale or has already been resolved")
+        );
+    }
+
+    #[test]
+    fn reconciliation_resolution_refuses_changed_observation() {
+        let store = LedgerStore::in_memory().expect("store");
+        store
+            .append(draft(
+                "opening",
+                1,
+                "system",
+                LedgerEntryKind::BalanceAdjustment,
+                vec![
+                    LedgerPosting::new(venue(), 100, AssetId::usdc()),
+                    LedgerPosting::new(LedgerAccount::BalanceAdjustment, -100, AssetId::usdc()),
+                ],
+            ))
+            .expect("opening balance");
+        store
+            .reconcile_asset("snapshot-1", 2, "system", "lnmarkets", AssetId::usdc(), 90)
+            .expect("reconciliation alert");
+
+        assert!(
+            store
+                .resolve_reconciliation_gap(
+                    "resolution-1",
+                    3,
+                    "system",
+                    "lnmarkets",
+                    AssetId::usdc(),
+                    89,
+                )
+                .expect_err("changed venue observation")
+                .to_string()
+                .contains("observed venue balance changed")
+        );
+        assert_eq!(
+            store
+                .venue_asset_balance("lnmarkets", &AssetId::usdc())
+                .expect("unchanged balance"),
+            100
         );
     }
 

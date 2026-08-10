@@ -29257,6 +29257,9 @@ mod tests {
             "hash_entry",
             "pub fn reconcile",
             "pub fn reconcile_asset",
+            "pub fn resolve_reconciliation_gap",
+            "omega.trading_ledger.reconciliation_resolution.v1",
+            "verified_external_activity",
             "pub fn venue_asset_balance",
             "ReconciliationMismatch",
             "pub fn profit_report",
@@ -29267,6 +29270,8 @@ mod tests {
             "paths::data_dir().join(\"threads\").join(\"trading-ledger.db\")",
             "sequence_gaps_fail_closed_for_reads_and_writes",
             "reconciliation_mismatch_appends_an_alert_without_correcting_balance",
+            "reconciliation_resolution_is_append_only_balanced_and_alert_bound",
+            "reconciliation_resolution_refuses_changed_observation",
         ] {
             assert!(
                 ledger.contains(required),
@@ -29284,7 +29289,7 @@ mod tests {
     /// inventory makes a second widening door an intentional policy change,
     /// not an unnoticed helper added by a later strategy.
     #[test]
-    fn trading_mandate_has_one_ui_approved_widening_door() {
+    fn trading_mandate_widening_is_settings_only_and_proposal_bound() {
         let mandate_path = "crates/trading_mandate/src/trading_mandate.rs";
         let mandate = read_repository_file(mandate_path);
         let store_impl = mandate
@@ -29364,7 +29369,37 @@ mod tests {
         assert_eq!(
             code_of(&ui).matches(".apply_ui_approved(").count(),
             1,
-            "OMEGA-DELTA-0245: the settings UI must have exactly one UI-approved widening call"
+            "OMEGA-DELTA-0245: the LN Markets settings UI must have exactly one UI-approved widening call"
+        );
+
+        let hyperliquid_ui_path =
+            repository_path("crates/trading_workspace_ui/src/agent_wallet_ui.rs");
+        let hyperliquid_ui =
+            std::fs::read_to_string(&hyperliquid_ui_path).unwrap_or_else(|error| {
+                panic!("cannot read {}: {error}", hyperliquid_ui_path.display())
+            });
+        for required in [
+            "Renew this bounded Hyperliquid Testnet mandate for one hour?",
+            "Approve mandate",
+            "answer.await != Ok(0)",
+            "store.apply_ui_approved(proposal, approved_at_ms)",
+            "Resolve this verified Testnet reconciliation gap?",
+            "probe_official_venue_state(",
+            "official.is_zero_exposure()",
+            "current_flat_testnet_balance(cx)",
+            "store.resolve_reconciliation_gap(",
+        ] {
+            assert!(
+                hyperliquid_ui.contains(required),
+                "OMEGA-DELTA-0245: the Hyperliquid settings approval path lost `{required}`"
+            );
+        }
+        assert_eq!(
+            code_of(&hyperliquid_ui)
+                .matches(".apply_ui_approved(")
+                .count(),
+            1,
+            "OMEGA-DELTA-0245: the Hyperliquid settings UI must have exactly one UI-approved widening call"
         );
 
         let mut forbidden_callers = Vec::new();
@@ -29375,6 +29410,7 @@ mod tests {
                 .to_string_lossy();
             if relative == mandate_path
                 || relative == "crates/lnmarkets_ui/src/lnmarkets_ui.rs"
+                || relative == "crates/trading_workspace_ui/src/agent_wallet_ui.rs"
                 || relative == "crates/omega_deltas/src/omega_deltas.rs"
             {
                 return;

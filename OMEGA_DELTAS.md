@@ -9977,7 +9977,11 @@ stop on a gap or altered record.
 
 Venue balance snapshots check the ledger without changing it, per (venue,
 asset). A mismatch appends an attributed reconciliation alert with no
-postings, so observed venue state cannot silently rewrite profit. The read API
+postings, so observed venue state cannot silently rewrite profit. A person may
+resolve that alert only through an explicit settings prompt after both the
+official venue API and the engine report a flat, order-free account. Resolution
+appends a balanced, hash-linked adjustment bound to the latest alert and its
+unchanged observed balance; it never updates, deletes, or resets history. The read API
 reports profit, fees, funding, and worst drawdown per strategy and period,
 with per-asset totals beside the sats totals. The default database lives
 beside the thread store and survives application restarts.
@@ -9999,10 +10003,13 @@ Mandate history is append-only and durable beside the thread store. Creating or
 widening authority requires an explicit settings prompt whose acceptance is
 bound to the displayed candidate and base revision. Restriction and revocation
 take effect immediately. The store exposes no unclassified mutation method,
-and production code has one call site for the widening door: the settings UI.
+and production widening calls exist only in explicit settings UI surfaces. The
+Hyperliquid Testnet settings surface can renew an existing bounded mandate for
+one hour without changing any other limit; it cannot create mainnet authority.
 
 - **Enforced by:** `trading_mandate` unit tests and
-  `trading_mandate_has_one_ui_approved_widening_door` in `omega_deltas`.
+  `trading_mandate_widening_is_settings_only_and_proposal_bound` in
+  `omega_deltas`.
 
 ### OMEGA-DELTA-0246 — Agent turns can start from bounded wakeups
 

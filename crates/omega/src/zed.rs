@@ -3083,6 +3083,12 @@ mod tests {
                 .is_empty(),
             "the registered Hyperliquid page must paint in embedded Settings"
         );
+        assert!(
+            !cx.debug_render_snapshot()
+                .occurrences("nautilus.testnet_policy_recovery")
+                .is_empty(),
+            "the production Hyperliquid page must expose append-only recovery and mandate renewal"
+        );
     }
 
     #[gpui::test]
