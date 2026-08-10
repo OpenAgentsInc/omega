@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-use gpui::{AnyView, App, Global, Window};
+use gpui::{AnyElement, AnyView, App, Global, Window};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -611,6 +611,19 @@ pub struct CardSchemaRegistration {
     pub schema: &'static str,
 }
 
+/// A native renderer for one exact, versioned tool-result schema.
+pub struct CardRendererRegistration {
+    pub plugin_id: &'static str,
+    pub schema: &'static str,
+    pub render: Rc<dyn Fn(&serde_json::Value, &App) -> Option<AnyElement>>,
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum CardRendererRegistrationError {
+    #[error("card renderer schema `{schema}` is already registered")]
+    DuplicateSchema { schema: &'static str },
+}
+
 /// Everything a plugin registers at startup, and everything core crates read
 /// back. Registration surfaces whose types belong to a consuming platform
 /// crate (agent tools, workbench panels) go through the typed extension slots
@@ -621,6 +634,7 @@ pub struct PluginRegistry {
     settings_pages: Vec<Rc<SettingsPageRegistration>>,
     background_services: Vec<BackgroundServiceRegistration>,
     card_schemas: Vec<CardSchemaRegistration>,
+    card_renderers: Vec<Rc<CardRendererRegistration>>,
     review_drivers: Vec<Rc<dyn SessionReviewDriver>>,
     venue_capabilities: VenueCapabilityStore,
     extensions: HashMap<TypeId, Vec<Rc<dyn Any>>>,
@@ -634,6 +648,7 @@ impl PluginRegistry {
             settings_pages: Vec::new(),
             background_services: Vec::new(),
             card_schemas: Vec::new(),
+            card_renderers: Vec::new(),
             review_drivers: Vec::new(),
             venue_capabilities: VenueCapabilityStore::default(),
             extensions: HashMap::new(),
@@ -681,6 +696,30 @@ impl PluginRegistry {
 
     pub fn card_schemas(&self) -> &[CardSchemaRegistration] {
         &self.card_schemas
+    }
+
+    pub fn add_card_renderer(
+        &mut self,
+        renderer: CardRendererRegistration,
+    ) -> Result<(), CardRendererRegistrationError> {
+        if self
+            .card_renderers
+            .iter()
+            .any(|registered| registered.schema == renderer.schema)
+        {
+            return Err(CardRendererRegistrationError::DuplicateSchema {
+                schema: renderer.schema,
+            });
+        }
+        self.card_renderers.push(Rc::new(renderer));
+        Ok(())
+    }
+
+    pub fn card_renderer(&self, schema: &str) -> Option<Rc<CardRendererRegistration>> {
+        self.card_renderers
+            .iter()
+            .find(|renderer| renderer.schema == schema)
+            .cloned()
     }
 
     pub fn add_review_driver(&mut self, driver: Rc<dyn SessionReviewDriver>) {
@@ -803,6 +842,32 @@ mod tests {
         assert_eq!(panels.len(), 1);
         assert_eq!(panels[0].0, "panel");
         assert!(registry.extensions::<u32>().is_empty());
+    }
+
+    #[test]
+    fn card_renderer_schemas_are_exact_and_unique() {
+        let mut registry = PluginRegistry::new(PathBuf::from("/data"));
+        registry
+            .add_card_renderer(CardRendererRegistration {
+                plugin_id: "example",
+                schema: "omega.example.account.v1",
+                render: Rc::new(|_, _| None),
+            })
+            .expect("register renderer");
+        assert!(registry.card_renderer("omega.example.account.v1").is_some());
+        assert!(registry.card_renderer("omega.example.account.v2").is_none());
+        assert_eq!(
+            registry
+                .add_card_renderer(CardRendererRegistration {
+                    plugin_id: "other",
+                    schema: "omega.example.account.v1",
+                    render: Rc::new(|_, _| None),
+                })
+                .expect_err("duplicate schema must be refused"),
+            CardRendererRegistrationError::DuplicateSchema {
+                schema: "omega.example.account.v1",
+            }
+        );
     }
 
     fn capabilities_at(

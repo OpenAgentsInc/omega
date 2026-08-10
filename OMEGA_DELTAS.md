@@ -10129,13 +10129,18 @@ Backtest, report, start, adjust, halt, and status updates use one tool call so
 the transcript updates one lifecycle card. Features, ledger profit and
 drawdown, backtest expectancy and drawdown, strategy lifecycle states, and
 mandate states each have component-library coverage and render outside generic
-collapsed tool groups.
+collapsed tool groups. That rendering now travels through the venue-neutral
+plugin registry: the LN Markets plugin owns its schema callbacks, while the
+conversation UI only extracts a versioned payload and resolves an exact schema.
+Malformed, unknown, and duplicate registrations fail closed or fall back to
+generic tool chrome without adding a plugin identifier to the dispatcher.
 
 The four tools are part of the closed Basic profile alongside the account,
 market-data, and direct-swap tools. Raw LN Markets tools remain available for
 inspection and one-off actions.
 
-- **Enforced by:** `strategy_engine`, `agent`, and `agent_ui` unit tests and
+- **Enforced by:** `strategy_engine`, `agent`, `plugin_api`, `lnmarkets_ui`, and
+  `agent_ui` unit tests and
   `lnmarkets_agent_tools_are_versioned_bounded_and_visible` in `omega_deltas`.
 
 ### OMEGA-DELTA-0252 — Portfolio reviews stay local, bounded, and mandate-governed

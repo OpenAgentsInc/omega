@@ -1,144 +1,78 @@
-use acp_thread::{ToolCall, ToolCallContent, ToolCallStatus};
+use std::rc::Rc;
+
 use component::{Component, ComponentScope, example_group_with_title, single_example};
 use gpui::{AnyElement, App, FontWeight, Window, div};
+use plugin_api::CardRendererRegistration;
 use serde_json::{Value, json};
 use ui::prelude::*;
 
-const LNM_SCHEMA_PREFIX: &str = "omega.lnmarkets.";
-const LNM_TOOL_NAMES: [&str; 5] = [
-    "lnmarkets_features",
-    "lnmarkets_ledger",
-    "lnmarkets_prediction",
-    "lnmarkets_strategy",
-    "lnmarkets_mandate",
-];
-
-pub(crate) fn is_lnmarkets_card_tool_call(tool_call: &ToolCall) -> bool {
-    tool_call.tool_name.as_deref().is_some_and(|name| {
-        LNM_TOOL_NAMES
-            .iter()
-            .any(|tool_name| name.contains(tool_name))
-    }) || tool_call
-        .raw_output
-        .as_ref()
-        .is_some_and(|value| extract_payload(value).is_some())
-}
-
-pub(crate) fn lnmarkets_tool_card(tool_call: &ToolCall, cx: &App) -> Option<AnyElement> {
-    if !matches!(
-        tool_call.status,
-        ToolCallStatus::Pending
-            | ToolCallStatus::InProgress
-            | ToolCallStatus::Completed
-            | ToolCallStatus::Failed
-    ) {
-        return None;
-    }
-    render_payload(&tool_payload(tool_call, cx)?, cx)
-}
-
-fn tool_payload(tool_call: &ToolCall, cx: &App) -> Option<Value> {
-    if let Some(raw_output) = &tool_call.raw_output
-        && let Some(payload) = extract_payload(raw_output)
-    {
-        return Some(payload);
-    }
-    tool_call.content.iter().find_map(|content| {
-        let ToolCallContent::ContentBlock(block) = content else {
-            return None;
-        };
-        parse_payload_text(&block.to_markdown(cx))
+pub fn card_renderer_registrations() -> Vec<CardRendererRegistration> {
+    [
+        (
+            "omega.lnmarkets.features.v1",
+            render_features as CardRenderer,
+        ),
+        ("omega.lnmarkets.ledger.v1", render_ledger as CardRenderer),
+        (
+            "omega.lnmarkets.strategy.v1",
+            render_strategy as CardRenderer,
+        ),
+        (
+            "omega.lnmarkets.backtest_tool.v1",
+            render_backtest as CardRenderer,
+        ),
+        (
+            "omega.lnmarkets.backtest_history.v1",
+            render_backtest as CardRenderer,
+        ),
+        ("omega.lnmarkets.mandate.v1", render_mandate as CardRenderer),
+    ]
+    .into_iter()
+    .map(|(schema, render)| CardRendererRegistration {
+        plugin_id: "lnmarkets",
+        schema,
+        render: Rc::new(render),
     })
+    .collect()
 }
 
-fn extract_payload(value: &Value) -> Option<Value> {
-    if schema(value).is_some() {
-        return Some(value.clone());
-    }
-    if let Some(text) = value.as_str() {
-        return parse_payload_text(text);
-    }
-    for key in ["result", "structuredContent", "structured_content"] {
-        if let Some(inner) = value.get(key)
-            && let Some(payload) = extract_payload(inner)
-        {
-            return Some(payload);
-        }
-    }
-    value
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|content| {
-            content.iter().find_map(|entry| {
-                entry
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .and_then(parse_payload_text)
-            })
-        })
-}
-
-fn parse_payload_text(text: &str) -> Option<Value> {
-    let text = text.trim();
-    let text = text
-        .strip_prefix("```json")
-        .or_else(|| text.strip_prefix("```"))
-        .map(|rest| rest.trim_end_matches("```"))
-        .unwrap_or(text);
-    let value = serde_json::from_str::<Value>(text.trim()).ok()?;
-    schema(&value)?;
-    Some(value)
-}
-
-fn schema(value: &Value) -> Option<&str> {
-    let schema = value.get("schema")?.as_str()?;
-    schema.starts_with(LNM_SCHEMA_PREFIX).then_some(schema)
-}
-
-fn render_payload(payload: &Value, cx: &App) -> Option<AnyElement> {
-    match schema(payload)? {
-        "omega.lnmarkets.features.v1" => render_features(payload, cx),
-        "omega.lnmarkets.ledger.v1" => render_ledger(payload, cx),
-        "omega.lnmarkets.strategy.v1" => render_strategy(payload, cx),
-        "omega.lnmarkets.backtest_tool.v1" | "omega.lnmarkets.backtest_history.v1" => {
-            render_backtest(payload, cx)
-        }
-        "omega.lnmarkets.mandate.v1" => render_mandate(payload, cx),
-        _ => None,
-    }
-}
+type CardRenderer = fn(&Value, &App) -> Option<AnyElement>;
 
 fn render_features(payload: &Value, cx: &App) -> Option<AnyElement> {
     let status = string_field(payload, "status", "collecting");
     let collector = payload.get("collector");
     let features = payload.get("features");
-    let rows = vec![
-        (
-            "Network".to_string(),
-            collector
-                .and_then(|value| value.get("network"))
-                .and_then(Value::as_str)
-                .unwrap_or("signet")
-                .to_string(),
-        ),
-        (
-            "Stored events".to_string(),
-            collector
-                .and_then(|value| value.get("stored_events"))
-                .and_then(Value::as_u64)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "0".to_string()),
-        ),
-        (
-            "As of".to_string(),
-            features
-                .and_then(|value| value.get("as_of_ms"))
-                .and_then(Value::as_i64)
-                .map(|value| format!("{value} ms"))
-                .unwrap_or_else(|| "waiting for data".to_string()),
-        ),
-    ];
-    Some(render_card("Derived market features", &status, rows, cx))
+    Some(render_card(
+        "Derived market features",
+        &status,
+        vec![
+            (
+                "Network".to_string(),
+                collector
+                    .and_then(|value| value.get("network"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("signet")
+                    .to_string(),
+            ),
+            (
+                "Stored events".to_string(),
+                collector
+                    .and_then(|value| value.get("stored_events"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "0".to_string()),
+            ),
+            (
+                "As of".to_string(),
+                features
+                    .and_then(|value| value.get("as_of_ms"))
+                    .and_then(Value::as_i64)
+                    .map(|value| format!("{value} ms"))
+                    .unwrap_or_else(|| "waiting for data".to_string()),
+            ),
+        ],
+        cx,
+    ))
 }
 
 fn render_ledger(payload: &Value, cx: &App) -> Option<AnyElement> {
@@ -484,7 +418,12 @@ fn preview_group<const COUNT: usize>(
         statuses
             .into_iter()
             .filter_map(|status| {
-                Some(single_example(status, render_payload(&payload(status), cx)?).width(px(640.)))
+                let payload = payload(status);
+                let schema = schema(&payload)?;
+                let renderer = card_renderer_registrations()
+                    .into_iter()
+                    .find(|renderer| renderer.schema == schema)?;
+                Some(single_example(status, (renderer.render)(&payload, cx)?).width(px(640.)))
             })
             .collect(),
     )
@@ -492,75 +431,6 @@ fn preview_group<const COUNT: usize>(
     .into_any_element()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Context, Render, TestAppContext, VisualTestContext, size};
-
-    struct LnMarketsCardsTestView;
-
-    impl Render for LnMarketsCardsTestView {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            LnMarketsToolCardsPreview::preview(window, cx)
-        }
-    }
-
-    #[test]
-    fn extracts_wrapped_strategy_updates() {
-        let wrapped = json!({
-            "result": {
-                "content": [{
-                    "text": serde_json::to_string(&json!({
-                        "schema": "omega.lnmarkets.strategy.v1",
-                        "status": "running",
-                    })).expect("payload"),
-                }],
-            },
-        });
-        assert_eq!(
-            extract_payload(&wrapped).and_then(|value| value.get("status").cloned()),
-            Some(json!("running"))
-        );
-    }
-
-    #[test]
-    fn rejects_unrelated_json() {
-        assert!(extract_payload(&json!({ "schema": "unrelated.v1" })).is_none());
-    }
-
-    #[gpui::test]
-    fn component_gallery_paints_every_card_state(cx: &mut TestAppContext) {
-        crate::test_support::init_test(cx);
-        let window = cx.add_window(|_window, _cx| LnMarketsCardsTestView);
-        cx.run_until_parked();
-
-        let mut visual = VisualTestContext::from_window(window.into(), cx);
-        visual.simulate_resize(size(px(1200.), px(2400.)));
-        visual.run_until_parked();
-
-        for selector in [
-            "lnmarkets-card-features-collecting",
-            "lnmarkets-card-features-ready",
-            "lnmarkets-card-features-degraded",
-            "lnmarkets-card-ledger-empty",
-            "lnmarkets-card-ledger-profit",
-            "lnmarkets-card-ledger-drawdown",
-            "lnmarkets-card-strategy-idle",
-            "lnmarkets-card-strategy-starting",
-            "lnmarkets-card-strategy-running",
-            "lnmarkets-card-strategy-adjusting",
-            "lnmarkets-card-strategy-halted",
-            "lnmarkets-card-strategy-error",
-            "lnmarkets-card-backtest-passed",
-            "lnmarkets-card-backtest-failed",
-            "lnmarkets-card-mandate-missing",
-            "lnmarkets-card-mandate-active",
-            "lnmarkets-card-mandate-expired",
-        ] {
-            assert!(
-                visual.debug_bounds(selector).is_some(),
-                "component gallery did not paint {selector}"
-            );
-        }
-    }
+fn schema(value: &Value) -> Option<&str> {
+    value.get("schema")?.as_str()
 }

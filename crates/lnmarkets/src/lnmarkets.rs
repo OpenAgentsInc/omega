@@ -161,6 +161,11 @@ impl plugin_api::OmegaPlugin for LnMarketsPlugin {
                 schema,
             });
         }
+        for renderer in lnmarkets_ui::card_renderer_registrations() {
+            if let Err(error) = registry.add_card_renderer(renderer) {
+                log::error!("could not register an LN Markets card renderer: {error}");
+            }
+        }
     }
 }
 

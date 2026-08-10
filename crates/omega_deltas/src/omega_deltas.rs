@@ -29722,7 +29722,7 @@ mod tests {
         }
 
         let cards = without_comments(&read_repository_file(
-            "crates/agent_ui/src/conversation_view/lnmarkets_tool_cards.rs",
+            "crates/lnmarkets_ui/src/card_renderers.rs",
         ));
         for required in [
             "omega.lnmarkets.features.v1",
@@ -30202,7 +30202,7 @@ mod tests {
         }
 
         let cards = without_comments(&read_repository_file(
-            "crates/agent_ui/src/conversation_view/lnmarkets_tool_cards.rs",
+            "crates/lnmarkets_ui/src/card_renderers.rs",
         ));
         assert!(
             cards.contains("{ \"strategy_id\": \"threshold_swing\", \"status\": \"idle\" }"),

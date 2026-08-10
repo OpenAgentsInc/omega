@@ -7611,20 +7611,18 @@ impl ThreadView {
                         .into_any();
                 }
                 if let Some(card) =
-                    crate::conversation_view::lnmarkets_tool_cards::lnmarkets_tool_card(
-                        tool_call, cx,
-                    )
+                    crate::conversation_view::plugin_tool_cards::plugin_tool_card(tool_call, cx)
                 {
                     return v_flex()
                         .w_full()
                         .px_5()
-                        .id(("lnmarkets-tool-card", entry_ix))
+                        .id(("plugin-tool-card", entry_ix))
                         .child(card)
                         .into_any();
                 }
 
                 if omega_zero_base::is_primary_interface()
-                    && Self::omega_tool_call_is_groupable(tool_call)
+                    && Self::omega_tool_call_is_groupable(tool_call, cx)
                 {
                     let entries = self.thread.read(cx).entries();
                     let follows_groupable_tool =
@@ -7632,7 +7630,7 @@ impl ThreadView {
                             matches!(
                                 entries.get(previous_ix),
                                 Some(AgentThreadEntry::ToolCall(previous))
-                                    if Self::omega_tool_call_is_groupable(previous)
+                                    if Self::omega_tool_call_is_groupable(previous, cx)
                             )
                         });
                     if follows_groupable_tool {
@@ -9542,7 +9540,7 @@ impl ThreadView {
             })
     }
 
-    fn omega_tool_call_is_groupable(tool_call: &ToolCall) -> bool {
+    fn omega_tool_call_is_groupable(tool_call: &ToolCall, cx: &App) -> bool {
         !tool_call.is_subagent()
             && !matches!(
                 tool_call.status,
@@ -9551,7 +9549,7 @@ impl ThreadView {
             // Market results render their own inline cards; folding one into
             // a chip group would swallow the card.
             && !crate::conversation_view::market_tool_cards::is_market_tool_call(tool_call)
-            && !crate::conversation_view::lnmarkets_tool_cards::is_lnmarkets_card_tool_call(tool_call)
+            && !crate::conversation_view::plugin_tool_cards::is_plugin_card_tool_call(tool_call, cx)
     }
 
     fn omega_tool_kind_label(kind: acp::ToolKind) -> &'static str {
@@ -9696,7 +9694,7 @@ impl ThreadView {
             .skip(first_entry_ix)
             .map_while(|(entry_ix, entry)| match entry {
                 AgentThreadEntry::ToolCall(tool_call)
-                    if Self::omega_tool_call_is_groupable(tool_call) =>
+                    if Self::omega_tool_call_is_groupable(tool_call, cx) =>
                 {
                     Some((entry_ix, tool_call))
                 }

@@ -9455,6 +9455,7 @@ name = "lnmarkets_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "component",
  "credentials_provider",
  "editor",
  "gpui",
@@ -9463,6 +9464,7 @@ dependencies = [
  "log",
  "plugin_api",
  "review_accounting",
+ "serde_json",
  "settings",
  "theme",
  "theme_settings",
@@ -13247,6 +13249,7 @@ dependencies = [
  "parking_lot",
  "review_accounting",
  "serde",
+ "serde_json",
  "thiserror 2.0.17",
 ]
 

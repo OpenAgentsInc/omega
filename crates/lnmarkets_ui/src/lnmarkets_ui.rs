@@ -20,8 +20,10 @@ use trading_mandate::{
 use ui::{Divider, prelude::*};
 use util::ResultExt as _;
 
+mod card_renderers;
 mod operator_panel;
 
+pub use card_renderers::card_renderer_registrations;
 pub use operator_panel::{
     LnMarketsOperatorPanel, OperatorBacktestSnapshot, OperatorConsoleSnapshot,
     OperatorConsoleSource, OperatorReviewTurn, OperatorStrategySnapshot,

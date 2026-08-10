@@ -269,9 +269,9 @@ fn accessible_composer_input(
 }
 
 pub(crate) mod elicitation;
-pub(crate) mod lnmarkets_tool_cards;
 pub(crate) mod market_tool_cards;
 mod message_queue;
+pub(crate) mod plugin_tool_cards;
 mod thread_search_bar;
 mod thread_view;
 pub use message_queue::*;
