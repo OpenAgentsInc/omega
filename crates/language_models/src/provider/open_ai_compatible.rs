@@ -18,6 +18,7 @@ use open_ai::{
 use settings::Settings;
 use std::sync::Arc;
 use ui::IconName;
+use url::{Host, Url};
 
 use crate::provider::api_compatible::{
     ApiCompatibleProviderConfigurationView, ApiCompatibleProviderSettings,
@@ -30,6 +31,35 @@ pub use settings::OpenAiCompatibleAvailableModel as AvailableModel;
 pub use settings::OpenAiCompatibleModelCapabilities as ModelCapabilities;
 
 const API_KEY_PLACEHOLDER: &str = "000000000000000000000000000000000000000000000000000";
+const MUSE_GLIMMER_PROVIDER_ID: &str = "muse-glimmer";
+const MUSE_GLIMMER_LOCAL_BEARER_TOKEN: &str = "local";
+
+fn is_local_muse_endpoint(provider_id: &LanguageModelProviderId, api_url: &str) -> bool {
+    if provider_id.0.as_ref() != MUSE_GLIMMER_PROVIDER_ID {
+        return false;
+    }
+
+    let Ok(url) = Url::parse(api_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
+fn request_api_key(
+    provider_id: &LanguageModelProviderId,
+    api_url: &str,
+    configured_api_key: Option<Arc<str>>,
+) -> Option<Arc<str>> {
+    configured_api_key.or_else(|| {
+        is_local_muse_endpoint(provider_id, api_url)
+            .then(|| Arc::from(MUSE_GLIMMER_LOCAL_BEARER_TOKEN))
+    })
+}
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct OpenAiCompatibleSettings {
@@ -137,10 +167,17 @@ impl LanguageModelProvider for OpenAiCompatibleLanguageModelProvider {
     }
 
     fn is_authenticated(&self, cx: &App) -> bool {
-        self.state.read(cx).is_authenticated()
+        let state = self.state.read(cx);
+        state.is_authenticated() || is_local_muse_endpoint(&self.id, &state.settings.api_url)
     }
 
     fn authenticate(&self, cx: &mut App) -> Task<Result<(), AuthenticateError>> {
+        if {
+            let state = self.state.read(cx);
+            is_local_muse_endpoint(&self.id, &state.settings.api_url)
+        } {
+            return Task::ready(Ok(()));
+        }
         self.state.update(cx, |state, cx| state.authenticate(cx))
     }
 
@@ -200,6 +237,7 @@ impl OpenAiCompatibleLanguageModel {
                 state.settings.custom_headers.clone(),
             )
         });
+        let api_key = request_api_key(&self.provider_id, &api_url, api_key);
 
         let provider = self.provider_name.clone();
         let future = self.request_limiter.stream(async move {
@@ -237,6 +275,7 @@ impl OpenAiCompatibleLanguageModel {
                 state.settings.custom_headers.clone(),
             )
         });
+        let api_key = request_api_key(&self.provider_id, &api_url, api_key);
 
         let provider = self.provider_name.clone();
         let future = self.request_limiter.stream(async move {
@@ -474,6 +513,40 @@ mod tests {
     use super::*;
 
     use serde_json::json;
+
+    #[test]
+    fn local_muse_uses_an_internal_bearer_token() {
+        let provider_id = LanguageModelProviderId::new(MUSE_GLIMMER_PROVIDER_ID);
+
+        for api_url in [
+            "http://127.0.0.1:8000/v1",
+            "http://localhost:8000/v1",
+            "http://[::1]:8000/v1",
+        ] {
+            assert_eq!(
+                request_api_key(&provider_id, api_url, None).as_deref(),
+                Some(MUSE_GLIMMER_LOCAL_BEARER_TOKEN)
+            );
+        }
+    }
+
+    #[test]
+    fn internal_muse_token_is_never_used_for_a_remote_endpoint_or_other_provider() {
+        let muse_provider_id = LanguageModelProviderId::new(MUSE_GLIMMER_PROVIDER_ID);
+        let other_provider_id = LanguageModelProviderId::new("another-provider");
+
+        assert_eq!(
+            request_api_key(
+                &muse_provider_id,
+                "https://muse.example.com/v1",
+                Some(Arc::from("configured"))
+            )
+            .as_deref(),
+            Some("configured")
+        );
+        assert!(request_api_key(&muse_provider_id, "https://muse.example.com/v1", None).is_none());
+        assert!(request_api_key(&other_provider_id, "http://127.0.0.1:8000/v1", None).is_none());
+    }
 
     fn available_model(reasoning_effort: Option<open_ai::ReasoningEffort>) -> AvailableModel {
         AvailableModel {

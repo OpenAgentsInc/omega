@@ -69,6 +69,7 @@ strum.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 ui.workspace = true
 ui_input.workspace = true
+url.workspace = true
 util.workspace = true
 x_ai = { workspace = true, features = ["schemars"] }
 

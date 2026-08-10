@@ -8920,6 +8920,7 @@ dependencies = [
  "tokio",
  "ui",
  "ui_input",
+ "url",
  "util",
  "x_ai",
 ]
