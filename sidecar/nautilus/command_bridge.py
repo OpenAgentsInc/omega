@@ -21,6 +21,8 @@ from nautilus_trader.trading import ImportableStrategyConfig
 from nautilus_trader.trading import Strategy
 from nautilus_trader.trading import StrategyConfig
 
+from order_budget import rolling_budget_wait_until_ns
+
 
 COMMAND_SCHEMA = "omega.nautilus.command.v1"
 COMMAND_CONTROLLER_ID = "OMEGA-COMMAND-CONTROLLER-001"
@@ -107,12 +109,16 @@ class BoundedQuoteStrategy(Strategy):
         self.action_count = 0
         self.filled_notional_usd = Decimal("0")
         self.halted_reason: str | None = None
+        self.budget_wait_until_ns: int | None = None
 
     def apply_parameters(self, parameters: dict[str, Any]) -> None:
         self.parameters = parameters.copy()
         self._publish_state("parameters_applied")
 
     def on_start(self) -> None:
+        if self.halted_reason is not None:
+            self._publish_state("start_refused_halted")
+            return
         if self.parameters is None:
             self._halt("mandate_parameters_missing")
             return
@@ -189,11 +195,17 @@ class BoundedQuoteStrategy(Strategy):
         interval_ns = self.parameters["min_reprice_interval_ms"] * 1_000_000
         if now_ns - self.last_action_ns < interval_ns:
             return
-        while self.order_times_ns and now_ns - self.order_times_ns[0] >= 3_600_000_000_000:
-            self.order_times_ns.popleft()
-        if len(self.order_times_ns) >= self.parameters["order_budget"]:
-            self._halt("hourly_order_limit")
+        wait_until_ns = rolling_budget_wait_until_ns(
+            self.order_times_ns, now_ns, self.parameters["order_budget"]
+        )
+        if wait_until_ns is not None:
+            if self.budget_wait_until_ns != wait_until_ns:
+                self.budget_wait_until_ns = wait_until_ns
+                self._publish_state("budget_wait")
             return
+        if self.budget_wait_until_ns is not None:
+            self.budget_wait_until_ns = None
+            self._publish_state("budget_resumed")
         offset = Decimal(self.parameters["quote_offset_bps"]) / Decimal(10_000)
         price = str((self.latest_ask * (Decimal(1) + offset)).quantize(Decimal("0.1")))
         if self.active_client_order_id is None:
@@ -240,6 +252,18 @@ class BoundedQuoteStrategy(Strategy):
             self.cancel_order(self.active_client_order_id, client_id=HYPERLIQUID_CLIENT_ID)
         self._publish_state("halted")
 
+    def prepare_explicit_start(self) -> str | None:
+        if self.halted_reason is not None:
+            return "strategy_halted"
+        if self.budget_wait_until_ns is None:
+            return None
+        now_ns = self.clock.timestamp_ns()
+        if now_ns < self.budget_wait_until_ns:
+            return "order_budget_wait"
+        self.budget_wait_until_ns = None
+        self._publish_state("budget_resumed")
+        return None
+
     def _publish_state(self, phase: str) -> None:
         if stream_publisher is None:
             return
@@ -251,6 +275,7 @@ class BoundedQuoteStrategy(Strategy):
                 "phase": phase,
                 "running": self.is_running(),
                 "halted_reason": self.halted_reason,
+                "budget_wait_until_ns": self.budget_wait_until_ns,
                 "mandate_revision": parameters.get("mandate_revision", 0),
                 "quote_ticks": self.quote_ticks,
                 "trade_ticks": self.trade_ticks,
@@ -444,6 +469,10 @@ class CommandController(Controller):
         elif command_type == "cancel_order":
             execution_strategy.cancel_order_by_id(command)
         elif command_type == "start_strategy":
+            start_refusal = bounded_quote_strategy.prepare_explicit_start()
+            if start_refusal is not None:
+                emit(command, "refused", reason_code=start_refusal)
+                return
             self.start_strategy_from_id(bounded_quote_strategy.strategy_id)
             emit(command, "strategy_started", running=bounded_quote_strategy.is_running())
         elif command_type == "stop_strategy":

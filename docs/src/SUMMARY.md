@@ -257,6 +257,7 @@
   - [Omega Forensics source inspection](./development/omega-forensics-source-inspection.md)
   - [Omega Forensics run accounting](./development/omega-forensics-run-accounting.md)
   - [Omega Forensics run matrices](./development/omega-forensics-run-matrices.md)
+  - [Nautilus 72-hour Testnet soak](./development/nautilus-soak.md)
   - [Omega entropy repository runs](./development/omega-entropy-repository-runs.md)
   - [Omega Coldcard evidence views](./development/omega-coldcard-evidence-views.md)
   - [macOS](./development/macos.md)

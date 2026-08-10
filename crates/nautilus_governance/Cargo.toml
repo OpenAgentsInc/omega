@@ -29,6 +29,7 @@ review_accounting.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 trading_ledger.workspace = true
 trading_mandate.workspace = true
 trading_workspace_ui.workspace = true

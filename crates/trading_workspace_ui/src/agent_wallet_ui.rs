@@ -16,7 +16,10 @@ use nautilus_sidecar::{
     refresh_agent_wallet_approval,
 };
 use trading_ledger::{AssetId, LedgerEntryKind, LedgerQuery, LedgerStore};
-use trading_mandate::{MandateStore, TradingMandate, TradingNetwork};
+use trading_mandate::{
+    MandateProposal, MandateStore, ReviewCadence as MandateReviewCadence, TradingMandate,
+    TradingNetwork,
+};
 use ui::{Divider, MarketTokens, prelude::*};
 use util::ResultExt as _;
 
@@ -26,19 +29,43 @@ fn unix_ms() -> anyhow::Result<i64> {
 }
 
 const NAUTILUS_TESTNET_STRATEGY_ID: &str = "OMEGA-BOUNDED-QUOTE-001";
+const NAUTILUS_SOAK_MANDATE_DURATION_MS: i64 = 73 * 60 * 60 * 1_000;
+
+fn bind_current_testnet_strategy(candidate: &mut TradingMandate) {
+    candidate.allowed_strategies.clear();
+    candidate
+        .allowed_strategies
+        .insert(NAUTILUS_TESTNET_STRATEGY_ID.to_owned());
+}
 
 fn prepare_testnet_mandate_renewal(
     candidate: &mut TradingMandate,
     now_ms: i64,
 ) -> anyhow::Result<()> {
-    candidate.allowed_strategies.clear();
-    candidate
-        .allowed_strategies
-        .insert(NAUTILUS_TESTNET_STRATEGY_ID.to_owned());
+    bind_current_testnet_strategy(candidate);
     candidate.expires_at_ms = now_ms
         .checked_add(3_600_000)
         .ok_or_else(|| anyhow::anyhow!("mandate expiry overflowed"))?;
     Ok(())
+}
+
+fn prepare_testnet_soak_mandate(candidate: &mut TradingMandate, now_ms: i64) -> anyhow::Result<()> {
+    bind_current_testnet_strategy(candidate);
+    candidate.objective = "Immutable 72-hour zero-nudge Nautilus Testnet soak".to_owned();
+    candidate.review_cadence = MandateReviewCadence::Interval { seconds: 3_600 };
+    candidate.expires_at_ms = now_ms
+        .checked_add(NAUTILUS_SOAK_MANDATE_DURATION_MS)
+        .ok_or_else(|| anyhow::anyhow!("soak mandate expiry overflowed"))?;
+    Ok(())
+}
+
+fn apply_ui_approved_proposal(
+    store: &MandateStore,
+    proposal: MandateProposal,
+) -> anyhow::Result<()> {
+    unix_ms()
+        .and_then(|approved_at_ms| store.apply_ui_approved(proposal, approved_at_ms))
+        .map(|_| ())
 }
 
 fn demo_summary() -> AgentWalletSummary {
@@ -430,8 +457,74 @@ impl NautilusAgentWalletSettingsPage {
                 .log_err();
                 return;
             }
-            let result = unix_ms()
-                .and_then(|approved_at_ms| store.apply_ui_approved(proposal, approved_at_ms));
+            let result = apply_ui_approved_proposal(&store, proposal);
+            this.update(cx, |this, cx| {
+                this.operation = None;
+                this.local_error = result.err().map(|error| error.to_string().into());
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn approve_testnet_soak_mandate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.mandate_store.clone() else {
+            self.local_error = Some("The trading mandate store is unavailable.".into());
+            cx.notify();
+            return;
+        };
+        let now_ms = match unix_ms() {
+            Ok(now_ms) => now_ms,
+            Err(error) => {
+                self.local_error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let proposal = store.snapshot().and_then(|snapshot| {
+            let mut candidate = snapshot
+                .mandate_for("hyperliquid", TradingNetwork::Testnet)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("No Hyperliquid Testnet mandate exists."))?;
+            prepare_testnet_soak_mandate(&mut candidate, now_ms)?;
+            store.propose(candidate)
+        });
+        let proposal = match proposal {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                self.local_error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        let candidate = proposal.candidate();
+        let detail = format!(
+            "Immutable 72-hour segment · Hyperliquid Testnet only · strategy {} · max position ${} · max leverage {}× · max orders {}/hour · expires {}",
+            NAUTILUS_TESTNET_STRATEGY_ID,
+            candidate.max_position_usd,
+            candidate.max_leverage,
+            candidate.max_orders_per_hour,
+            candidate.expires_at_ms,
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Approve this fixed 73-hour Testnet soak mandate?",
+            Some(&detail),
+            &["Approve soak mandate", "Cancel"],
+            cx,
+        );
+        self.local_error = None;
+        self.operation = Some(cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                this.update(cx, |this, cx| {
+                    this.operation = None;
+                    cx.notify();
+                })
+                .log_err();
+                return;
+            }
+            let result = apply_ui_approved_proposal(&store, proposal);
             this.update(cx, |this, cx| {
                 this.operation = None;
                 this.local_error = result.err().map(|error| error.to_string().into());
@@ -753,6 +846,17 @@ impl Render for NautilusAgentWalletSettingsPage {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.renew_testnet_mandate(window, cx)
                                     })),
+                                )
+                                .child(
+                                    Button::new(
+                                        "nautilus-approve-soak-mandate",
+                                        "Approve fixed 72-hour soak mandate",
+                                    )
+                                    .style(ButtonStyle::Outlined)
+                                    .disabled(busy || !configured)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.approve_testnet_soak_mandate(window, cx)
+                                    })),
                                 ),
                         ),
                 )
@@ -900,6 +1004,44 @@ mod tests {
                 .collect()
         );
         assert_eq!(mandate.expires_at_ms, 3_600_010);
+        assert_eq!(mandate.max_position_usd, 1_000);
+        assert_eq!(mandate.max_orders_per_hour, 6);
+        assert_eq!(
+            mandate.review_cadence,
+            MandateReviewCadence::Interval { seconds: 3_600 }
+        );
+    }
+
+    #[test]
+    fn soak_mandate_is_fixed_beyond_the_immutable_window() {
+        let mut mandate = TradingMandate {
+            venue: "hyperliquid".to_owned(),
+            network: TradingNetwork::Testnet,
+            collateral_asset: AssetId::usdc(),
+            objective: "old objective".to_owned(),
+            max_venue_balance: 2_000_000_000,
+            max_position_usd: 1_000,
+            max_leverage: 2,
+            daily_loss_stop: 100_000_000,
+            max_orders_per_hour: 6,
+            min_liquidation_buffer_bps: 1_000,
+            allowed_strategies: ["legacy".to_owned()].into_iter().collect(),
+            review_cadence: trading_mandate::ReviewCadence::Interval { seconds: 3_600 },
+            expires_at_ms: 1,
+        };
+
+        prepare_testnet_soak_mandate(&mut mandate, 10).expect("soak candidate");
+
+        assert_eq!(
+            mandate.expires_at_ms,
+            10 + NAUTILUS_SOAK_MANDATE_DURATION_MS
+        );
+        assert_eq!(
+            mandate.allowed_strategies,
+            [NAUTILUS_TESTNET_STRATEGY_ID.to_owned()]
+                .into_iter()
+                .collect()
+        );
         assert_eq!(mandate.max_position_usd, 1_000);
         assert_eq!(mandate.max_orders_per_hour, 6);
     }

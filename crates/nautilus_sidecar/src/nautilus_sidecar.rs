@@ -332,6 +332,8 @@ pub enum StreamEvent {
         book_ticks: u64,
         action_count: u64,
         active_client_order_id: Option<String>,
+        #[serde(default)]
+        budget_wait_until_ns: Option<u64>,
         ts_init: u64,
     },
 }

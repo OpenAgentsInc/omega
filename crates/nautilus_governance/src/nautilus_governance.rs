@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -28,8 +28,8 @@ use prediction_events::{
     PredictionEventDraft, PredictionForecast, PredictionStore, ResolutionRule, ScoringRule,
 };
 use review_accounting::{
-    REVIEW_ACCOUNTING_SCHEMA_VERSION, ReviewAccountingStore, ReviewCostRecord, ReviewDisposition,
-    ReviewInterventionKind,
+    REVIEW_ACCOUNTING_SCHEMA_VERSION, ReviewAccountingQuery, ReviewAccountingStore,
+    ReviewCostRecord, ReviewDisposition, ReviewInterventionKind,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,13 @@ use trading_mandate::{
 use ui::SharedString;
 
 mod card_renderers;
+mod soak;
+
+pub use soak::{
+    NAUTILUS_SOAK_HEALTH_SCHEMA, NAUTILUS_SOAK_MANIFEST_SCHEMA, NAUTILUS_SOAK_RECEIPT_SCHEMA,
+    NautilusSoakHealth, NautilusSoakHealthDraft, NautilusSoakManifest, NautilusSoakReceipt,
+    NautilusSoakStore,
+};
 
 const VENUE: &str = "hyperliquid";
 const STRATEGY_ID: &str = "OMEGA-BOUNDED-QUOTE-001";
@@ -52,6 +59,7 @@ const CAPABILITY_MAX_AGE_MS: i64 = 30_000;
 const USDC_SCALE: u32 = 6;
 const BTC_SCALE: u32 = 8;
 const GOVERNANCE_STATE_CAPACITY: usize = 2_048;
+const ZERO_LEDGER_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 pub const COST_FLOOR_SCHEMA: &str = "omega.nautilus.cost_floor.v1";
 pub const BASIS_POINT_MICROS: i64 = 1_000_000;
 
@@ -95,6 +103,7 @@ pub struct GovernanceRuntime {
     capabilities: VenueCapabilityStore,
     state: Arc<Mutex<GovernanceState>>,
     command_counter: Arc<AtomicU64>,
+    soak: Option<Arc<NautilusSoakStore>>,
 }
 
 impl GovernanceRuntime {
@@ -107,6 +116,7 @@ impl GovernanceRuntime {
             capabilities,
             state: Arc::new(Mutex::new(GovernanceState::default())),
             command_counter: Arc::new(AtomicU64::new(1)),
+            soak: NautilusSoakStore::open_configured()?.map(Arc::new),
         })
     }
 
@@ -120,6 +130,7 @@ impl GovernanceRuntime {
             capabilities,
             state: Arc::new(Mutex::new(GovernanceState::default())),
             command_counter: Arc::new(AtomicU64::new(1)),
+            soak: None,
         })
     }
 
@@ -214,6 +225,7 @@ impl GovernanceRuntime {
         }
         if let Some((generation, sequence, account)) = account_to_reconcile {
             self.reconcile_account(generation, sequence, &account)?;
+            self.record_soak_health(generation, sequence, &account)?;
         }
         Ok(())
     }
@@ -395,6 +407,160 @@ impl GovernanceRuntime {
 
     fn set_credential_wakeup(&self, wakeup: Option<plugin_api::WakeupSource>) {
         self.state.lock().pending_credential_wakeup = wakeup;
+    }
+
+    fn record_soak_health(&self, generation: u64, sequence: u64, account: &Value) -> Result<()> {
+        let Some(soak) = &self.soak else {
+            return Ok(());
+        };
+        let observed_at_ms = unix_ms()?;
+        if observed_at_ms < soak.manifest().started_at_ms {
+            return Ok(());
+        }
+        if !soak.sample_due(observed_at_ms) {
+            return Ok(());
+        }
+        let observed_usdc = decimal_to_units(
+            &find_account_balance(account).context("soak account has no USDC balance")?,
+            USDC_SCALE,
+        )?;
+        let mut projection = self.state.lock().clone();
+        let mut engine_assets = BTreeMap::from([("usdc".to_owned(), observed_usdc)]);
+        let btc_position = projection
+            .positions
+            .iter()
+            .try_fold(0_i64, |total, position| {
+                let Some(quantity) = find_string(position, &["quantity", "signed_qty", "size"])
+                else {
+                    return Ok::<i64, anyhow::Error>(total);
+                };
+                let mut units = decimal_to_units(&quantity, BTC_SCALE)?;
+                if find_string(position, &["side", "position_side"])
+                    .is_some_and(|side| side.eq_ignore_ascii_case("short"))
+                {
+                    units = units.saturating_neg();
+                }
+                total
+                    .checked_add(units)
+                    .context("soak BTC position overflowed")
+            })?;
+        if btc_position != 0 {
+            engine_assets.insert("btc".to_owned(), btc_position);
+        }
+        let entries = self.ledger.entries(&LedgerQuery::default())?;
+        let mut ledger_assets = BTreeMap::new();
+        for entry in &entries {
+            for posting in &entry.postings {
+                let tracks_asset = matches!(
+                    &posting.account,
+                    LedgerAccount::VenueBalance { venue }
+                        if venue == VENUE && posting.asset == AssetId::usdc()
+                ) || matches!(
+                    &posting.account,
+                    LedgerAccount::MarketParticipant { participant, .. }
+                        if participant == STRATEGY_ID && posting.asset.as_str() == "btc"
+                );
+                if tracks_asset {
+                    let balance = ledger_assets
+                        .entry(posting.asset.as_str().to_owned())
+                        .or_insert(0_i64);
+                    *balance = balance
+                        .checked_add(posting.amount)
+                        .context("soak ledger projection overflowed")?;
+                }
+            }
+        }
+        ledger_assets.retain(|_, amount| *amount != 0);
+        let venue_assets = engine_assets.clone();
+        let strategy = projection.strategy.as_ref();
+        let strategy_phase = strategy
+            .and_then(|value| find_string(value, &["phase"]))
+            .unwrap_or_else(|| "not_started".to_owned());
+        let strategy_running = strategy
+            .and_then(|value| value.get("running"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let recoverable_budget_wait = strategy_phase == "budget_wait"
+            && strategy
+                .and_then(|value| value.get("budget_wait_until_ns"))
+                .is_some_and(|value| !value.is_null());
+        let started_at_ms = soak.manifest().started_at_ms;
+        let scheduled_review_count = u64::try_from(
+            self.review_accounting
+                .entries(&ReviewAccountingQuery {
+                    from_ms: Some(started_at_ms),
+                    to_ms: None,
+                    venue: Some(VENUE.to_owned()),
+                    strategy: Some(STRATEGY_ID.to_owned()),
+                })?
+                .len(),
+        )?;
+        let prediction_count = u64::try_from(
+            self.predictions
+                .events()?
+                .into_iter()
+                .filter(|event| event.draft.emitted_at_ms >= started_at_ms)
+                .count(),
+        )?;
+        let ledger_head_hash = entries.last().map_or_else(
+            || ZERO_LEDGER_HASH.to_owned(),
+            |entry| entry.entry_hash.clone(),
+        );
+        let review_deadline_ms = started_at_ms
+            .checked_add(
+                i64::try_from(scheduled_review_count.saturating_add(1))?
+                    .checked_mul(soak.manifest().review_interval_ms)
+                    .context("soak review deadline overflowed")?,
+            )
+            .context("soak review deadline overflowed")?;
+        let violation = if venue_assets != engine_assets || engine_assets != ledger_assets {
+            Some("soak venue, engine, and ledger assets do not reconcile")
+        } else if prediction_count < scheduled_review_count
+            || observed_at_ms
+                > review_deadline_ms.saturating_add(soak.manifest().health_interval_ms)
+        {
+            Some("soak is missing a scheduled review or its prediction")
+        } else if !strategy_running
+            && !recoverable_budget_wait
+            && projection.halted_reason.is_none()
+        {
+            Some("soak strategy stopped without a typed halt or budget wait")
+        } else {
+            None
+        };
+        if let Some(reason) = violation {
+            self.halt(reason.to_owned());
+            projection.halted_reason = Some(reason.to_owned());
+            projection.pending_wakeup = Some(reason.to_owned());
+        } else if projection.halted_reason.is_some()
+            && projection.pending_wakeup.is_none()
+            && projection.pending_credential_wakeup.is_none()
+        {
+            let reason = projection
+                .halted_reason
+                .clone()
+                .context("halt reason disappeared")?;
+            self.halt(reason.clone());
+            projection.pending_wakeup = Some(reason);
+        }
+        soak.append_health(NautilusSoakHealthDraft {
+            observed_at_ms,
+            engine_generation: generation,
+            engine_sequence: sequence,
+            strategy_phase,
+            strategy_running,
+            recoverable_budget_wait,
+            halt_reason: projection.halted_reason,
+            wakeup_queued: projection.pending_wakeup.is_some()
+                || projection.pending_credential_wakeup.is_some(),
+            scheduled_review_count,
+            prediction_count,
+            ledger_head_hash,
+            venue_assets,
+            engine_assets,
+            ledger_assets,
+        })?;
+        Ok(())
     }
 
     fn reconcile_account(&self, generation: u64, sequence: u64, account: &Value) -> Result<()> {
@@ -2951,6 +3117,58 @@ mod tests {
         let state = runtime.state.lock();
         assert!(state.halted_reason.is_some());
         assert!(state.pending_wakeup.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn overdue_soak_review_halts_and_records_a_wakeup() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let now = unix_ms()?;
+        let manifest = NautilusSoakManifest {
+            schema: NAUTILUS_SOAK_MANIFEST_SCHEMA.to_owned(),
+            segment_id: "omega-304-runtime-refusal".to_owned(),
+            commit: "a".repeat(40),
+            config_sha256: "b".repeat(64),
+            started_at_ms: now.saturating_sub(3_700_000),
+            required_duration_ms: soak::REQUIRED_SOAK_DURATION_MS,
+            health_interval_ms: 60_000,
+            review_interval_ms: 3_600_000,
+            mandate_revision: 5,
+            mandate_digest: "c".repeat(64),
+            mandate_expires_at_ms: now.saturating_add(soak::REQUIRED_SOAK_DURATION_MS),
+            venue: VENUE.to_owned(),
+            network: "testnet".to_owned(),
+            strategy_id: STRATEGY_ID.to_owned(),
+            zero_human_nudges: true,
+        };
+        let mut runtime = GovernanceRuntime::in_memory(VenueCapabilityStore::default())?;
+        runtime.soak = Some(Arc::new(NautilusSoakStore::create(
+            directory.path(),
+            manifest,
+        )?));
+        runtime.state.lock().strategy = Some(json!({
+            "phase": "running",
+            "running": true,
+            "budget_wait_until_ns": null,
+        }));
+        let account = json!({"account_value":"100"});
+        runtime.reconcile_account(1, 1, &account)?;
+        runtime.record_soak_health(1, 1, &account)?;
+
+        let state = runtime.state.lock();
+        assert_eq!(
+            state.halted_reason.as_deref(),
+            Some("soak is missing a scheduled review or its prediction")
+        );
+        assert!(state.pending_wakeup.is_some());
+        drop(state);
+        let samples = runtime
+            .soak
+            .as_ref()
+            .context("soak store")?
+            .health_samples()?;
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].draft.wakeup_queued);
         Ok(())
     }
 

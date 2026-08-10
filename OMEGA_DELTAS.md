@@ -10868,3 +10868,29 @@ secp256k1 wasm compilation uses the repository's pinned Zig wrappers.
 - **Enforced by:** `market_ui` view-model, component, fixture-replay, native,
   and wasm checks plus `market_session_view_is_typed_verified_and_no_spend` in
   `omega_deltas`.
+
+### OMEGA-DELTA-0280 — Nautilus soak evidence is immutable and reconciled
+
+The unattended Hyperliquid Testnet proof is one immutable 72-hour segment. A
+versioned create-once manifest binds its exact commit, canonical configuration
+hash, strategy, start, cadences, and UI-approved mandate revision, digest, and
+expiry. The mandate lasts 73 hours so it covers the complete segment. Mainnet,
+human nudges, parameter tuning, restarts, and segment splicing are excluded.
+
+Account snapshots append a typed, hash-chained health stream at most 60 seconds
+apart. Every sample binds engine generation and sequence, strategy lifecycle,
+ledger head, scheduled review and prediction totals, and equal per-asset venue,
+engine, and ledger projections. Drift, a missing review or prediction, an
+untyped stop, or a true halt without a bounded wakeup fails closed. Completion
+creates one typed receipt only after 72 wall-clock hours with zero nudges and
+continuous boundary coverage.
+
+Exhausting the rolling hourly order allowance is capacity, not an anomaly. The
+Nautilus hot loop enters a typed wait and resumes when its oldest slots age out.
+An explicit start may clear only an aged recoverable budget wait; it never
+clears an arbitrary halt. True limits and reconciliation anomalies still halt
+and queue governance wakeups.
+
+- **Enforced by:** `nautilus_governance`, `nautilus_sidecar`,
+  `trading_workspace_ui`, the operator contract, and
+  `nautilus_soak_is_immutable_reconciled_and_zero_nudge` in `omega_deltas`.

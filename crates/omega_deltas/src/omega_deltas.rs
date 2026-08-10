@@ -250,6 +250,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0277",
     "OMEGA-DELTA-0278",
     "OMEGA-DELTA-0279",
+    "OMEGA-DELTA-0280",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31112,7 +31113,11 @@ mod tests {
             );
         }
 
-        let bridge = without_comments(&read_repository_file("sidecar/nautilus/command_bridge.py"));
+        let bridge = without_comments(&format!(
+            "{}\n{}",
+            read_repository_file("sidecar/nautilus/order_budget.py"),
+            read_repository_file("sidecar/nautilus/command_bridge.py")
+        ));
         for required in [
             "COMMAND_SCHEMA = \"omega.nautilus.command.v1\"",
             "class CommandController",
@@ -31853,6 +31858,93 @@ mod tests {
             assert!(
                 cargo_config.contains(required),
                 "OMEGA-DELTA-0279: reproducible wasm C boundary lost `{required}`"
+            );
+        }
+    }
+
+    #[test]
+    fn nautilus_soak_is_immutable_reconciled_and_zero_nudge() {
+        let soak = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/soak.rs",
+        ));
+        for required in [
+            "omega.nautilus.soak_manifest.v1",
+            "omega.nautilus.soak_health.v1",
+            "omega.nautilus.soak_receipt.v1",
+            "72 * 60 * 60 * 1_000",
+            "create_new(true)",
+            "segments cannot be spliced",
+            "soak venue, engine, and ledger assets do not reconcile",
+            "soak is missing a scheduled review or its prediction",
+            "soak halt did not queue a bounded wakeup",
+            "human_nudge_count != 0",
+        ] {
+            assert!(
+                soak.contains(required),
+                "OMEGA-DELTA-0280: immutable soak evidence lost `{required}`"
+            );
+        }
+
+        let governance = without_comments(&read_repository_file(
+            "crates/nautilus_governance/src/nautilus_governance.rs",
+        ));
+        for required in [
+            "NautilusSoakStore::open_configured()",
+            "record_soak_health(",
+            "ReviewAccountingQuery",
+            "prediction_count",
+            "wakeup_queued",
+        ] {
+            assert!(
+                governance.contains(required),
+                "OMEGA-DELTA-0280: runtime soak sampling lost `{required}`"
+            );
+        }
+
+        let bridge = without_comments(&read_repository_file("sidecar/nautilus/command_bridge.py"));
+        for required in [
+            "rolling_budget_wait_until_ns(",
+            "budget_wait_until_ns",
+            "budget_resumed",
+            "strategy_halted",
+            "order_budget_wait",
+        ] {
+            assert!(
+                bridge.contains(required),
+                "OMEGA-DELTA-0280: rolling order budget lost `{required}`"
+            );
+        }
+        assert!(
+            !bridge.contains("_halt(\"hourly_order_limit\")"),
+            "OMEGA-DELTA-0280: ordinary rolling-budget exhaustion became a halt"
+        );
+
+        let settings = without_comments(&read_repository_file(
+            "crates/trading_workspace_ui/src/agent_wallet_ui.rs",
+        ));
+        for required in [
+            "NAUTILUS_SOAK_MANDATE_DURATION_MS",
+            "prepare_testnet_soak_mandate",
+            "Approve this fixed 73-hour Testnet soak mandate?",
+            "Approve soak mandate",
+            "store.apply_ui_approved(proposal, approved_at_ms)",
+        ] {
+            assert!(
+                settings.contains(required),
+                "OMEGA-DELTA-0280: fixed soak mandate UI lost `{required}`"
+            );
+        }
+
+        let documentation = read_repository_file("docs/src/development/nautilus-soak.md");
+        for required in [
+            "\"wakeups\": {",
+            "\"enabled\": true",
+            "OMEGA_NAUTILUS_SOAK_DIR",
+            "No parameter or config changes are permitted after `started_at_ms`",
+        ] {
+            assert!(
+                documentation.contains(required),
+                "OMEGA-DELTA-0280: operator soak contract lost `{required}`"
             );
         }
     }
