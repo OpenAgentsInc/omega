@@ -1970,7 +1970,7 @@ async fn test_profiles(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn local_only_thread_omits_tools(cx: &mut TestAppContext) {
+async fn local_only_thread_runs_model_supported_tools(cx: &mut TestAppContext) {
     let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
     let fake_model = model.as_fake();
 
@@ -1978,6 +1978,9 @@ async fn local_only_thread_omits_tools(cx: &mut TestAppContext) {
         .update(cx, |thread, cx| {
             thread.add_tool(EchoTool);
             thread.set_local_only(true, cx);
+            thread.set_title("Local tools".into(), cx);
+            assert_eq!(thread.profile().as_str(), "test-profile");
+            assert!(thread.has_enabled_tool(EchoTool::NAME, cx));
             thread.send(ClientUserMessageId::new(), ["hello"], cx)
         })
         .expect("the local-only turn should start");
@@ -1987,18 +1990,63 @@ async fn local_only_thread_omits_tools(cx: &mut TestAppContext) {
         .pending_completions()
         .pop()
         .expect("the local model should receive one completion");
-    assert!(completion.tools.is_empty());
     assert!(
-        completion
-            .messages
+        tool_names_for_completion(&completion)
             .iter()
-            .any(|message| message.role == Role::User)
+            .any(|name| name == EchoTool::NAME)
+    );
+    fake_model.send_completion_stream_event(
+        &completion,
+        LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+            id: "tool_1".into(),
+            name: EchoTool::NAME.into(),
+            raw_input: r#"{"text":"local"}"#.into(),
+            input: language_model::LanguageModelToolUseInput::Json(json!({"text": "local"})),
+            is_input_complete: true,
+            thought_signature: None,
+        }),
+    );
+    fake_model.send_completion_stream_event(
+        &completion,
+        LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
     );
     fake_model.end_completion_stream(&completion);
+    cx.run_until_parked();
+
+    let continuation = fake_model
+        .pending_completions()
+        .pop()
+        .expect("the local model should receive the tool result");
+    assert!(
+        tool_names_for_completion(&continuation)
+            .iter()
+            .any(|name| name == EchoTool::NAME)
+    );
+    assert!(continuation.messages.iter().any(|message| {
+        message.content.iter().any(|content| {
+            matches!(
+                content,
+                MessageContent::ToolResult(LanguageModelToolResult {
+                    tool_name,
+                    is_error: false,
+                    ..
+                }) if tool_name.as_ref() == EchoTool::NAME
+            )
+        })
+    }));
+    fake_model.send_completion_stream_text_chunk(&continuation, "Done");
+    fake_model.send_completion_stream_event(
+        &continuation,
+        LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
+    );
+    fake_model.end_completion_stream(&continuation);
+    cx.run_until_parked();
+
+    assert!(cx.update(|cx| thread.read(cx).is_turn_complete()));
 }
 
 #[gpui::test]
-async fn text_only_chat_uses_a_compact_prompt_and_bypasses_agent_prompt_cache(
+async fn compact_local_agent_uses_tools_without_expanding_its_system_prompt(
     cx: &mut TestAppContext,
 ) {
     const USER_MESSAGE: &str = "compact history sentinel";
@@ -2015,7 +2063,7 @@ async fn text_only_chat_uses_a_compact_prompt_and_bypasses_agent_prompt_cache(
     project_context.update(cx, |project_context, _cx| {
         project_context.shell = "agent-context-sentinel".into();
     });
-    assert!(cx.update(|cx| thread.read(cx).text_only_chat_identity().is_none()));
+    assert!(cx.update(|cx| thread.read(cx).compact_local_agent_identity().is_none()));
     let agentic_request = thread
         .update(cx, |thread, cx| {
             thread.build_completion_request(CompletionIntent::UserPrompt, cx)
@@ -2030,17 +2078,22 @@ async fn text_only_chat_uses_a_compact_prompt_and_bypasses_agent_prompt_cache(
         .update(cx, |thread, cx| {
             thread.add_tool(EchoTool);
             thread.set_local_only(true, cx);
-            thread.set_text_only_chat_identity(Some("Muse Glimmer (Local)".into()), cx);
+            assert!(thread.has_enabled_tool(EchoTool::NAME, cx));
+            thread.set_compact_local_agent_identity(Some("Muse Glimmer (Local)".into()), cx);
             thread.send(ClientUserMessageId::new(), [USER_MESSAGE], cx)
         })
-        .expect("the compact chat turn should start");
+        .expect("the compact local turn should start");
     cx.run_until_parked();
 
     let completion = fake_model
         .pending_completions()
         .pop()
         .expect("the local model should receive one completion");
-    assert!(completion.tools.is_empty());
+    assert!(
+        tool_names_for_completion(&completion)
+            .iter()
+            .any(|name| name == EchoTool::NAME)
+    );
     let MessageContent::Text(compact_prompt) = &completion.messages[0].content[0] else {
         panic!("the compact system prompt should be text");
     };
@@ -2050,6 +2103,7 @@ async fn text_only_chat_uses_a_compact_prompt_and_bypasses_agent_prompt_cache(
         compact_prompt.len()
     );
     assert!(compact_prompt.contains("Muse Glimmer (Local)"));
+    assert!(compact_prompt.contains("Use the provided tools"));
     for excluded in [
         "agent-context-sentinel",
         "Omega coding agent",
@@ -2082,6 +2136,8 @@ async fn model_without_tool_support_omits_tools(cx: &mut TestAppContext) {
     thread
         .update(cx, |thread, cx| {
             thread.add_tool(EchoTool);
+            thread.set_local_only(true, cx);
+            thread.set_compact_local_agent_identity(Some("Muse Glimmer (Local)".into()), cx);
             thread.send(ClientUserMessageId::new(), ["hello"], cx)
         })
         .expect("the text-only turn should start");
@@ -2092,6 +2148,10 @@ async fn model_without_tool_support_omits_tools(cx: &mut TestAppContext) {
         .pop()
         .expect("the text-only model should receive one completion");
     assert!(completion.tools.is_empty());
+    let MessageContent::Text(system_prompt) = &completion.messages[0].content[0] else {
+        panic!("the compact local system prompt should be text");
+    };
+    assert!(system_prompt.contains("You have no tools"));
     assert!(
         completion
             .messages

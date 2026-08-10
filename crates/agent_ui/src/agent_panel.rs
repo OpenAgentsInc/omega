@@ -176,7 +176,7 @@ const MUSE_GLIMMER_PROVIDER_ID: &str = "muse-glimmer";
 const MUSE_GLIMMER_MODEL_ID: &str = "muse-glimmer";
 const MUSE_GLIMMER_MODEL_OVERRIDE: &str = "muse-glimmer/muse-glimmer";
 
-fn text_only_chat_identity_for_agent(agent: &Agent) -> Option<&'static str> {
+fn compact_local_agent_identity_for_agent(agent: &Agent) -> Option<&'static str> {
     matches!(agent, Agent::MuseGlimmerLocal).then_some("Muse Glimmer (Local)")
 }
 
@@ -11972,8 +11972,8 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) -> AgentThread {
         let is_new_thread = resume_thread_id.is_none() && resume_session_id.is_none();
-        let text_only_chat_identity = text_only_chat_identity_for_agent(&agent);
-        let is_muse_glimmer = text_only_chat_identity.is_some();
+        let compact_local_agent_identity = compact_local_agent_identity_for_agent(&agent);
+        let is_muse_glimmer = compact_local_agent_identity.is_some();
         let model_override = is_muse_glimmer
             .then(|| MUSE_GLIMMER_MODEL_OVERRIDE.to_string())
             .or(model_override);
@@ -12064,10 +12064,10 @@ impl AgentPanel {
                     if let Some(model) = model_override.as_deref() {
                         apply_native_model_override(&native_thread, model, cx);
                     }
-                    if let Some(identity) = text_only_chat_identity {
+                    if let Some(identity) = compact_local_agent_identity {
                         native_thread.update(cx, |thread, cx| {
                             thread.set_local_only(true, cx);
-                            thread.set_text_only_chat_identity(Some(identity.into()), cx);
+                            thread.set_compact_local_agent_identity(Some(identity.into()), cx);
                         });
                     }
                     applied.set(true);
@@ -29108,7 +29108,7 @@ mod tests {
                                 "display_name": "Muse Glimmer (Local)",
                                 "max_tokens": 32768,
                                 "capabilities": {
-                                    "tools": false,
+                                    "tools": true,
                                     "images": false,
                                     "parallel_tool_calls": false,
                                     "prompt_cache_key": false,
@@ -29134,7 +29134,7 @@ mod tests {
                 "Muse Glimmer (Local)",
                 false,
             ));
-            model.set_supports_tools(false);
+            model.set_supports_tools(true);
             LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
                 registry.register_provider(
                     Arc::new(
@@ -29308,7 +29308,7 @@ mod tests {
             assert_eq!(
                 native_thread
                     .read(cx)
-                    .text_only_chat_identity()
+                    .compact_local_agent_identity()
                     .map(ToString::to_string),
                 Some("Muse Glimmer (Local)".to_string())
             );
@@ -29316,8 +29316,15 @@ mod tests {
                 .read(cx)
                 .model()
                 .expect("Muse should keep its pinned local model");
-            assert!(!model.supports_tools());
+            assert!(model.supports_tools());
             assert!(!model.supports_images());
+            assert_eq!(native_thread.read(cx).profile().as_str(), "basic");
+            for tool_name in ["read", "write", "edit", "bash", "delegate"] {
+                assert!(
+                    native_thread.read(cx).has_enabled_tool(tool_name, cx),
+                    "Muse should expose the basic {tool_name} tool"
+                );
+            }
 
             let rows = panel.composer_executor_rows(cx);
             let muse = rows
@@ -29379,7 +29386,7 @@ mod tests {
             assert_eq!(
                 native_thread
                     .read(cx)
-                    .text_only_chat_identity()
+                    .compact_local_agent_identity()
                     .map(ToString::to_string),
                 Some("Muse Glimmer (Local)".to_string()),
                 "restoration must reapply the compact chat prompt"
@@ -29404,7 +29411,7 @@ mod tests {
                 .expect("Omega selection should reveal its conversation");
             assert_eq!(active.read(cx).agent_key(), &Agent::NativeAgent);
             assert!(
-                text_only_chat_identity_for_agent(active.read(cx).agent_key()).is_none(),
+                compact_local_agent_identity_for_agent(active.read(cx).agent_key()).is_none(),
                 "Omega Agent must keep its existing agentic system prompt"
             );
             let rows = panel.composer_executor_rows(cx);
