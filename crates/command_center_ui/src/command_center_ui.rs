@@ -13,6 +13,7 @@
 //! types onto those shared helpers.
 
 mod activity_feed;
+mod approvals;
 mod command_center_header;
 mod format;
 mod ledger_browser;
@@ -20,11 +21,19 @@ mod mandate_status_card;
 mod portfolio_accounting;
 mod prediction_card;
 mod receipt_viewer;
+mod review_turn;
+mod strategy_supervision;
 mod transfer_flow;
+mod wakeup_timeline;
 
 pub use activity_feed::{
     ActivityEvent, ActivityEventKind, ActivityFeed, AgentActivityState, AgentRoster,
     AgentRosterEntry, demo_activity_events, demo_roster_entries,
+};
+pub use approvals::{
+    ApprovalQueue, ApprovalQueueAction, ApprovalQueueSource, LimitChangeDirection,
+    MandateApprovalDialog, MandateDiffRow, MandateEditor, MandateEditorAction, MandateEditorSource,
+    MandateEditorValue, PendingApproval, PendingApprovalKind,
 };
 pub use command_center_header::{CommandCenterHeader, PortfolioSummary};
 pub use format::{
@@ -45,8 +54,17 @@ pub use receipt_viewer::{
     ReceiptFeeView, ReceiptLegView, ReceiptVerificationState, ReceiptViewData, ReceiptViewer,
     VenueRecordLink,
 };
+pub use review_turn::{ReviewTurnCard, ReviewTurnDecision, ReviewTurnSource, ReviewTurnValue};
+pub use strategy_supervision::{
+    HaltBannerAction, HaltBannerSource, HaltBannerValue, HaltResumePath, StrategyCard,
+    StrategyCardAction, StrategyCardSource, StrategyCardValue, StrategyHaltBanner, StrategyPhase,
+    StrategyPosition,
+};
 pub use transfer_flow::{DepositWithdrawFlow, TransferDirection, TransferRail, TransferRequest};
 pub use ui::{HeadroomMeter, MeterZone};
+pub use wakeup_timeline::{
+    WakeupTimeline, WakeupTimelineItem, WakeupTimelineKind, WakeupTimelineSource,
+};
 
 pub fn unix_now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -63,9 +81,10 @@ mod paint_tests {
     use ui::prelude::*;
 
     use crate::{
-        ActivityFeed, AgentRoster, BalancesTable, CommandCenterHeader, DepositWithdrawFlow,
-        FeeFundingBreakdown, LedgerBrowser, MandateStatusCard, PredictionCard, ReceiptViewer,
-        ReconciliationStatusTable,
+        ActivityFeed, AgentRoster, ApprovalQueue, BalancesTable, CommandCenterHeader,
+        DepositWithdrawFlow, FeeFundingBreakdown, LedgerBrowser, MandateApprovalDialog,
+        MandateEditor, MandateStatusCard, PredictionCard, ReceiptViewer, ReconciliationStatusTable,
+        ReviewTurnCard, StrategyCard, StrategyHaltBanner, WakeupTimeline,
     };
 
     struct AllCommandCenterPreviews;
@@ -89,6 +108,13 @@ mod paint_tests {
                 .child(ReconciliationStatusTable::preview(window, cx))
                 .child(FeeFundingBreakdown::preview(window, cx))
                 .child(DepositWithdrawFlow::preview(window, cx))
+                .child(StrategyCard::preview(window, cx))
+                .child(ReviewTurnCard::preview(window, cx))
+                .child(WakeupTimeline::preview(window, cx))
+                .child(StrategyHaltBanner::preview(window, cx))
+                .child(ApprovalQueue::preview(window, cx))
+                .child(MandateEditor::preview(window, cx))
+                .child(MandateApprovalDialog::preview(window, cx))
         }
     }
 
@@ -121,6 +147,13 @@ mod paint_tests {
             "command_center.reconciliation_table",
             "command_center.fee_funding_breakdown",
             "command_center.deposit_withdraw_flow",
+            "command_center.strategy_card",
+            "command_center.review_turn",
+            "command_center.wakeup_timeline",
+            "command_center.halt_banner",
+            "command_center.approval_queue",
+            "command_center.mandate_editor",
+            "command_center.mandate_approval",
         ] {
             assert!(
                 !rendered.occurrences(selector).is_empty(),
