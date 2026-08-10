@@ -26,9 +26,14 @@ mod histogram;
 mod instrument_selector;
 mod line_chart;
 mod market_kit;
+mod open_orders;
 mod oracle_readout;
 mod order_book;
+mod order_confirm;
+mod order_lifecycle;
+mod order_ticket;
 mod plot;
+mod positions;
 mod price_ticker;
 mod qr;
 mod sparkline;
@@ -69,9 +74,14 @@ pub use histogram::*;
 pub use instrument_selector::*;
 pub use line_chart::*;
 pub use market_kit::*;
+pub use open_orders::*;
 pub use oracle_readout::*;
 pub use order_book::*;
+pub use order_confirm::*;
+pub use order_lifecycle::*;
+pub use order_ticket::*;
 pub use plot::*;
+pub use positions::*;
 pub use price_ticker::*;
 pub use qr::*;
 pub use sparkline::*;
@@ -491,6 +501,11 @@ mod tests {
                 .child(Tearsheet::preview(window, cx))
                 .child(FillsOnCandlesChart::preview(window, cx))
                 .child(TradeLogTable::preview(window, cx))
+                .child(OrderTicket::preview(window, cx))
+                .child(OrderConfirmDialog::preview(window, cx))
+                .child(OpenOrdersTable::preview(window, cx))
+                .child(PositionsPanel::preview(window, cx))
+                .child(OrderLifecycleToast::preview(window, cx))
         }
     }
 
@@ -539,6 +554,11 @@ mod tests {
             "market.tearsheet",
             "market.fills_on_candles",
             "market.trade_log_table",
+            "market.order_ticket",
+            "market.order_confirm",
+            "market.open_orders",
+            "market.positions",
+            "market.order_lifecycle",
         ] {
             assert!(
                 !rendered.occurrences(selector).is_empty(),
