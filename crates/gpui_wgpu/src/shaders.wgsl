@@ -407,7 +407,7 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
 
     if (tag == 0u || tag == 2u || tag == 3u) {
         result.solid = hsla_to_rgba(solid);
-    } else if (tag == 1u) {
+    } else if (tag == 1u || tag == 4u || tag == 5u) {
         // The hsla_to_rgba is returns a linear sRGB color
         result.color0 = hsla_to_rgba(colors[0].color);
         result.color1 = hsla_to_rgba(colors[1].color);
@@ -508,6 +508,53 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             background_color = solid_color;
             background_color.a *= saturate(should_be_colored);
+        }
+        case 4u: {
+            // Radial gradient: color stops run from the bounds center to the
+            // nearest edge (closest-side).
+            let half_size = bounds.size / 2.0;
+            let center = bounds.origin + half_size;
+            let radius = max(min(half_size.x, half_size.y), 0.0001);
+            var t = length(position - center) / radius;
+
+            t = (t - background.colors[0].percentage)
+                / (background.colors[1].percentage - background.colors[0].percentage);
+            t = clamp(t, 0.0, 1.0);
+
+            switch (background.color_space) {
+                default: {
+                    background_color = srgba_to_linear(mix(color0, color1, t));
+                }
+                case 1u: {
+                    let oklab_color = mix(color0, color1, t);
+                    background_color = oklab_to_linear_srgb(oklab_color);
+                }
+            }
+        }
+        case 5u: {
+            // Conic gradient: t sweeps clockwise from the start angle, where
+            // 0 degrees points up.
+            let center = bounds.origin + bounds.size / 2.0;
+            let center_to_point = position - center;
+            let start = (background.gradient_angle_or_pattern_height % 360.0) * M_PI_F / 180.0;
+            let tau = 2.0 * M_PI_F;
+            var angle = atan2(center_to_point.x, -center_to_point.y) - start;
+            angle = angle - floor(angle / tau) * tau;
+            var t = angle / tau;
+
+            t = (t - background.colors[0].percentage)
+                / (background.colors[1].percentage - background.colors[0].percentage);
+            t = clamp(t, 0.0, 1.0);
+
+            switch (background.color_space) {
+                default: {
+                    background_color = srgba_to_linear(mix(color0, color1, t));
+                }
+                case 1u: {
+                    let oklab_color = mix(color0, color1, t);
+                    background_color = oklab_to_linear_srgb(oklab_color);
+                }
+            }
         }
     }
 

@@ -747,6 +747,8 @@ pub(crate) enum BackgroundTag {
     LinearGradient = 1,
     PatternSlash = 2,
     Checkerboard = 3,
+    RadialGradient = 4,
+    ConicGradient = 5,
 }
 
 /// A color space for color interpolation.
@@ -804,6 +806,16 @@ impl std::fmt::Debug for Background {
                 f,
                 "Checkerboard({:?}, {})",
                 self.solid, self.gradient_angle_or_pattern_height
+            ),
+            BackgroundTag::RadialGradient => write!(
+                f,
+                "RadialGradient({:?}, {:?})",
+                self.colors[0], self.colors[1]
+            ),
+            BackgroundTag::ConicGradient => write!(
+                f,
+                "ConicGradient({}, {:?}, {:?})",
+                self.gradient_angle_or_pattern_height, self.colors[0], self.colors[1]
             ),
         }
     }
@@ -870,6 +882,43 @@ pub fn linear_gradient(
     Background {
         tag: BackgroundTag::LinearGradient,
         gradient_angle_or_pattern_height: angle,
+        colors: [from.into(), to.into()],
+        ..Default::default()
+    }
+}
+
+/// Creates a RadialGradient background color.
+///
+/// The gradient is a circle centered in the painted bounds; the color stops
+/// run from the center (`0.0`) to the nearest edge (`1.0`, closest-side).
+///
+/// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/radial-gradient>
+pub fn radial_gradient(
+    from: impl Into<LinearColorStop>,
+    to: impl Into<LinearColorStop>,
+) -> Background {
+    Background {
+        tag: BackgroundTag::RadialGradient,
+        colors: [from.into(), to.into()],
+        ..Default::default()
+    }
+}
+
+/// Creates a ConicGradient background color.
+///
+/// The gradient sweeps clockwise around the center of the painted bounds,
+/// starting from `start_angle` degrees where `0.0` points up. The color stop
+/// percentages are fractions of the full turn.
+///
+/// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/conic-gradient>
+pub fn conic_gradient(
+    start_angle: f32,
+    from: impl Into<LinearColorStop>,
+    to: impl Into<LinearColorStop>,
+) -> Background {
+    Background {
+        tag: BackgroundTag::ConicGradient,
+        gradient_angle_or_pattern_height: start_angle,
         colors: [from.into(), to.into()],
         ..Default::default()
     }
@@ -943,6 +992,9 @@ impl Background {
             BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
             BackgroundTag::Checkerboard => self.solid.is_transparent(),
+            BackgroundTag::RadialGradient | BackgroundTag::ConicGradient => {
+                self.colors.iter().all(|c| c.color.is_transparent())
+            }
         }
     }
 }

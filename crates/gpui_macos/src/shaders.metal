@@ -1155,7 +1155,7 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
   GradientColor out;
   if (tag == 0 || tag == 2 || tag == 3) {
     out.solid = hsla_to_rgba(solid);
-  } else if (tag == 1) {
+  } else if (tag == 1 || tag == 4 || tag == 5) {
     out.color0 = hsla_to_rgba(color0);
     out.color1 = hsla_to_rgba(color1);
 
@@ -1272,6 +1272,61 @@ float4 fill_color(Background background,
         color = solid_color;
         color.a *= saturate(should_be_colored);
         break;
+    }
+    case 4: {
+      // Radial gradient: color stops run from the bounds center to the
+      // nearest edge (closest-side).
+      float2 half_size = float2(bounds.size.width, bounds.size.height) / 2.;
+      float2 center = float2(bounds.origin.x, bounds.origin.y) + half_size;
+      float radius = max(min(half_size.x, half_size.y), 0.0001);
+      float t = length(position - center) / radius;
+
+      t = (t - background.colors[0].percentage)
+        / (background.colors[1].percentage
+        - background.colors[0].percentage);
+      t = clamp(t, 0.0, 1.0);
+
+      switch (background.color_space) {
+        case 0:
+          color = mix(color0, color1, t);
+          break;
+        case 1: {
+          float4 oklab_color = mix(color0, color1, t);
+          color = oklab_to_srgb(oklab_color);
+          break;
+        }
+      }
+      break;
+    }
+    case 5: {
+      // Conic gradient: t sweeps clockwise from the start angle, where 0
+      // degrees points up.
+      float2 center = float2(bounds.origin.x, bounds.origin.y)
+        + float2(bounds.size.width, bounds.size.height) / 2.;
+      float2 center_to_point = position - center;
+      float start = fmod(background.gradient_angle_or_pattern_height, 360.0)
+        * (M_PI_F / 180.0);
+      float tau = 2.0 * M_PI_F;
+      float angle = atan2(center_to_point.x, -center_to_point.y) - start;
+      angle = angle - floor(angle / tau) * tau;
+      float t = angle / tau;
+
+      t = (t - background.colors[0].percentage)
+        / (background.colors[1].percentage
+        - background.colors[0].percentage);
+      t = clamp(t, 0.0, 1.0);
+
+      switch (background.color_space) {
+        case 0:
+          color = mix(color0, color1, t);
+          break;
+        case 1: {
+          float4 oklab_color = mix(color0, color1, t);
+          color = oklab_to_srgb(oklab_color);
+          break;
+        }
+      }
+      break;
     }
   }
 
