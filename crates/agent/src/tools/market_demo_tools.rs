@@ -358,6 +358,20 @@ impl AgentTool for MarketExecuteSwapTool {
         acp::ToolKind::Execute
     }
 
+    fn input_schema(format: language_model::LanguageModelToolSchemaFormat) -> schemars::Schema {
+        // The untagged input enum derives a top-level `anyOf` with no
+        // `type`. OpenAI and One's Open Responses profile both require
+        // object-typed tool parameters, and every branch here is an object,
+        // so pinning the type preserves the accepted inputs exactly.
+        let mut schema = language_model::tool_schema::root_schema_for::<Self::Input>(format);
+        if let Some(object) = schema.as_object_mut() {
+            object
+                .entry("type")
+                .or_insert_with(|| serde_json::Value::String("object".to_owned()));
+        }
+        schema
+    }
+
     fn migrate_input_for_replay(input: &mut Value) {
         migrate_legacy_network(input, MarketNetwork::Demo);
     }
