@@ -16,22 +16,16 @@ RUN rustup toolchain install 1.95.0 --profile minimal \
     --component rustfmt --component clippy --component rust-analyzer --component rust-src \
     --target wasm32-wasip2 --target wasm32-unknown-unknown --target x86_64-unknown-linux-gnu
 
-# Install build tools and the native libraries inherited through agent_ui.
+# Install build tools: a C toolchain for -sys crates and grammars,
+# cmake for aws-lc-sys, and OpenSSL headers for native-tls.
 # The image is pinned to Debian 12 so the resulting glibc baseline remains
 # compatible with supported contemporary Linux hosts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     build-essential \
-    libasound2-dev \
-    libglib2.0-dev \
     libssl-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
-
-# The pinned WebRTC bridge contains C++ declarations that GCC 12 diagnoses as
-# name-changing errors unless permissive mode is enabled. eval-cli is headless,
-# but agent_ui currently inherits this bridge through settings_ui/audio.
-ENV CXXFLAGS="-fpermissive"
 
 COPY . .
 

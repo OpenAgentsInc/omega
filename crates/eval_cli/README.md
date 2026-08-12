@@ -22,6 +22,27 @@ results. For normal benchmark orchestration, start with
 cargo build --release -p eval_cli
 ```
 
+The dependency graph is intentionally headless: it excludes `agent_ui`,
+`editor`, `terminal_view`, `theme`, and the LiveKit/WebRTC stack, so no C++
+compiler, ALSA, or GLib development packages are required. On Debian/Ubuntu the
+system dependencies are:
+
+```sh
+apt-get install -y cmake build-essential libssl-dev pkg-config
+```
+
+(`build-essential` provides the C toolchain for `-sys` crates and tree-sitter
+grammars, `cmake` is needed by `aws-lc-sys`, and `libssl-dev`/`pkg-config` by
+`native-tls`.)
+
+Tree-sitter grammars are compiled in by default through the `load-grammars`
+feature. If evals do not need syntax-aware language support, build with
+`--no-default-features` to skip compiling all grammars:
+
+```sh
+cargo build --release -p eval_cli --no-default-features
+```
+
 ### Linux x86_64, for Harbor/Pier sandboxes
 
 Harbor and Pier containers run Linux x86_64. From the repository root, use the

@@ -12,7 +12,6 @@ use language::LanguageRegistry;
 use language_extension::LspAccess;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use project::project_settings::ProjectSettings;
-use prompt_store::PromptBuilder;
 use release_channel::{AppCommitSha, AppVersion};
 use reqwest_client::ReqwestClient;
 use settings::{Settings, SettingsStore};
@@ -40,7 +39,6 @@ pub fn init(cx: &mut App) -> Arc<AgentCliAppState> {
 
     let settings_store = SettingsStore::new(cx, &settings::default_settings());
     cx.set_global(settings_store);
-    theme_settings::init(theme::LoadThemes::JustBase, cx);
 
     let user_agent = format!(
         "Omega Agent CLI/{} ({}; {})",
@@ -108,30 +106,17 @@ pub fn init(cx: &mut App) -> Arc<AgentCliAppState> {
     let node_runtime = NodeRuntime::new(client.http_client(), None, node_options_rx);
 
     let extension_host_proxy = ExtensionHostProxy::global(cx);
-    debug_adapter_extension::init(extension_host_proxy.clone(), cx);
     language_extension::init(LspAccess::Noop, extension_host_proxy, languages.clone());
     language_model::init(cx);
     RefreshLlmTokenListener::register(client.clone(), user_store.clone(), cx);
     language_models::init(user_store.clone(), client.clone(), cx);
     languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);
     prompt_store::init(cx);
-    terminal_view::init(cx);
 
     // The eval CLI runs headless with no controlling TTY, so PTY allocation and
     // acquiring a controlling terminal fail with `ENOTTY`. Tell the agent to run
     // its terminal commands without a PTY (and non-interactively) instead.
     cx.set_global(acp_thread::HeadlessTerminal(true));
-
-    let stdout_is_a_pty = false;
-    let prompt_builder = PromptBuilder::load(fs.clone(), stdout_is_a_pty, cx);
-    agent_ui::init(
-        fs.clone(),
-        prompt_builder,
-        languages.clone(),
-        true,
-        true,
-        cx,
-    );
 
     Arc::new(AgentCliAppState {
         languages,
