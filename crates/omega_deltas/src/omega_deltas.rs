@@ -251,6 +251,28 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0278",
     "OMEGA-DELTA-0279",
     "OMEGA-DELTA-0280",
+    "OMEGA-DELTA-0281",
+];
+
+/// OMEGA-DELTA-0281. `eval_cli` is a headless production tool. These direct
+/// dependencies pull the desktop editor/UI, terminal presentation, or media
+/// graph back into its build and must remain outside its manifest.
+pub const EVAL_CLI_MANIFEST_PATH: &str = "crates/eval_cli/Cargo.toml";
+pub const EVAL_CLI_FORBIDDEN_DIRECT_DEPENDENCIES: &[&str] = &[
+    "agent_ui",
+    "audio",
+    "debug_adapter_extension",
+    "editor",
+    "livekit",
+    "livekit_api",
+    "livekit_client",
+    "settings_ui",
+    "terminal_view",
+    "theme",
+    "theme_settings",
+    "webrtc",
+    "webrtc-sys",
+    "workspace",
 ];
 
 /// OMEGA-DELTA-0204. Every control the composer's bar offers, written twice:
@@ -31954,5 +31976,68 @@ mod tests {
                 "OMEGA-DELTA-0280: operator soak contract lost `{required}`"
             );
         }
+    }
+
+    /// OMEGA-DELTA-0281. The eval CLI is built and shipped as a headless tool
+    /// for agent computers. Its manifest must not directly regain the desktop
+    /// editor, UI, terminal-view, workspace, or media dependency graph removed
+    /// in a898b5d2d8. Parse Cargo tables instead of substring-scanning so an
+    /// alias, comment, or feature name cannot create a false result.
+    #[test]
+    fn eval_cli_direct_dependencies_remain_headless() {
+        fn dependency_names(manifest: &toml::Value) -> std::collections::BTreeSet<&str> {
+            const TABLE_NAMES: &[&str] =
+                &["dependencies", "dev-dependencies", "build-dependencies"];
+            let mut names = std::collections::BTreeSet::new();
+            let Some(root) = manifest.as_table() else {
+                return names;
+            };
+            for table_name in TABLE_NAMES {
+                if let Some(dependencies) = root.get(*table_name).and_then(toml::Value::as_table) {
+                    names.extend(dependencies.keys().map(String::as_str));
+                }
+            }
+            if let Some(targets) = root.get("target").and_then(toml::Value::as_table) {
+                for target in targets.values().filter_map(toml::Value::as_table) {
+                    for table_name in TABLE_NAMES {
+                        if let Some(dependencies) =
+                            target.get(*table_name).and_then(toml::Value::as_table)
+                        {
+                            names.extend(dependencies.keys().map(String::as_str));
+                        }
+                    }
+                }
+            }
+            names
+        }
+
+        let parser_probe: toml::Value = toml::from_str(
+            "[dependencies]\nworkspace.workspace = true\nagent_ui.workspace = true\n\
+             [target.'cfg(target_os = \"linux\")'.dependencies]\nlivekit_client.workspace = true\n",
+        )
+        .expect("the dependency-parser probe must be valid TOML");
+        let parsed_probe = dependency_names(&parser_probe);
+        for expected in ["workspace", "agent_ui", "livekit_client"] {
+            assert!(
+                parsed_probe.contains(expected),
+                "OMEGA-DELTA-0281: the manifest parser missed direct dependency `{expected}`"
+            );
+        }
+
+        let manifest_source = read_repository_file(EVAL_CLI_MANIFEST_PATH);
+        let manifest: toml::Value = toml::from_str(&manifest_source)
+            .expect("OMEGA-DELTA-0281: eval_cli manifest must be valid TOML");
+        let dependencies = dependency_names(&manifest);
+        let offenders = EVAL_CLI_FORBIDDEN_DIRECT_DEPENDENCIES
+            .iter()
+            .copied()
+            .filter(|dependency| dependencies.contains(dependency))
+            .collect::<Vec<_>>();
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0281: eval_cli regained forbidden direct dependencies: {offenders:?}. \
+             Keep the production evaluator headless; do not restore the desktop UI, workspace, \
+             terminal-view, or LiveKit/WebRTC graph."
+        );
     }
 }

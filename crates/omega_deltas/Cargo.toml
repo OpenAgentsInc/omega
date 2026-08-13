@@ -23,6 +23,7 @@ sha2.workspace = true
 omega_exo_episode.workspace = true
 omega_exo_lane.workspace = true
 omega_exo_log.workspace = true
+toml.workspace = true
 
 # OMEGA-DELTA-0203. The delegable-agent catalog, so the check that every listed
 # agent can be started reads the list itself rather than a copy of it. Another

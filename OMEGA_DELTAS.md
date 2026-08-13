@@ -10904,3 +10904,20 @@ and queue governance wakeups.
 - **Enforced by:** `nautilus_governance`, `nautilus_sidecar`,
   `trading_workspace_ui`, the operator contract, and
   `nautilus_soak_is_immutable_reconciled_and_zero_nudge` in `omega_deltas`.
+
+### OMEGA-DELTA-0281 — The production eval CLI remains headless
+
+Omega's `eval_cli` is the production evaluator embedded in One agent-computer
+images. It remains a headless tool: its manifest must not directly depend on
+the desktop editor, workspace UI, terminal presentation, themes, settings UI,
+audio, LiveKit, or WebRTC graph. Those dependencies previously made a headless
+Linux build compile the full desktop media stack and reintroduced unrelated
+C++, ALSA, and GLib requirements.
+
+The check parses the root and target-specific Cargo dependency tables rather
+than matching manifest text. Adding a forbidden dependency under a platform
+condition, dev dependency, or build dependency therefore fails the same
+tracked pre-push policy gate as adding it to the ordinary dependency table.
+
+- **Enforced by:** `eval_cli_direct_dependencies_remain_headless` in
+  `omega_deltas`, run by `script/omega-preflight` on every tracked push.
