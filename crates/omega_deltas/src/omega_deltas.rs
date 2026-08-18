@@ -1809,6 +1809,28 @@ pub fn repository_path(relative: &str) -> std::path::PathBuf {
         .join(relative)
 }
 
+/// Read a file as UTF-8 text with line endings normalized to `\n`.
+///
+/// `std::fs::read_to_string` preserves the working tree's line endings, which
+/// are CRLF on a Windows checkout (`core.autocrlf`). Several checks below match
+/// `\n`-suffixed literals, parse `---\n` frontmatter, and read JSON or text
+/// whose content is unchanged by line endings but whose bytes differ, so a CRLF
+/// checkout would fail them even though the tree is compliant. Normalizing here
+/// keeps every check correct on every platform.
+pub fn read_text(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    std::fs::read_to_string(path.as_ref()).map(|text| text.replace("\r\n", "\n"))
+}
+
+/// Read a file as bytes with CRLF line endings normalized to LF.
+///
+/// Content-pinned digests (artwork, evidence manifests, displayed corpora) are
+/// reviewed on a Linux checkout, so their pinned hashes are computed over LF
+/// bytes. A Windows checkout rewrites the same text to CRLF; normalizing before
+/// hashing keeps the digest comparison honest across platforms.
+pub fn read_bytes_normalized(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<u8>> {
+    read_text(path).map(|text| text.into_bytes())
+}
+
 /// Parse the shipped default settings, which are JSONC: `//` comments and
 /// trailing commas, neither of which `serde_json` accepts.
 ///
@@ -1822,7 +1844,7 @@ pub fn repository_path(relative: &str) -> std::path::PathBuf {
 /// Returns an error when the file cannot be read or does not parse.
 pub fn default_settings() -> Result<serde_json::Value, String> {
     let path = repository_path(DEFAULT_SETTINGS_PATH);
-    let raw = std::fs::read_to_string(&path)
+    let raw = read_text(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     serde_json::from_str(&strip_jsonc(&raw))
         .map_err(|error| format!("cannot parse {}: {error}", path.display()))
@@ -1991,7 +2013,7 @@ pub fn shipped_theme_names() -> Result<std::collections::BTreeSet<String>, Strin
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
-            let raw = std::fs::read_to_string(&path)
+            let raw = read_text(&path)
                 .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
             let value: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
                 .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
@@ -2031,7 +2053,7 @@ pub const RC_BUNDLE_SCRIPT_PATH: &str = "script/bundle-omega-rc";
 /// If the policy file is unreadable or is not valid JSON.
 pub fn brand_policy() -> Result<serde_json::Value, String> {
     let path = repository_path(BRAND_GATE_POLICY_PATH);
-    let raw = std::fs::read_to_string(&path)
+    let raw = read_text(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     serde_json::from_str(&raw).map_err(|error| format!("cannot parse {}: {error}", path.display()))
 }
@@ -2302,7 +2324,7 @@ pub fn for_each_source_file(
             if !matches {
                 continue;
             }
-            let Ok(source) = std::fs::read_to_string(&path) else {
+            let Ok(source) = read_text(&path) else {
                 continue;
             };
             visit(&path, &source);
@@ -2400,7 +2422,7 @@ pub fn embedded_asset_inventory() -> Vec<String> {
                     continue;
                 }
                 if let Ok(relative) = normalize_path(&path).strip_prefix(&repository) {
-                    files.insert(relative.display().to_string());
+                    files.insert(relative.display().to_string().replace('\\', "/"));
                 }
             }
         }
@@ -3083,7 +3105,8 @@ pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseR
         let relative = normalize_path(path).strip_prefix(&repository).map_or_else(
             |_| path.display().to_string(),
             |tail| tail.display().to_string(),
-        );
+        )
+        .replace('\\', "/");
         let is_test_file = is_test_path(&relative);
         let skipped = if is_test_file {
             std::collections::BTreeSet::new()
@@ -3134,7 +3157,7 @@ pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseR
 
     for relative in embedded_asset_inventory() {
         read.embedded += 1;
-        let Ok(source) = std::fs::read_to_string(repository_path(&relative)) else {
+        let Ok(source) = read_text(repository_path(&relative)) else {
             continue;
         };
         if brand_hits(&source, policy).is_empty() {
@@ -3933,7 +3956,7 @@ mod tests {
                 if path.ends_with("omega_deltas.rs") {
                     continue;
                 }
-                let Ok(source) = std::fs::read_to_string(&path) else {
+                let Ok(source) = read_text(&path) else {
                     continue;
                 };
                 for (delta, needle) in FORBIDDEN_SOURCE_STRINGS {
@@ -3957,7 +3980,7 @@ mod tests {
         let mut offenders = Vec::new();
         for (relative_path, needle) in FORBIDDEN_RESTRICTED_MODE_UI {
             let path = repository_path(relative_path);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             if source.contains(needle) {
                 offenders.push(format!("{needle:?} in {}", path.display()));
@@ -3975,7 +3998,7 @@ mod tests {
     #[test]
     fn title_bar_identity_entry_opens_local_identity_home() {
         let path = repository_path("crates/title_bar/src/title_bar.rs");
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         assert!(
             source.contains("Button::new(\"omega_identity\", \"Omega Identity\")")
@@ -4004,13 +4027,13 @@ mod tests {
         ] {
             let path = crate_root.join(relative_path);
             source.push_str(
-                &std::fs::read_to_string(&path)
+                &read_text(&path)
                     .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display())),
             );
         }
         let agent_panel_path = repository_path("crates/agent_ui/src/agent_panel.rs");
         source.push_str(
-            &std::fs::read_to_string(&agent_panel_path).unwrap_or_else(|error| {
+            &read_text(&agent_panel_path).unwrap_or_else(|error| {
                 panic!("cannot read {}: {error}", agent_panel_path.display())
             }),
         );
@@ -4079,7 +4102,7 @@ mod tests {
             keymaps.len()
         );
         for path in keymaps {
-            let Ok(source) = std::fs::read_to_string(&path) else {
+            let Ok(source) = read_text(&path) else {
                 offenders.push(format!("{} is unreadable", path.display()));
                 continue;
             };
@@ -4108,7 +4131,7 @@ mod tests {
     /// build graph). All three are checked per crate.
     #[test]
     fn removed_editor_crates_stay_removed() {
-        let manifest = std::fs::read_to_string(repository_path("Cargo.toml"))
+        let manifest = read_text(repository_path("Cargo.toml"))
             .expect("the workspace manifest is readable");
         let mut offenders: Vec<String> = Vec::new();
         for name in REMOVED_EDITOR_CRATES {
@@ -4197,7 +4220,7 @@ mod tests {
     #[test]
     fn protected_recovery_offers_a_different_action() {
         let path = repository_path("crates/onboarding/src/identity_section.rs");
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         for required in [
@@ -4238,7 +4261,7 @@ mod tests {
             } = binding;
 
             let path = repository_path(keymap);
-            let raw = std::fs::read_to_string(&path)
+            let raw = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             let sections: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
                 .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
@@ -4279,7 +4302,7 @@ mod tests {
             );
 
             let declaration_path = repository_path(declared_in);
-            let declaration = std::fs::read_to_string(&declaration_path).unwrap_or_else(|error| {
+            let declaration = read_text(&declaration_path).unwrap_or_else(|error| {
                 panic!("cannot read {}: {error}", declaration_path.display())
             });
             assert!(
@@ -4314,7 +4337,7 @@ mod tests {
     #[test]
     fn aiur_is_a_single_dark_theme() {
         let path = repository_path("assets/themes/aiur/aiur.json");
-        let raw = std::fs::read_to_string(&path)
+        let raw = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let family: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
             .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
@@ -4396,7 +4419,7 @@ mod tests {
             ("crates/theme/src/theme.rs", "DEFAULT_DARK_THEME"),
         ] {
             let path = repository_path(relative_path);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             let value = string_constant(&source, constant).unwrap_or_else(|| {
                 panic!("{constant} is not declared as a string literal in {relative_path}")
@@ -4443,7 +4466,7 @@ mod tests {
 
         for settings_file in SHIPPED_THEME_SETTINGS_FILES {
             let settings_path = repository_path(settings_file);
-            let raw = std::fs::read_to_string(&settings_path)
+            let raw = read_text(&settings_path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", settings_path.display()));
             let settings: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
                 .unwrap_or_else(|error| {
@@ -4476,7 +4499,7 @@ mod tests {
                 );
 
                 let path = repository_path(relative_path);
-                let source = std::fs::read_to_string(&path)
+                let source = read_text(&path)
                     .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
                 let declared = string_constant(&source, constant).unwrap_or_else(|| {
                     panic!("{constant} is not declared as a string literal in {relative_path}")
@@ -4555,7 +4578,7 @@ mod tests {
     #[test]
     fn the_service_isolation_test_still_asserts_the_registered_defaults() {
         let path = repository_path(SERVICE_ISOLATION_TEST_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let compact = without_whitespace(&source);
 
@@ -4595,7 +4618,7 @@ mod tests {
             .expect("icon_theme is present in the shipped defaults");
 
         let path = repository_path(DEFAULT_ICON_THEME_SOURCE);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let declared = string_constant(&source, "DEFAULT_ICON_THEME_NAME").unwrap_or_else(|| {
             panic!("DEFAULT_ICON_THEME_NAME is not a string literal in {DEFAULT_ICON_THEME_SOURCE}")
@@ -4660,7 +4683,7 @@ mod tests {
 
         let mut offenders: Vec<String> = Vec::new();
         for path in &fragments {
-            let source = std::fs::read_to_string(path)
+            let source = read_text(path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             for (key, value) in plist_fragment_values(&source) {
                 for hit in brand_hits(&value, &policy) {
@@ -4690,7 +4713,7 @@ mod tests {
     fn the_plist_fragment_parser_reaches_real_values() {
         let policy = brand_policy().expect("brand gate policy parses");
         let path = repository_path("crates/omega/resources/info/Permissions.plist");
-        let source = std::fs::read_to_string(&path).expect("Permissions.plist is readable");
+        let source = read_text(&path).expect("Permissions.plist is readable");
         let values = plist_fragment_values(&source);
         let microphone = values
             .iter()
@@ -4772,7 +4795,7 @@ mod tests {
 
         let enum_source =
             repository_path(icons["enum_source"].as_str().expect("icons.enum_source"));
-        let source = std::fs::read_to_string(&enum_source)
+        let source = read_text(&enum_source)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", enum_source.display()));
         let variants = icon_name_variants(&source);
         assert!(
@@ -4821,7 +4844,7 @@ mod tests {
         for (relative, expected) in marks {
             let expected = expected.as_str().expect("a pinned digest is a string");
             let path = repository_path(relative);
-            let Ok(bytes) = std::fs::read(&path) else {
+            let Ok(bytes) = read_bytes_normalized(&path) else {
                 offenders.push(format!("{relative} is missing"));
                 continue;
             };
@@ -5095,7 +5118,7 @@ mod tests {
     #[test]
     fn blocked_public_copy_appears_nowhere_in_the_tree() {
         let path = repository_path(COMPATIBILITY_ALLOWLIST_PATH);
-        let raw = std::fs::read_to_string(&path)
+        let raw = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let allowlist: serde_json::Value =
             serde_json::from_str(&raw).expect("compatibility allow-list parses");
@@ -5141,7 +5164,8 @@ mod tests {
                     .map_or_else(
                         |_| normalized.display().to_string(),
                         |tail| tail.display().to_string(),
-                    );
+                    )
+                    .replace('\\', "/");
                 if corpus.contains(relative.as_str()) {
                     return;
                 }
@@ -5190,7 +5214,7 @@ mod tests {
         }
 
         let bundle = repository_path(RC_BUNDLE_SCRIPT_PATH);
-        let script = std::fs::read_to_string(&bundle)
+        let script = read_text(&bundle)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", bundle.display()));
         for required in [
             "verify_source_brand\n",
@@ -5222,7 +5246,7 @@ mod tests {
     #[test]
     fn the_packaging_path_staples_the_application() {
         let path = repository_path(RC_BUNDLE_SCRIPT_PATH);
-        let script = std::fs::read_to_string(&path)
+        let script = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         for required in [
@@ -5256,7 +5280,7 @@ mod tests {
         );
 
         let record = repository_path("crates/app_identity/fixtures/release_record_v1.json");
-        let fixture = std::fs::read_to_string(&record)
+        let fixture = read_text(&record)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", record.display()));
         let parsed: serde_json::Value =
             serde_json::from_str(&fixture).expect("release record fixture parses");
@@ -5272,7 +5296,7 @@ mod tests {
     #[test]
     fn the_first_party_agent_identity_is_omega_agent() {
         let agent_path = repository_path("crates/agent/src/agent.rs");
-        let agent_source = std::fs::read_to_string(&agent_path)
+        let agent_source = read_text(&agent_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", agent_path.display()));
         assert!(
             agent_source.contains(r#"AgentId::new("Omega Agent")"#),
@@ -5280,7 +5304,7 @@ mod tests {
         );
 
         let agent_ui_path = repository_path("crates/agent_ui/src/agent_ui.rs");
-        let agent_ui_source = std::fs::read_to_string(&agent_ui_path)
+        let agent_ui_source = read_text(&agent_ui_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", agent_ui_path.display()));
         for required in [
             r#"Self::NativeAgent => "Omega Agent".into()"#,
@@ -5307,7 +5331,7 @@ mod tests {
             ),
         ] {
             let path = repository_path(relative_path);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             assert!(
                 source.contains(required),
@@ -5384,7 +5408,8 @@ mod tests {
                     .strip_prefix(&repository_root)
                     .unwrap_or(path)
                     .display()
-                    .to_string();
+                    .to_string()
+                    .replace('\\', "/");
 
                 // The name before the contents. A renamed file reads as clean
                 // either way, so a content scan cannot tell `zed-agent.md`
@@ -5443,7 +5468,7 @@ mod tests {
             .expect("first_party_agent.identity is a string");
 
         let path = repository_path("crates/agent/src/agent.rs");
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let telemetry_body = source
             .split_once("fn telemetry_id(&self) -> SharedString {")
@@ -5480,7 +5505,7 @@ mod tests {
     #[test]
     fn a_fresh_window_opens_on_the_agent() {
         let path = repository_path("crates/omega/src/main.rs");
-        let source = std::fs::read_to_string(&path).expect("zed main is readable");
+        let source = read_text(&path).expect("zed main is readable");
 
         assert!(
             !source.contains("Editor::new_file("),
@@ -5520,7 +5545,7 @@ mod tests {
     #[test]
     fn full_auto_is_folded_into_the_chat_panel() {
         let zed_path = repository_path("crates/omega/src/zed.rs");
-        let zed = std::fs::read_to_string(&zed_path).expect("zed.rs is readable");
+        let zed = read_text(&zed_path).expect("zed.rs is readable");
         assert!(
             !zed.contains("FullAutoPanel"),
             "{} registers a Full Auto dock panel again. The owner asked for \
@@ -5530,7 +5555,7 @@ mod tests {
         );
 
         let panel_path = repository_path("crates/agent_ui/src/agent_panel.rs");
-        let panel = std::fs::read_to_string(&panel_path).expect("agent panel is readable");
+        let panel = read_text(&panel_path).expect("agent panel is readable");
         assert!(
             panel.contains("FullAutoPanel::new("),
             "{} no longer constructs the Full Auto surface. Folding it in is \
@@ -5554,7 +5579,7 @@ mod tests {
         }
 
         let lib_path = repository_path("crates/full_auto_ui/src/full_auto_ui.rs");
-        let lib = std::fs::read_to_string(&lib_path).expect("full_auto_ui is readable");
+        let lib = read_text(&lib_path).expect("full_auto_ui is readable");
         assert!(
             !lib.contains("pub use panel::{init"),
             "{} exports a panel init again; there is no dock panel to \
@@ -5592,6 +5617,7 @@ mod tests {
             let display = path
                 .display()
                 .to_string()
+                .replace('\\', "/")
                 .rsplit("crates/")
                 .next()
                 .unwrap_or_default()
@@ -5915,7 +5941,7 @@ mod tests {
         // The shell gate carries the same rule, on the same three streams, or
         // the source and packaged sides disagree about what is inventoried.
         let verifier =
-            std::fs::read_to_string(repository_path(BRAND_VERIFIER_PATH)).expect("brand verifier");
+            read_text(repository_path(BRAND_VERIFIER_PATH)).expect("brand verifier");
         assert!(
             verifier.contains("def is_command_form("),
             "OMEGA-DELTA-0044: {BRAND_VERIFIER_PATH} does not carry the \
@@ -5947,7 +5973,7 @@ mod tests {
     #[test]
     fn the_cli_prompt_names_our_own_binary() {
         let path = repository_path(CLI_MAIN_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let prompt = source
             .split("fn prompt_open_behavior()")
@@ -6002,7 +6028,7 @@ mod tests {
         );
 
         let path = repository_path(DELTA_REGISTRY_PATH);
-        let registry = std::fs::read_to_string(&path).expect("delta registry is readable");
+        let registry = read_text(&path).expect("delta registry is readable");
         let mut seen_headings = std::collections::BTreeSet::new();
         let repeated_headings: Vec<String> = registry
             .lines()
@@ -6027,7 +6053,7 @@ mod tests {
     #[test]
     fn the_registry_and_the_checks_agree() {
         let path = repository_path(DELTA_REGISTRY_PATH);
-        let registry = std::fs::read_to_string(&path).expect("delta registry is readable");
+        let registry = read_text(&path).expect("delta registry is readable");
 
         // Match the heading that opens an entry, not any mention of the ID.
         // A substring match would accept "OMEGA-DELTA-0001 was withdrawn".
@@ -6070,7 +6096,7 @@ mod tests {
     #[test]
     fn executor_disclosure_is_a_typed_record_not_a_label_string() {
         let path = repository_path(EXECUTOR_DISCLOSURE_RECORD_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let fields = struct_fields(&source, "ExecutorDisclosure");
@@ -6113,7 +6139,7 @@ mod tests {
     fn the_routing_law_has_no_clock_no_randomness_and_no_hash_order() {
         for path in [ROUTE_DECISION_PATH, ROUTER_DISPATCH_PATH] {
             let full = repository_path(path);
-            let source = std::fs::read_to_string(&full)
+            let source = read_text(&full)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", full.display()));
             let reaches_current_route = if path == ROUTE_DECISION_PATH {
                 source.contains("pub fn route(inputs: &RouteInputs) -> RouteDecision")
@@ -6152,7 +6178,7 @@ mod tests {
     #[test]
     fn the_router_owns_no_execution_and_starts_no_run() {
         let path = repository_path(ROUTER_DISPATCH_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         assert!(
             source.contains("impl AgentConnection for OmegaAgentConnection"),
@@ -6181,7 +6207,7 @@ mod tests {
     #[test]
     fn the_router_delegates_every_agent_connection_method() {
         let path = repository_path(ROUTER_DISPATCH_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let header = "impl AgentConnection for OmegaAgentConnection {\n";
@@ -6233,7 +6259,7 @@ mod tests {
     #[test]
     fn the_route_decision_is_a_record_that_round_trips() {
         let path = repository_path(ROUTE_DECISION_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let fields = struct_fields(&source, "RouteDecision");
@@ -6302,7 +6328,7 @@ mod tests {
     #[test]
     fn the_thread_surface_renders_the_executor_line_from_the_record() {
         let path = repository_path(THREAD_VIEW_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         assert!(
@@ -6458,7 +6484,7 @@ mod tests {
     #[test]
     fn the_disclosure_is_an_extension_trait_and_not_a_fork_of_the_shared_thread() {
         let path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         assert!(
             source.contains("impl ThreadExecutorDisclosure for AcpThread"),
@@ -6509,7 +6535,7 @@ mod tests {
     #[test]
     fn a_measured_digest_cannot_be_built_from_a_string() {
         let path = repository_path(MEASURED_DIGEST_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let header = "impl MeasuredDigest {\n";
@@ -6631,7 +6657,7 @@ mod tests {
     #[test]
     fn the_external_harness_launch_path_is_gated_on_a_measurement() {
         let path = repository_path(AGENT_SERVER_STORE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let gate = source
@@ -6704,7 +6730,7 @@ mod tests {
     #[test]
     fn the_enforcement_path_writes_receipts_only_from_decisions() {
         let path = repository_path(HARNESS_MAINTENANCE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         assert!(
@@ -6743,7 +6769,7 @@ mod tests {
     #[test]
     fn a_full_auto_dispatch_carries_no_evidence() {
         let path = repository_path(FULL_AUTO_DISPATCH_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let fields = struct_fields(&source, "FullAutoDispatch");
@@ -6828,7 +6854,7 @@ mod tests {
     #[test]
     fn a_thread_renders_the_receipt_chain_of_its_linked_run() {
         let path = repository_path(THREAD_VIEW_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         assert!(
@@ -6862,7 +6888,7 @@ mod tests {
     #[test]
     fn the_thread_run_link_is_a_projection_and_not_a_second_authority() {
         let thread_view_path = repository_path(THREAD_VIEW_PATH);
-        let thread_view = std::fs::read_to_string(&thread_view_path)
+        let thread_view = read_text(&thread_view_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_view_path.display()));
         assert!(
             thread_view.contains("omega_run_records: Option<ThreadRunRecords>,"),
@@ -6885,7 +6911,7 @@ mod tests {
         }
 
         let link_path = repository_path(THREAD_RUN_LINK_PATH);
-        let link = std::fs::read_to_string(&link_path)
+        let link = read_text(&link_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", link_path.display()));
         // Tests are excluded (they deliberately name refusals), and so are
         // comments: an earlier version of this check passed after the
@@ -7049,7 +7075,7 @@ mod tests {
     #[test]
     fn the_front_door_requires_a_working_folder_before_creating_threads() {
         let path = repository_path(AGENT_PANEL_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         for name in WORKING_FOLDER_REQUIRED_THREAD_FNS
@@ -7166,7 +7192,7 @@ mod tests {
     fn the_primary_new_thread_chord_reaches_the_workspace() {
         for (keymap, chord) in PRIMARY_NEW_THREAD_CHORDS {
             let path = repository_path(keymap);
-            let raw = std::fs::read_to_string(&path)
+            let raw = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             let sections: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
                 .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
@@ -7198,7 +7224,7 @@ mod tests {
     fn the_new_thread_chord_is_window_global() {
         for (keymap, chord) in NEW_THREAD_CHORDS {
             let path = repository_path(keymap);
-            let raw = std::fs::read_to_string(&path)
+            let raw = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             let sections: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
                 .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
@@ -7273,7 +7299,7 @@ mod tests {
     #[test]
     fn startup_provisions_identity_in_the_background_and_opens_the_front_door() {
         let startup_path = repository_path(STARTUP_PATH);
-        let startup = std::fs::read_to_string(&startup_path)
+        let startup = read_text(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
         let restore = function_body(&startup, "restore_or_create_workspace").unwrap_or_else(|| {
             panic!(
@@ -7308,7 +7334,7 @@ mod tests {
         );
 
         let coordinator_path = repository_path(IDENTITY_STARTUP_PATH);
-        let coordinator = std::fs::read_to_string(&coordinator_path)
+        let coordinator = read_text(&coordinator_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", coordinator_path.display()));
         assert!(
             coordinator.contains("provision_for_process_start"),
@@ -7353,7 +7379,7 @@ mod tests {
             );
         }
         let onboarding_path = repository_path(ONBOARDING_PATH);
-        let onboarding = std::fs::read_to_string(&onboarding_path)
+        let onboarding = read_text(&onboarding_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", onboarding_path.display()));
         for removed in ["show_onboarding_view", "OnboardingMode", "new_first_run"] {
             assert!(
@@ -7372,7 +7398,7 @@ mod tests {
         // everything else by name. Same shape OMEGA-DELTA-0159 pins for the
         // hosted lane, held here for the startup lane.
         let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
-        let custody = std::fs::read_to_string(&custody_path)
+        let custody = read_text(&custody_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", custody_path.display()));
         let provision =
             function_body(&custody, "provision_for_process_start").unwrap_or_else(|| {
@@ -7425,7 +7451,7 @@ mod tests {
     fn a_profile_with_no_identity_files_adopts_the_custodied_identity_and_says_so() {
         let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
         let custody = uncommented(
-            &std::fs::read_to_string(&custody_path)
+            &read_text(&custody_path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", custody_path.display())),
         );
         let resolve = function_body(&custody, "resolve_locked").unwrap_or_else(|| {
@@ -7463,7 +7489,7 @@ mod tests {
 
         let section_path = repository_path(IDENTITY_SECTION_PATH);
         let section = uncommented(
-            &std::fs::read_to_string(&section_path)
+            &read_text(&section_path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", section_path.display())),
         );
         let presentation = function_body(&section, "durable_presentation").unwrap_or_else(|| {
@@ -7565,7 +7591,7 @@ mod tests {
     #[test]
     fn the_router_is_wired_into_the_native_agent_entry() {
         let factory_path = repository_path(AGENT_SERVER_FACTORY_PATH);
-        let factory = std::fs::read_to_string(&factory_path)
+        let factory = read_text(&factory_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", factory_path.display()));
         assert!(
             factory.contains("omega_router::OmegaRouterServer::new("),
@@ -7577,7 +7603,7 @@ mod tests {
         );
 
         let disclosure_path = repository_path(THREAD_VIEW_PATH);
-        let disclosure = std::fs::read_to_string(&disclosure_path)
+        let disclosure = read_text(&disclosure_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", disclosure_path.display()));
         // OMEGA-DELTA-0055 replaced the assertion that used to be here. It
         // required the thread surface to render the executor pin control,
@@ -7595,7 +7621,7 @@ mod tests {
             disclosure_path.display()
         );
         let router_path = repository_path(ROUTE_DECISION_PATH);
-        let law = std::fs::read_to_string(&router_path)
+        let law = read_text(&router_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
         assert!(
             law.contains("fn route_current(inputs: &RouteInputs) -> RouteDecision")
@@ -7626,6 +7652,7 @@ mod tests {
             let display = path
                 .display()
                 .to_string()
+                .replace('\\', "/")
                 .rsplit("crates/")
                 .next()
                 .unwrap_or_default()
@@ -7710,6 +7737,7 @@ mod tests {
             let display = path
                 .display()
                 .to_string()
+                .replace('\\', "/")
                 .rsplit("crates/")
                 .next()
                 .unwrap_or_default()
@@ -7773,7 +7801,7 @@ mod tests {
     #[test]
     fn the_send_during_turn_law_answers_for_every_executor_class() {
         let path = repository_path(SEND_DURING_TURN_PATH);
-        let source = std::fs::read_to_string(&path).expect("the send law is readable");
+        let source = read_text(&path).expect("the send law is readable");
         for token in SEND_LAW_EXECUTOR_TOKENS {
             assert!(
                 source.contains(&format!("ExecutorClass::{token}")),
@@ -7795,7 +7823,7 @@ mod tests {
     fn the_queue_law_and_its_journal_read_nothing_but_their_inputs() {
         for relative in [SEND_DURING_TURN_PATH, SEND_QUEUE_JOURNAL_PATH] {
             let path = repository_path(relative);
-            let source = std::fs::read_to_string(&path).expect("readable");
+            let source = read_text(&path).expect("readable");
             // The test module is allowed a temporary directory and its own
             // scaffolding; the law is not.
             let production = source
@@ -7823,7 +7851,7 @@ mod tests {
     #[test]
     fn the_composer_decides_a_mid_turn_send_through_the_law() {
         let path = repository_path(CONVERSATION_SEND_PATH);
-        let source = std::fs::read_to_string(&path).expect("the composer is readable");
+        let source = read_text(&path).expect("the composer is readable");
         let message_queue =
             read_repository_file("crates/agent_ui/src/conversation_view/message_queue.rs");
         assert!(
@@ -7854,7 +7882,7 @@ mod tests {
     #[test]
     fn the_send_queue_is_a_durable_record_and_not_renderer_memory() {
         let path = repository_path(SEND_QUEUE_JOURNAL_PATH);
-        let source = std::fs::read_to_string(&path).expect("the journal is readable");
+        let source = read_text(&path).expect("the journal is readable");
         assert!(
             source.contains("openagents.omega.agent_send_queue.v1"),
             "OMEGA-DELTA-0035: the durable queue must carry a schema, so a              foreign document is refused rather than adopted."
@@ -7887,7 +7915,7 @@ mod tests {
     #[test]
     fn the_front_door_page_renders_decisions_it_did_not_make() {
         let path = repository_path(EXTERNAL_AGENTS_PAGE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         assert!(
@@ -7931,7 +7959,7 @@ mod tests {
     #[test]
     fn a_withheld_control_carries_a_sentence_all_the_way_to_the_widget() {
         let decisions = repository_path(HARNESS_FRONT_DOOR_PATH);
-        let source = std::fs::read_to_string(&decisions)
+        let source = read_text(&decisions)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", decisions.display()));
         assert!(
             source.contains("Unavailable { reason: String }")
@@ -7944,7 +7972,7 @@ mod tests {
         );
 
         let page = repository_path(EXTERNAL_AGENTS_PAGE_PATH);
-        let rendered = std::fs::read_to_string(&page)
+        let rendered = read_text(&page)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", page.display()));
         assert!(
             rendered.contains("state.launch.reason()"),
@@ -7974,7 +8002,7 @@ mod tests {
     #[test]
     fn the_pin_ledger_has_a_writer_the_owner_can_reach() {
         let filesystem = repository_path(HARNESS_MAINTENANCE_PATH);
-        let source = std::fs::read_to_string(&filesystem)
+        let source = read_text(&filesystem)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", filesystem.display()));
         for writer in [
             "pub async fn pin_installed_harness(",
@@ -7997,7 +8025,7 @@ mod tests {
         );
 
         let page = repository_path(EXTERNAL_AGENTS_PAGE_PATH);
-        let rendered = std::fs::read_to_string(&page)
+        let rendered = read_text(&page)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", page.display()));
         assert!(
             rendered.contains("this.pin_harness(&id, cx)")
@@ -8018,7 +8046,7 @@ mod tests {
     #[test]
     fn the_package_manager_launch_path_is_gated_on_the_pin() {
         let path = repository_path(AGENT_SERVER_STORE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let gate = source
@@ -8069,7 +8097,7 @@ mod tests {
     #[test]
     fn resolving_a_channel_is_a_recorded_action_that_gates_the_offer() {
         let filesystem = repository_path(HARNESS_MAINTENANCE_PATH);
-        let source = std::fs::read_to_string(&filesystem)
+        let source = read_text(&filesystem)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", filesystem.display()));
         assert!(
             source.contains("MaintenanceAction::ResolveChannel"),
@@ -8087,7 +8115,7 @@ mod tests {
         );
 
         let store = repository_path(AGENT_SERVER_STORE_PATH);
-        let launch = std::fs::read_to_string(&store)
+        let launch = read_text(&store)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", store.display()));
         let resolve = launch.find("resolve_channel(").unwrap_or_else(|| {
             panic!(
@@ -8126,7 +8154,7 @@ mod tests {
     #[test]
     fn the_front_door_measures_the_tree_the_launch_path_gates() {
         let path = repository_path(AGENT_SERVER_STORE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         // Tests call it freely; production must not. Two derivations of the
         // measured tree outside the test module are the launch path's and the
@@ -8171,7 +8199,7 @@ mod tests {
     fn the_uninstall_path_removes_omega_and_names_no_competitor() {
         let policy = brand_policy().expect("brand policy parses");
         let script_path = repository_path(UNINSTALL_SCRIPT_PATH);
-        let script = std::fs::read_to_string(&script_path)
+        let script = read_text(&script_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", script_path.display()));
 
         let hits = brand_hits(&script, &policy);
@@ -8195,7 +8223,7 @@ mod tests {
 
         // Every root the plan removes is read from the function that writes it.
         let plan_path = repository_path(UNINSTALL_PLAN_PATH);
-        let plan = std::fs::read_to_string(&plan_path)
+        let plan = read_text(&plan_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", plan_path.display()));
         let constructor = plan
             .split("pub fn from_installed_paths")
@@ -8223,18 +8251,23 @@ mod tests {
             reason = "A gate that only reads the script cannot tell whether it \
                       refuses; this one runs it. There is no async runtime here."
         )]
-        let output = std::process::Command::new("sh")
-            .arg(&script_path)
-            .env("OMEGA_UNINSTALL_PRODUCT", "Omega RC")
-            .env("OMEGA_UNINSTALL_PATHS", "")
-            .output()
-            .expect("run the uninstall script");
-        assert!(
-            !output.status.success(),
-            "OMEGA-DELTA-0036: the uninstall script accepted an empty plan. \
-             Refusing is the safe direction; every default this file has ever \
-             had belonged to somebody else's product."
-        );
+        // The script is POSIX; Windows cannot execute it directly. The static
+        // checks above still hold the tree to the plan it refuses, so the
+        // run-for-real proof is exercised on Unix where the script can run.
+        if cfg!(unix) {
+            let output = std::process::Command::new("sh")
+                .arg(&script_path)
+                .env("OMEGA_UNINSTALL_PRODUCT", "Omega RC")
+                .env("OMEGA_UNINSTALL_PATHS", "")
+                .output()
+                .expect("run the uninstall script");
+            assert!(
+                !output.status.success(),
+                "OMEGA-DELTA-0036: the uninstall script accepted an empty plan. \
+                 Refusing is the safe direction; every default this file has ever \
+                 had belonged to somebody else's product."
+            );
+        }
     }
 
     /// OMEGA-DELTA-0043. `--uninstall` plans the installation, not one file.
@@ -8255,7 +8288,7 @@ mod tests {
     #[test]
     fn the_uninstall_plan_names_the_installation_root() {
         let plan_path = repository_path(UNINSTALL_PLAN_PATH);
-        let plan = std::fs::read_to_string(&plan_path)
+        let plan = read_text(&plan_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", plan_path.display()));
         assert!(
             plan.contains("pub fn installation_root("),
@@ -8276,7 +8309,7 @@ mod tests {
         );
 
         let main_path = repository_path(CLI_MAIN_PATH);
-        let main = std::fs::read_to_string(&main_path)
+        let main = read_text(&main_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", main_path.display()));
         let call = main
             .split("from_installed_paths(")
@@ -8308,7 +8341,7 @@ mod tests {
     #[test]
     fn outbound_attribution_names_omega() {
         let path = repository_path(OPEN_ROUTER_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let titles = source.matches(".header(\"X-Title\"").count();
         assert!(
@@ -8346,9 +8379,9 @@ mod tests {
     #[test]
     fn the_packaged_gate_opens_every_shipped_executable_and_reads_rendered_help() {
         let verifier =
-            std::fs::read_to_string(repository_path(BRAND_VERIFIER_PATH)).expect("brand verifier");
+            read_text(repository_path(BRAND_VERIFIER_PATH)).expect("brand verifier");
         let bundler =
-            std::fs::read_to_string(repository_path(RC_BUNDLE_SCRIPT_PATH)).expect("bundle script");
+            read_text(repository_path(RC_BUNDLE_SCRIPT_PATH)).expect("bundle script");
 
         // Derived, not listed: whatever the packaging script writes into
         // Contents/MacOS is what the gate has to be able to open.
@@ -8508,7 +8541,7 @@ mod tests {
     /// `--self-test` paths carry the behavioural oracles.
     #[test]
     fn the_installed_proof_harness_observes_what_it_records() {
-        let tripwires = std::fs::read_to_string(repository_path(INSTALLED_TRIPWIRE_PATH))
+        let tripwires = read_text(repository_path(INSTALLED_TRIPWIRE_PATH))
             .expect("tripwire collector");
         assert!(
             !tripwires.contains("secrets.token_hex"),
@@ -8539,7 +8572,7 @@ mod tests {
              same in a receipt."
         );
 
-        let observations = std::fs::read_to_string(repository_path(INSTALLED_OBSERVATION_PATH))
+        let observations = read_text(repository_path(INSTALLED_OBSERVATION_PATH))
             .expect("observation collector");
         let appearance = observations
             .split("# ---- appearance ---")
@@ -8561,7 +8594,7 @@ mod tests {
         );
 
         let bundler =
-            std::fs::read_to_string(repository_path(RC_BUNDLE_SCRIPT_PATH)).expect("bundle script");
+            read_text(repository_path(RC_BUNDLE_SCRIPT_PATH)).expect("bundle script");
         assert!(
             !bundler.contains("\"dirty\": False"),
             "OMEGA-DELTA-0039: the release record states `dirty` as a literal. \
@@ -8580,7 +8613,7 @@ mod tests {
     #[test]
     fn the_exo_lane_drives_the_harness_exo_and_not_the_cluster_one() {
         let path = repository_path(EXO_LANE_PIN_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let upstream = source
             .split_once("upstream: \"")
@@ -8598,7 +8631,7 @@ mod tests {
 
         for relative in [EXO_LANE_LAW_PATH, EXO_LANE_PIN_PATH, EXO_CONNECTION_PATH] {
             let path = repository_path(relative);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             let targeted = named_in_code(&source, EXO_CLUSTER_UPSTREAM);
             assert!(
@@ -8622,7 +8655,7 @@ mod tests {
     #[test]
     fn the_exo_lane_puts_no_user_text_before_the_argument_terminator() {
         let path = repository_path(EXO_LANE_COMMAND_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let table = source
             .split_once("pub const ADMITTED_LANE_ARGV")
@@ -8680,7 +8713,7 @@ mod tests {
             EXO_LANE_COMMAND_PATH,
         ] {
             let path = repository_path(relative);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             for (what, token) in EXO_OFF_MACHINE_TOKENS {
                 assert!(
@@ -8696,7 +8729,7 @@ mod tests {
         // The flags that would redirect Exo, checked where they would have to
         // appear to do any harm: the command lines Omega actually builds.
         let command_path = repository_path(EXO_LANE_COMMAND_PATH);
-        let command = std::fs::read_to_string(&command_path)
+        let command = read_text(&command_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", command_path.display()));
         let table = command
             .split_once("pub const ADMITTED_LANE_ARGV")
@@ -8716,7 +8749,7 @@ mod tests {
         // inherited. Without this the check above is satisfied by a lane that
         // simply never looked.
         let connection_path = repository_path(EXO_CONNECTION_PATH);
-        let connection = std::fs::read_to_string(&connection_path)
+        let connection = read_text(&connection_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
         // `OMEGA-DELTA-0129` moved *when* this is asked, not whether. The
         // boundary is real — an off-loopback `EXO_EXOHARNESS_URL` sends the
@@ -8759,7 +8792,7 @@ mod tests {
     fn the_exo_lane_opens_no_path_into_full_auto_authority() {
         for relative in [EXO_CONNECTION_PATH, EXO_LANE_LAW_PATH] {
             let path = repository_path(relative);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             for token in EXO_FULL_AUTO_TOKENS {
                 let named = named_in_code(&source, token);
@@ -8783,7 +8816,7 @@ mod tests {
     #[test]
     fn an_exo_turn_checks_the_pin_and_the_agent_before_it_sends() {
         let path = repository_path(EXO_CONNECTION_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let body = function_body(&source, "observe").unwrap_or_else(|| {
             panic!(
@@ -8819,7 +8852,7 @@ mod tests {
     #[test]
     fn an_exo_turn_streams_cancels_and_requires_exact_one_use_authority() {
         let connection_path = repository_path(EXO_CONNECTION_PATH);
-        let connection = std::fs::read_to_string(&connection_path)
+        let connection = read_text(&connection_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
         let compact_connection = without_whitespace(&connection);
         for token in [
@@ -8837,7 +8870,7 @@ mod tests {
         }
 
         let thread_path = repository_path(THREAD_VIEW_PATH);
-        let thread = std::fs::read_to_string(&thread_path)
+        let thread = read_text(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
         for token in [
             "omega-exo-authorize-self-modification",
@@ -8860,7 +8893,7 @@ mod tests {
     #[test]
     fn the_exo_lane_is_reachable_from_omega_agent() {
         let router_path = repository_path(ROUTER_DISPATCH_PATH);
-        let router = std::fs::read_to_string(&router_path)
+        let router = read_text(&router_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
         assert!(
             router.contains("omega_exo_connection::connect_configured_lane")
@@ -8871,7 +8904,7 @@ mod tests {
         );
 
         let factory_path = repository_path(AGENT_SERVER_FACTORY_PATH);
-        let factory = std::fs::read_to_string(&factory_path)
+        let factory = read_text(&factory_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", factory_path.display()));
         assert!(
             factory.contains("omega_exo_connection::ExoLaneConfig::data_dir_path()"),
@@ -8881,7 +8914,7 @@ mod tests {
         );
 
         let disclosure_path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
-        let disclosure = std::fs::read_to_string(&disclosure_path)
+        let disclosure = read_text(&disclosure_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", disclosure_path.display()));
         assert!(
             disclosure.contains("downcast::<crate::omega_exo_connection::ExoHarnessConnection>()"),
@@ -8905,7 +8938,7 @@ mod tests {
     #[test]
     fn an_exo_thread_has_a_live_workspace_and_exact_runtime_inspector() {
         let thread_path = repository_path(THREAD_VIEW_PATH);
-        let thread = std::fs::read_to_string(&thread_path)
+        let thread = read_text(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
         for token in [
             "omega-exo-workspace-header",
@@ -8925,7 +8958,7 @@ mod tests {
         }
 
         let connection_path = repository_path(EXO_CONNECTION_PATH);
-        let connection = std::fs::read_to_string(&connection_path)
+        let connection = read_text(&connection_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
         for token in [
             "ExoInspectionSnapshot",
@@ -8944,7 +8977,7 @@ mod tests {
         }
 
         let visual_path = repository_path(VISUAL_TEST_RUNNER_PATH);
-        let visual = std::fs::read_to_string(&visual_path)
+        let visual = read_text(&visual_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", visual_path.display()));
         // omega#161 retired the two `omega_exo_workspace_*` scenes with the
         // full-editor surface they photographed; the shipped-surface pair in
@@ -8980,7 +9013,7 @@ mod tests {
     #[test]
     fn zero_base_is_entered_only_from_the_command_line() {
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
-        let mode = std::fs::read_to_string(&mode_path)
+        let mode = read_text(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
 
         // omega#161. The mode is gone, so the way in is gone with it: the
@@ -9021,7 +9054,7 @@ mod tests {
         }
 
         let startup_path = repository_path(STARTUP_PATH);
-        let startup = std::fs::read_to_string(&startup_path)
+        let startup = read_text(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
         assert!(
             startup.contains("zero_base: bool"),
@@ -9035,7 +9068,7 @@ mod tests {
         // zero-base key anywhere in it is the failure, wherever someone nested
         // it.
         let defaults_path = repository_path(DEFAULT_SETTINGS_PATH);
-        let defaults = std::fs::read_to_string(&defaults_path)
+        let defaults = read_text(&defaults_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", defaults_path.display()));
         for key in ["zero_base", "zero-base", "zeroBase"] {
             assert!(
@@ -9062,7 +9095,7 @@ mod tests {
     #[test]
     fn the_transitional_shell_hides_by_filter_and_refusal_until_subtraction_lands() {
         let ui_path = repository_path(ZERO_BASE_UI_PATH);
-        let ui = std::fs::read_to_string(&ui_path)
+        let ui = read_text(&ui_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
         for token in [
             "filter.restrict_to(ADMITTED_NAMESPACES, ADMITTED_ACTIONS)",
@@ -9097,7 +9130,7 @@ mod tests {
         }
 
         let filter_path = repository_path(COMMAND_PALETTE_FILTER_PATH);
-        let filter = std::fs::read_to_string(&filter_path)
+        let filter = read_text(&filter_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", filter_path.display()));
         assert!(
             filter.contains("pub fn restrict_to(") && filter.contains("pub fn clear_restriction("),
@@ -9108,7 +9141,7 @@ mod tests {
         );
 
         let dispatch_path = repository_path(ACTION_DISPATCH_PATH);
-        let dispatch = std::fs::read_to_string(&dispatch_path)
+        let dispatch = read_text(&dispatch_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", dispatch_path.display()));
         assert!(
             dispatch.contains("if !cx.action_is_admitted(action)"),
@@ -9119,7 +9152,7 @@ mod tests {
         );
 
         let panels_path = repository_path(WORKSPACE_INITIALIZATION_PATH);
-        let panels = std::fs::read_to_string(&panels_path)
+        let panels = read_text(&panels_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panels_path.display()));
         // omega#161 collapsed the mode branch: `initialize_panels` has exactly
         // one shape now, and the ordering the branch used to carry is the
@@ -9138,7 +9171,7 @@ mod tests {
         );
 
         let initializer_path = repository_path(AGENT_UI_INITIALIZATION_PATH);
-        let initializer = std::fs::read_to_string(&initializer_path)
+        let initializer = read_text(&initializer_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", initializer_path.display()));
         let initializer = function_body(&initializer, "initialize_workbench_panels")
             .expect("OMEGA-DELTA-0048: the shared workbench panel initializer is gone");
@@ -9163,7 +9196,7 @@ mod tests {
         }
 
         let test_support_path = repository_path(AGENT_UI_TEST_SUPPORT_PATH);
-        let test_support = std::fs::read_to_string(&test_support_path)
+        let test_support = read_text(&test_support_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", test_support_path.display()));
         let mount = function_body(&test_support, "mount")
             .expect("OMEGA-DELTA-0048: AgentWorkbenchFrontDoor::mount is gone");
@@ -9201,7 +9234,7 @@ mod tests {
             "assets/keymaps/default-windows.json",
         ] {
             let path = repository_path(keymap);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             for namespace in ZERO_BASE_HIDDEN_KEYMAP_NAMESPACES {
                 if !source.contains(namespace) {
@@ -9244,7 +9277,7 @@ mod tests {
         // is about: no cheaper second rendering of who ran the turn. Layout
         // elsewhere in the file is free to know the mode.
         let thread_path = repository_path(THREAD_VIEW_PATH);
-        let thread = std::fs::read_to_string(&thread_path)
+        let thread = read_text(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
         // OMEGA-DELTA-0055 removed `render_executor_pin` from this check, along
         // with the function itself, which left one name behind. See the `drawn`
@@ -9296,7 +9329,7 @@ mod tests {
 
         // The binding that builds the typed record is untouched by the mode.
         let binding_path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
-        let binding = std::fs::read_to_string(&binding_path)
+        let binding = read_text(&binding_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", binding_path.display()));
         assert!(
             !binding.contains("omega_zero_base"),
@@ -9310,7 +9343,7 @@ mod tests {
         // runs the real Exo turn. A separate zero-base capture would be free to
         // drift into a mock, which is the failure this pairing prevents.
         let visual_path = repository_path(VISUAL_TEST_RUNNER_PATH);
-        let visual = std::fs::read_to_string(&visual_path)
+        let visual = read_text(&visual_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", visual_path.display()));
         // omega#161 retired the second pair of scenes and the mode-flip
         // machinery with the flag: `ExoSceneSurface`, the per-scene
@@ -9398,7 +9431,7 @@ mod tests {
             visual_path.display()
         );
         let connection_path = repository_path(EXO_CONNECTION_PATH);
-        let connection = std::fs::read_to_string(&connection_path)
+        let connection = read_text(&connection_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
         assert!(
             connection.contains("pub fn end_exo_process(&self)")
@@ -9419,7 +9452,7 @@ mod tests {
     #[test]
     fn zero_base_opens_no_authority_path() {
         let gate_path = repository_path(GATE_EIGHT_PATH);
-        let gate = std::fs::read_to_string(&gate_path)
+        let gate = read_text(&gate_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", gate_path.display()));
         let compact = without_whitespace(&gate);
         assert!(
@@ -9454,7 +9487,7 @@ mod tests {
         // Not rendered *and* disabled, in both places, because a surface that
         // is only visually absent is still one dispatch away.
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
-        let mode = std::fs::read_to_string(&mode_path)
+        let mode = read_text(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
         assert!(
             !mode.contains("\"full_auto_panel\"") && !mode.contains("\"agent_computer\""),
@@ -9464,7 +9497,7 @@ mod tests {
         );
 
         let panel_path = repository_path(AGENT_PANEL_PATH);
-        let panel = std::fs::read_to_string(&panel_path)
+        let panel = read_text(&panel_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
         assert!(
             panel.contains(".when(!omega_zero_base::is_active(), |menu|"),
@@ -9480,7 +9513,7 @@ mod tests {
         );
 
         let full_auto_path = repository_path(FULL_AUTO_PANEL_PATH);
-        let full_auto = std::fs::read_to_string(&full_auto_path)
+        let full_auto = read_text(&full_auto_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", full_auto_path.display()));
         assert!(
             full_auto.contains(".when(!omega_zero_base::is_active(), |this|"),
@@ -9502,7 +9535,7 @@ mod tests {
         // rather than an onboarding page — but the ordering still holds: a
         // panel that opened before the wait resolved could race the launch's
         // own identity creation.
-        let panels = std::fs::read_to_string(repository_path(WORKSPACE_INITIALIZATION_PATH))
+        let panels = read_text(repository_path(WORKSPACE_INITIALIZATION_PATH))
             .expect("the workspace initialization is readable");
         assert!(
             panels.contains("await_identity_ready(cx).await.log_err();"),
@@ -9513,7 +9546,7 @@ mod tests {
         // No change to the Exo lane: zero base writes no configuration, opens
         // no listener, and proxies no `exo serve`.
         let ui_path = repository_path(ZERO_BASE_UI_PATH);
-        let ui = std::fs::read_to_string(&ui_path)
+        let ui = read_text(&ui_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
         for reaching_the_lane in [
             "ExoLaneConfig",
@@ -9551,7 +9584,7 @@ mod tests {
     #[test]
     fn zero_base_derives_setup_and_can_finish_identity_onboarding() {
         let page_path = repository_path(ONBOARDING_BASICS_PAGE_PATH);
-        let page = std::fs::read_to_string(&page_path)
+        let page = read_text(&page_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", page_path.display()));
 
         assert!(
@@ -9608,7 +9641,7 @@ mod tests {
         // hosted account path `OMEGA-DELTA-0010` and `OMEGA-DELTA-0011`
         // removed.
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
-        let mode = std::fs::read_to_string(&mode_path)
+        let mode = read_text(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
         // Scoped to the constant, not the file. The same names appear in that
         // crate's own tests as the *refused* list, so a file-wide scan would
@@ -9661,7 +9694,7 @@ mod tests {
     #[test]
     fn the_flag_free_surface_has_no_runtime_switch_to_the_legacy_editor() {
         let startup_path = repository_path(STARTUP_PATH);
-        let startup = std::fs::read_to_string(&startup_path)
+        let startup = read_text(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
 
         for gone in [
@@ -9719,7 +9752,7 @@ mod tests {
         );
 
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
-        let mode = std::fs::read_to_string(&mode_path)
+        let mode = read_text(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
         for gone in [
             "pub fn leave()",
@@ -9768,7 +9801,7 @@ mod tests {
         );
 
         let ui_path = repository_path(ZERO_BASE_UI_PATH);
-        let ui = std::fs::read_to_string(&ui_path)
+        let ui = read_text(&ui_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
         for gone in [
             "pub fn install_on_workspace",
@@ -9803,7 +9836,7 @@ mod tests {
         }
 
         let panels_path = repository_path(WORKSPACE_INITIALIZATION_PATH);
-        let panels = std::fs::read_to_string(&panels_path)
+        let panels = read_text(&panels_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panels_path.display()));
         assert!(
             !panels.contains("omega_zero_base_ui::install_on_workspace"),
@@ -9874,7 +9907,7 @@ mod tests {
     #[test]
     fn the_transitional_sealed_layout_starts_without_the_legacy_editor() {
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
-        let mode = std::fs::read_to_string(&mode_path)
+        let mode = read_text(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
         assert!(
             mode.contains("pub fn seal()") && mode.contains("pub fn is_sealed() -> bool"),
@@ -9885,7 +9918,7 @@ mod tests {
         );
 
         let workspace_path = repository_path(WORKSPACE_RENDER_PATH);
-        let workspace = std::fs::read_to_string(&workspace_path)
+        let workspace = read_text(&workspace_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", workspace_path.display()));
         assert!(
             workspace.contains("let zero_base_sealed = omega_zero_base::is_sealed();"),
@@ -9912,7 +9945,7 @@ mod tests {
         }
 
         let title_bar_path = repository_path("crates/title_bar/src/title_bar.rs");
-        let title_bar = std::fs::read_to_string(&title_bar_path)
+        let title_bar = read_text(&title_bar_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", title_bar_path.display()));
         for structural in [
             "if omega_zero_base::is_sealed()",
@@ -9937,7 +9970,7 @@ mod tests {
         // caller: a second one would be a second policy about what the first
         // frame shows.
         let startup_path = repository_path(STARTUP_PATH);
-        let startup = std::fs::read_to_string(&startup_path)
+        let startup = read_text(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
         assert_eq!(
             startup.matches("omega_zero_base::seal();").count(),
@@ -9958,7 +9991,7 @@ mod tests {
             startup_path.display()
         );
         let panels_path = repository_path(WORKSPACE_INITIALIZATION_PATH);
-        let panels = std::fs::read_to_string(&panels_path)
+        let panels = read_text(&panels_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panels_path.display()));
         assert!(
             !panels.contains("omega_zero_base::seal()"),
@@ -9992,7 +10025,7 @@ mod tests {
     #[test]
     fn zero_base_opens_the_directory_it_was_started_in() {
         let workdir_path = repository_path(WORKDIR_PATH);
-        let workdir = std::fs::read_to_string(&workdir_path)
+        let workdir = read_text(&workdir_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", workdir_path.display()));
         assert!(
             workdir.contains("pub fn plausible_project_root(")
@@ -10030,7 +10063,7 @@ mod tests {
         }
 
         let startup_path = repository_path(STARTUP_OPEN_PATH);
-        let startup = std::fs::read_to_string(&startup_path)
+        let startup = read_text(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
         // Order, not spelling. This used to require the exact text
         // `if open_zero_base_project(&app_state, cx).await {`, and
@@ -10072,7 +10105,7 @@ mod tests {
         // their workspace appears to be empty as if it were a fact about their
         // code.
         let thread_path = repository_path(THREAD_VIEW_PATH);
-        let thread = std::fs::read_to_string(&thread_path)
+        let thread = read_text(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
         let notice =
             function_body(&thread, "render_zero_base_provider_notice").unwrap_or_else(|| {
@@ -10123,7 +10156,7 @@ mod tests {
         // The control the notice draws is admitted, because a drawn control the
         // gate refuses is the "Close Left Dock" defect in the other direction.
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
-        let mode = std::fs::read_to_string(&mode_path)
+        let mode = read_text(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
         let admitted = mode
             .split_once("pub const ADMITTED_ACTIONS: &[&str] = &[")
@@ -10171,7 +10204,7 @@ mod tests {
     #[test]
     fn an_unpinned_thread_never_reaches_an_engine_lane() {
         let thread_path = repository_path(THREAD_VIEW_PATH);
-        let thread = std::fs::read_to_string(&thread_path)
+        let thread = read_text(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
         for token in [
             "render_executor_pin",
@@ -10190,7 +10223,7 @@ mod tests {
         }
 
         let law_path = repository_path(ROUTE_DECISION_PATH);
-        let law = std::fs::read_to_string(&law_path)
+        let law = read_text(&law_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", law_path.display()));
         let rule = function_body(&law, "route_current").unwrap_or_else(|| {
             panic!(
@@ -10226,7 +10259,7 @@ mod tests {
             law_path.display()
         );
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
-        let mode = std::fs::read_to_string(&mode_path).unwrap_or_default();
+        let mode = read_text(&mode_path).unwrap_or_default();
         assert!(
             !mode.contains("ExecutorPin") && !mode.contains("PinGesture"),
             "OMEGA-DELTA-0055: {} now knows about pins. Automatic routing is a \
@@ -10259,7 +10292,7 @@ mod tests {
     #[test]
     fn the_exo_lane_is_derived_from_the_install_and_only_for_the_product() {
         let detect_path = repository_path(EXO_DETECT_PATH);
-        let detect = std::fs::read_to_string(&detect_path)
+        let detect = read_text(&detect_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", detect_path.display()));
         assert!(
             detect.len() > 2000,
@@ -10433,7 +10466,7 @@ mod tests {
         );
 
         let lane_path = repository_path(EXO_LANE_RESOLUTION_PATH);
-        let lane = std::fs::read_to_string(&lane_path)
+        let lane = read_text(&lane_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", lane_path.display()));
         let resolve = function_body(&lane, "resolve").unwrap_or_else(|| {
             panic!(
@@ -10518,7 +10551,7 @@ mod tests {
     #[test]
     fn a_turn_can_be_driven_over_the_send_a_typed_message_uses() {
         let startup_path = repository_path(STARTUP_OPEN_PATH);
-        let startup = std::fs::read_to_string(&startup_path)
+        let startup = read_text(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
         assert!(
             startup.contains("omega_send: Option<String>"),
@@ -10608,7 +10641,7 @@ mod tests {
         );
 
         let panel_path = repository_path(AGENT_PANEL_PATH);
-        let panel = std::fs::read_to_string(&panel_path)
+        let panel = read_text(&panel_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
         let entry = function_body(&panel, "omega_send_first_message").unwrap_or_else(|| {
             panic!(
@@ -10667,7 +10700,7 @@ mod tests {
     #[test]
     fn the_composer_stays_at_the_bottom_and_the_transcript_grows_up_to_it() {
         let path = repository_path(THREAD_VIEW_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let source = uncommented(&source);
 
@@ -10750,7 +10783,7 @@ mod tests {
     #[test]
     fn a_public_nostr_chat_skill_ships_in_the_binary() {
         let skill_path = repository_path(PUBLIC_NOSTR_CHAT_SKILL_PATH);
-        let skill = std::fs::read_to_string(&skill_path).unwrap_or_else(|error| {
+        let skill = read_text(&skill_path).unwrap_or_else(|error| {
             panic!(
                 "OMEGA-DELTA-0070: cannot read {}: {error}. The skill is \
                  `include_str!`d, so Omega does not build without it — but a \
@@ -10818,7 +10851,7 @@ mod tests {
         }
 
         let loader_path = repository_path(BUILTIN_SKILLS_PATH);
-        let loader = std::fs::read_to_string(&loader_path)
+        let loader = read_text(&loader_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", loader_path.display()));
 
         assert!(
@@ -10925,7 +10958,7 @@ mod tests {
     /// a listener on for values it did not.
     #[test]
     fn the_served_acp_surface_is_off_unless_the_flag_is_exact() {
-        let source = std::fs::read_to_string(repository_path(ACP_SERVER_PATH))
+        let source = read_text(repository_path(ACP_SERVER_PATH))
             .expect("the served ACP surface is readable");
 
         assert!(
@@ -10960,7 +10993,7 @@ mod tests {
     /// production caller of `start_if_enabled` is `crates/omega_effectd`.
     #[test]
     fn only_the_supervisor_opens_the_served_acp_socket() {
-        let manifest = std::fs::read_to_string(repository_path(ACP_SERVER_MANIFEST_PATH))
+        let manifest = read_text(repository_path(ACP_SERVER_MANIFEST_PATH))
             .expect("the served ACP surface's manifest is readable");
         for reaching_into_the_app in [
             "gpui.workspace",
@@ -10983,6 +11016,7 @@ mod tests {
             let display = path
                 .display()
                 .to_string()
+                .replace('\\', "/")
                 .rsplit("crates/")
                 .next()
                 .unwrap_or_default()
@@ -11032,7 +11066,7 @@ mod tests {
     /// pin at all, so there is nothing there for a later edit to reach for.
     #[test]
     fn nothing_over_the_served_acp_surface_can_take_a_pin() {
-        let source = std::fs::read_to_string(repository_path(ACP_SERVER_PATH))
+        let source = read_text(repository_path(ACP_SERVER_PATH))
             .expect("the served ACP surface is readable");
         // The shipped half only. The test module below it reads the pin ledger
         // on purpose, to prove every pin gesture is classified as unexposed.
@@ -11078,9 +11112,9 @@ mod tests {
     /// same defect class as a rendered label in the record.
     #[test]
     fn the_served_surface_presents_the_first_party_agent_id() {
-        let identity = std::fs::read_to_string(repository_path(NATIVE_AGENT_IDENTITY_PATH))
+        let identity = read_text(repository_path(NATIVE_AGENT_IDENTITY_PATH))
             .expect("the native agent is readable");
-        let served = std::fs::read_to_string(repository_path(ACP_SERVER_PATH))
+        let served = read_text(repository_path(ACP_SERVER_PATH))
             .expect("the served ACP surface is readable");
 
         let declared = identity
@@ -11111,7 +11145,7 @@ mod tests {
     /// default nobody could state would be back.
     #[test]
     fn the_supervisor_starts_the_served_surface_before_it_resolves_the_engine() {
-        let source = std::fs::read_to_string(repository_path(EFFECTD_PATH))
+        let source = read_text(repository_path(EFFECTD_PATH))
             .expect("the supervisor is readable");
         let start = source
             .find("start_served_acp_surface();")
@@ -11142,7 +11176,7 @@ mod tests {
     #[test]
     fn a_host_authored_note_is_a_thread_entry_kind() {
         let path = repository_path(THREAD_ENTRY_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let (_, body, _) = next_enum_body(&source, "AgentThreadEntry").unwrap_or_else(|| {
@@ -11198,7 +11232,7 @@ mod tests {
     #[test]
     fn the_host_appends_a_provider_handoff_note_rather_than_refusing_it() {
         let path = repository_path(HOST_BRIDGE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let code = code_of(&source);
 
@@ -11249,7 +11283,7 @@ mod tests {
     #[test]
     fn the_thread_surface_draws_a_host_authored_note_unconditionally() {
         let path = repository_path(THREAD_VIEW_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let code = code_of(&source);
 
@@ -11303,7 +11337,7 @@ mod tests {
     #[test]
     fn a_session_id_reads_a_live_or_persisted_thread() {
         let tool_path = repository_path(SUBAGENT_TRANSCRIPT_TOOL_PATH);
-        let tool = std::fs::read_to_string(&tool_path)
+        let tool = read_text(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
         assert!(
             tool.contains("live and persisted Omega")
@@ -11314,7 +11348,7 @@ mod tests {
         );
 
         let registration_path = repository_path(SUBAGENT_TRANSCRIPT_REGISTRATION_PATH);
-        let registration = std::fs::read_to_string(&registration_path)
+        let registration = read_text(&registration_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registration_path.display()));
         let registration_compact = without_whitespace(&registration);
         assert!(
@@ -11333,7 +11367,7 @@ mod tests {
         );
 
         let environment_path = repository_path(SUBAGENT_TRANSCRIPT_ENVIRONMENT_PATH);
-        let environment = std::fs::read_to_string(&environment_path)
+        let environment = read_text(&environment_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", environment_path.display()));
         let environment_compact = without_whitespace(&environment);
         assert!(
@@ -11358,7 +11392,7 @@ mod tests {
     #[test]
     fn a_truncated_transcript_says_that_it_was_truncated() {
         let tool_path = repository_path(SUBAGENT_TRANSCRIPT_TOOL_PATH);
-        let tool = std::fs::read_to_string(&tool_path)
+        let tool = read_text(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
 
         for declared in [
@@ -11423,7 +11457,7 @@ mod tests {
     #[test]
     fn the_transcript_tool_reaches_the_model() {
         let registration_path = repository_path(SUBAGENT_TRANSCRIPT_REGISTRATION_PATH);
-        let registration = std::fs::read_to_string(&registration_path)
+        let registration = read_text(&registration_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registration_path.display()));
         // Registered under the same depth gate as spawning: a thread that
         // cannot spawn subagents has none to read.
@@ -11479,7 +11513,7 @@ mod tests {
     #[test]
     fn a_tool_result_opens_at_a_ceiling_the_reader_can_lift() {
         let ceiling_path = repository_path(TOOL_OUTPUT_CEILING_PATH);
-        let ceiling_source = std::fs::read_to_string(&ceiling_path)
+        let ceiling_source = read_text(&ceiling_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", ceiling_path.display()));
 
         // 1. The value. Read from the declaration, so a changed number fails
@@ -11537,7 +11571,7 @@ mod tests {
         // result over `MAX_EMBEDDED_LINES` takes the fallback and ignores the
         // ceiling — the longest results would be the ones that escape it.
         let terminal_path = repository_path(TOOL_OUTPUT_CEILING_TERMINAL_PATH);
-        let terminal_source = std::fs::read_to_string(&terminal_path)
+        let terminal_source = read_text(&terminal_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", terminal_path.display()));
         let compact_terminal = without_whitespace(production_source(&terminal_source));
         assert!(
@@ -11560,7 +11594,7 @@ mod tests {
 
         // 4. The way out. A ceiling with no control is a truncation.
         let render_path = repository_path(TOOL_OUTPUT_CEILING_RENDER_PATH);
-        let render_source = std::fs::read_to_string(&render_path)
+        let render_source = read_text(&render_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", render_path.display()));
         // `production_source` is no use here: this file opens a `#[cfg(test)]`
         // block near the top, so it would cut away everything being asserted.
@@ -11626,7 +11660,7 @@ mod tests {
         let mut scanned = 0usize;
         for relative in EPISODE_CRATE_SOURCES {
             let path = repository_path(relative);
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             scanned += 1;
             for token in EPISODE_FORBIDDEN_REACH {
@@ -11664,7 +11698,7 @@ mod tests {
     #[test]
     fn an_episode_sends_no_write_or_secret_request() {
         let path = repository_path(EPISODE_REQUEST_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         // `OMEGA-DELTA-0102`. The table names variants of the one enumeration
         // rather than spelling Exo's wire strings for itself, so this reads
@@ -11683,7 +11717,7 @@ mod tests {
         );
 
         let families = repository_path(EPISODE_FAMILY_PATH);
-        let family_source = std::fs::read_to_string(&families)
+        let family_source = read_text(&families)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", families.display()));
         let classification = uncommented(&family_source);
         for variant in &emitted {
@@ -11751,7 +11785,7 @@ mod tests {
     #[test]
     fn the_episode_comparison_ignores_only_what_a_fork_rewrites() {
         let path = repository_path(EPISODE_STATE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let declared = source
             .split_once("pub const IDENTITY_FIELDS: &[&str] = &[")
@@ -11797,7 +11831,7 @@ mod tests {
     #[test]
     fn the_falsification_loop_forks_first_and_probes_before_it_checks() {
         let path = repository_path(EPISODE_RESET_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let loop_source = source
             .split_once("pub const FALSIFICATION_LOOP: &[Step] = &[")
@@ -11860,7 +11894,7 @@ mod tests {
     #[test]
     fn the_episode_reset_records_that_a_fork_does_not_carry_snapshots() {
         let path = repository_path(EPISODE_RESET_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let copied = source
             .split_once("pub const FORK_COPIES_PREFIXES: &[&str] = &[")
@@ -11943,7 +11977,7 @@ mod tests {
 
     fn exo_source(relative: &str) -> String {
         let path = repository_path(relative);
-        std::fs::read_to_string(&path)
+        read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
     }
 
@@ -12253,7 +12287,7 @@ mod tests {
 
     fn exo_log_source(relative: &str) -> String {
         let path = repository_path(relative);
-        std::fs::read_to_string(&path)
+        read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
     }
 
@@ -12542,7 +12576,7 @@ mod tests {
     #[test]
     fn the_exo_durable_log_is_read_by_the_lane_that_runs_the_turns() {
         let manifest_path = repository_path("crates/agent_ui/Cargo.toml");
-        let manifest = std::fs::read_to_string(&manifest_path)
+        let manifest = read_text(&manifest_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest_path.display()));
         assert!(
             manifest.contains("omega_exo_log.workspace = true"),
@@ -12552,7 +12586,7 @@ mod tests {
         );
 
         let connection_path = repository_path(EXO_CONNECTION_PATH);
-        let connection = std::fs::read_to_string(&connection_path)
+        let connection = read_text(&connection_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
         let read = function_body(&connection, EXO_DURABLE_READ_FN).unwrap_or_else(|| {
             panic!(
@@ -12588,7 +12622,7 @@ mod tests {
     #[test]
     fn omega_reads_exos_server_and_never_starts_one() {
         let connection_path = repository_path(EXO_CONNECTION_PATH);
-        let connection = std::fs::read_to_string(&connection_path)
+        let connection = read_text(&connection_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
 
         let literals = string_literals(&connection);
@@ -12852,7 +12886,7 @@ mod tests {
     #[test]
     fn a_named_executor_is_honoured_or_refused_by_name() {
         let path = repository_path(SUBAGENT_EXECUTOR_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let compact = without_whitespace(&source);
 
@@ -12947,7 +12981,7 @@ mod tests {
         // Resuming cannot quietly drop a requested executor either — the same
         // fallback arriving by a different door.
         let tool_path = repository_path(SUBAGENT_SPAWN_TOOL_PATH);
-        let tool = std::fs::read_to_string(&tool_path)
+        let tool = read_text(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
         assert!(
             tool.contains("Session belongs to `{}`, not the requested executor")
@@ -12975,7 +13009,7 @@ mod tests {
     #[test]
     fn only_detected_agents_are_offered() {
         let path = repository_path(SUBAGENT_EXECUTOR_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         assert!(
@@ -13018,7 +13052,7 @@ mod tests {
         );
 
         let handle_path = repository_path(SUBAGENT_EXTERNAL_HANDLE_PATH);
-        let handle = std::fs::read_to_string(&handle_path)
+        let handle = read_text(&handle_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", handle_path.display()));
         assert!(
             handle.contains("Presence is *not* rechecked here."),
@@ -13043,7 +13077,7 @@ mod tests {
     #[test]
     fn every_subagent_result_names_its_executor() {
         let registration_path = repository_path(SUBAGENT_TRANSCRIPT_REGISTRATION_PATH);
-        let registration = std::fs::read_to_string(&registration_path)
+        let registration = read_text(&registration_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registration_path.display()));
         assert!(
             registration.contains("fn executor_disclosure(&self, cx: &App) -> ExecutorDisclosure;"),
@@ -13055,7 +13089,7 @@ mod tests {
         );
 
         let tool_path = repository_path(SUBAGENT_SPAWN_TOOL_PATH);
-        let tool = std::fs::read_to_string(&tool_path)
+        let tool = read_text(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
 
         // Taken from the handle, so it reports the fact and not the request.
@@ -13081,7 +13115,7 @@ mod tests {
         );
 
         let handle_path = repository_path(SUBAGENT_EXTERNAL_HANDLE_PATH);
-        let handle = std::fs::read_to_string(&handle_path)
+        let handle = read_text(&handle_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", handle_path.display()));
         // The two handles must not report the same thing, or attribution is
         // uniform and therefore useless. Each builds its record from its own
@@ -13131,7 +13165,7 @@ mod tests {
     #[test]
     fn a_subagents_executor_is_disclosed_as_a_record() {
         let executor_path = repository_path(SUBAGENT_EXECUTOR_PATH);
-        let executor = std::fs::read_to_string(&executor_path)
+        let executor = read_text(&executor_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", executor_path.display()));
 
         // Both constructors exist, and each is pinned to its class. A subagent
@@ -13183,7 +13217,7 @@ mod tests {
 
         // And the wire record the parent reads holds parts, never a rendering.
         let tool_path = repository_path(SUBAGENT_SPAWN_TOOL_PATH);
-        let tool = std::fs::read_to_string(&tool_path)
+        let tool = read_text(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
 
         let fields = struct_fields(&tool, "SubagentExecutorReport");
@@ -13315,7 +13349,7 @@ mod tests {
     #[test]
     fn a_session_with_no_transcript_names_both_reasons() {
         let tool_path = repository_path(SUBAGENT_TRANSCRIPT_TOOL_PATH);
-        let tool = std::fs::read_to_string(&tool_path)
+        let tool = read_text(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
 
         let start = tool
@@ -13358,7 +13392,7 @@ mod tests {
 
         // The environment calls it rather than writing a second sentence.
         let environment_path = repository_path(SUBAGENT_TRANSCRIPT_ENVIRONMENT_PATH);
-        let environment = std::fs::read_to_string(&environment_path)
+        let environment = read_text(&environment_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", environment_path.display()));
         assert!(
             environment.contains("crate::no_transcript_available(&session_id)"),
@@ -13383,7 +13417,7 @@ mod tests {
     #[test]
     fn local_needs_no_network_no_relay_and_no_account() {
         let path = repository_path(AUDIENCE_MANIFEST_PATH);
-        let manifest = std::fs::read_to_string(&path)
+        let manifest = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
         let dependencies = manifest
@@ -13675,7 +13709,7 @@ mod tests {
     /// Read a repository source file, or say which one could not be read.
     fn read_repository_file(relative: &str) -> String {
         let path = repository_path(relative);
-        std::fs::read_to_string(&path)
+        read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
     }
 
@@ -13693,7 +13727,7 @@ mod tests {
     #[test]
     fn detected_coding_agents_do_not_block_omega_agent() {
         let attach_path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
-        let attach = std::fs::read_to_string(&attach_path)
+        let attach = read_text(&attach_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", attach_path.display()));
         // The tests in that file name several of these tokens while showing
         // why the production path does not use them, so the scan reads the
@@ -13769,7 +13803,7 @@ mod tests {
         );
 
         let router_path = repository_path(ROUTER_DISPATCH_PATH);
-        let router = std::fs::read_to_string(&router_path)
+        let router = read_text(&router_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
         assert!(
             !router.contains("omega_agent_attach::connect_detected_executors")
@@ -13781,7 +13815,7 @@ mod tests {
         );
 
         let factory_path = repository_path(AGENT_SERVER_FACTORY_PATH);
-        let factory = std::fs::read_to_string(&factory_path)
+        let factory = read_text(&factory_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", factory_path.display()));
         assert!(
             without_whitespace(&factory).contains(&without_whitespace(
@@ -14078,7 +14112,8 @@ mod tests {
                         normalize_path(path)
                             .strip_prefix(normalize_path(&repository_path(".")))
                             .map(|relative| relative.display().to_string())
-                            .unwrap_or_else(|_| path.display().to_string()),
+                            .unwrap_or_else(|_| path.display().to_string())
+                            .replace('\\', "/"),
                     );
                 }
             });
@@ -15036,7 +15071,7 @@ mod tests {
 
         for (name, relative) in CONTRIBUTION_SKILLS {
             let skill_path = repository_path(relative);
-            let skill = std::fs::read_to_string(&skill_path).unwrap_or_else(|error| {
+            let skill = read_text(&skill_path).unwrap_or_else(|error| {
                 panic!(
                     "OMEGA-DELTA-0106: cannot read {}: {error}. The skill is \
                      `include_str!`d, so Omega does not build without it — but \
@@ -15257,7 +15292,7 @@ mod tests {
     #[test]
     fn a_tool_result_is_an_artifact_and_its_event_is_a_marked_preview() {
         let law_path = repository_path(TOOL_RESULT_ARTIFACT_PATH);
-        let law_source = std::fs::read_to_string(&law_path)
+        let law_source = read_text(&law_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", law_path.display()));
         let law = production_source(&law_source);
         let compact_law = without_whitespace(law);
@@ -15330,7 +15365,7 @@ mod tests {
         // 5. The record path. A terminal records the complete result when the
         // command exits, and hands out a preview — never the result — after.
         let record_path = repository_path(TOOL_RESULT_RECORD_PATH);
-        let record_source = std::fs::read_to_string(&record_path)
+        let record_source = read_text(&record_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", record_path.display()));
         let record = production_source(&record_source);
         let compact_record = without_whitespace(record);
@@ -15374,7 +15409,7 @@ mod tests {
         // record's own total, so a body that is a preview cannot describe
         // itself as the whole result.
         let ceiling_path = repository_path(TOOL_OUTPUT_CEILING_PATH);
-        let ceiling_source = std::fs::read_to_string(&ceiling_path)
+        let ceiling_source = read_text(&ceiling_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", ceiling_path.display()));
         assert!(
             without_whitespace(&ceiling_source).contains(&without_whitespace(
@@ -15393,7 +15428,7 @@ mod tests {
         );
 
         let render_path = repository_path(TOOL_OUTPUT_CEILING_RENDER_PATH);
-        let render_source = std::fs::read_to_string(&render_path)
+        let render_source = read_text(&render_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", render_path.display()));
         assert!(
             without_whitespace(&render_source).contains(&without_whitespace(
@@ -15431,7 +15466,7 @@ mod tests {
         // 1. The bound is applied where every tool passes, not in each tool.
         //    A per-tool bound is one a new tool is unbounded by forgetting.
         let routing_path = repository_path(AGENT_TOOL_RESULT_ROUTING_PATH);
-        let routing_source = std::fs::read_to_string(&routing_path)
+        let routing_source = read_text(&routing_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", routing_path.display()));
         let routing = production_source(&routing_source);
         let compact_routing = without_whitespace(routing);
@@ -15483,7 +15518,7 @@ mod tests {
         //    for, and it holds the thread's own registry rather than naming a
         //    thread — the scoping shape `OMEGA-DELTA-0060` uses.
         let fetch_path = repository_path(AGENT_TOOL_RESULT_FETCH_TOOL_PATH);
-        let fetch_source = std::fs::read_to_string(&fetch_path)
+        let fetch_source = read_text(&fetch_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", fetch_path.display()));
         let fetch = production_source(&fetch_source);
         assert!(
@@ -15531,7 +15566,7 @@ mod tests {
         // 5. One truncation sentence for the whole system. The agent half must
         //    reuse `preview_tool_result`, never restate it.
         let registry_path = repository_path(AGENT_TOOL_RESULT_REGISTRY_PATH);
-        let registry_source = std::fs::read_to_string(&registry_path)
+        let registry_source = read_text(&registry_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registry_path.display()));
         let registry = production_source(&registry_source);
         for (path, source) in [(&registry_path, registry), (&fetch_path, fetch)] {
@@ -15555,7 +15590,7 @@ mod tests {
         //    string, so the number it printed was never the number of bytes
         //    shown, and it sat on top of an accurate marker.
         let terminal_path = repository_path(AGENT_TERMINAL_TOOL_PATH);
-        let terminal_source = std::fs::read_to_string(&terminal_path)
+        let terminal_source = read_text(&terminal_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", terminal_path.display()));
         assert!(
             !production_source(&terminal_source).contains(AGENT_DELETED_SECOND_TRUNCATION_SENTENCE),
@@ -15638,7 +15673,7 @@ mod tests {
     #[test]
     fn every_address_a_marker_prints_resolves_and_no_window_can_erase_it() {
         let law_path = repository_path(TOOL_RESULT_ARTIFACT_PATH);
-        let law_source = std::fs::read_to_string(&law_path)
+        let law_source = read_text(&law_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", law_path.display()));
         let law = production_source(&law_source);
 
@@ -15664,7 +15699,7 @@ mod tests {
         // 2. The terminal's window uses it. This is the check that fails if the
         //    window goes back to cutting the whole preview.
         let terminal_path = repository_path(AGENT_TERMINAL_TOOL_PATH);
-        let terminal_source = std::fs::read_to_string(&terminal_path)
+        let terminal_source = read_text(&terminal_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", terminal_path.display()));
         let terminal = production_source(&terminal_source);
         let window = terminal
@@ -15715,7 +15750,7 @@ mod tests {
         // 3. A terminal's own store is taken over by the thread's registry, so
         //    the address its marker prints is one the fetch tool can take.
         let registry_path = repository_path(AGENT_TOOL_RESULT_REGISTRY_PATH);
-        let registry_source = std::fs::read_to_string(&registry_path)
+        let registry_source = read_text(&registry_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registry_path.display()));
         let registry = production_source(&registry_source);
         assert!(
@@ -15746,7 +15781,7 @@ mod tests {
         );
 
         let routing_path = repository_path(AGENT_TOOL_RESULT_ROUTING_PATH);
-        let routing_source = std::fs::read_to_string(&routing_path)
+        let routing_source = read_text(&routing_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", routing_path.display()));
         let routing = production_source(&routing_source);
         assert!(
@@ -15779,7 +15814,7 @@ mod tests {
         // the second copy is back and this delta's argument has been reversed
         // without being re-argued.
         let db_path = repository_path(AGENT_THREAD_DB_PATH);
-        let db_source = std::fs::read_to_string(&db_path)
+        let db_source = read_text(&db_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", db_path.display()));
         assert!(
             !production_source(&db_source).contains("Artifact"),
@@ -15834,7 +15869,7 @@ mod tests {
     #[test]
     fn an_external_subagent_is_reachable_by_the_tool_and_findable_by_id() {
         let agent_path = repository_path(SUBAGENT_EXTERNAL_HANDLE_PATH);
-        let agent = std::fs::read_to_string(&agent_path)
+        let agent = read_text(&agent_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", agent_path.display()));
 
         let start = agent.find(EXTERNAL_SUBAGENT_OPEN_FN).unwrap_or_else(|| {
@@ -15903,7 +15938,7 @@ mod tests {
         // keep every external subagent's thread, and the agent server behind
         // it, alive for the life of the process.
         let registry_path = repository_path(EXTERNAL_SUBAGENT_REGISTRY_PATH);
-        let registry = std::fs::read_to_string(&registry_path)
+        let registry = read_text(&registry_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registry_path.display()));
         assert!(
             registry.contains("WeakEntity<AcpThread>"),
@@ -15925,7 +15960,7 @@ mod tests {
     #[test]
     fn the_panel_resolves_an_external_subagent_and_names_its_executor() {
         let panel_path = repository_path(EXTERNAL_SUBAGENT_PANEL_PATH);
-        let panel = std::fs::read_to_string(&panel_path)
+        let panel = read_text(&panel_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
 
         assert!(
@@ -15939,7 +15974,7 @@ mod tests {
         );
 
         let card_path = repository_path(EXTERNAL_SUBAGENT_CARD_PATH);
-        let card = std::fs::read_to_string(&card_path)
+        let card = read_text(&card_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", card_path.display()));
 
         let start = card.find("fn render_subagent_card").unwrap_or_else(|| {
@@ -16062,7 +16097,7 @@ mod tests {
     #[test]
     fn the_live_episode_runner_walks_the_declared_loop() {
         let path = repository_path(EPISODE_LIVE_EXAMPLE_PATH);
-        let source = std::fs::read_to_string(&path)
+        let source = read_text(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         let code = uncommented(&source);
 
@@ -16123,7 +16158,7 @@ mod tests {
     #[test]
     fn the_live_episode_harness_cannot_revert_anything() {
         let example_path = repository_path(EPISODE_LIVE_EXAMPLE_PATH);
-        let example = std::fs::read_to_string(&example_path)
+        let example = read_text(&example_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", example_path.display()));
         for token in EPISODE_LIVE_FORBIDDEN_REACH {
             assert!(
@@ -16137,7 +16172,7 @@ mod tests {
         }
 
         let script_path = repository_path(EPISODE_LIVE_SCRIPT_PATH);
-        let script = std::fs::read_to_string(&script_path)
+        let script = read_text(&script_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", script_path.display()));
         for verb in EPISODE_HARNESS_FORBIDDEN_VERBS {
             assert!(
@@ -16382,7 +16417,7 @@ mod tests {
     #[test]
     fn a_path_argument_sets_the_project_and_never_the_mode() {
         let startup_path = repository_path(STARTUP_PATH);
-        let startup = std::fs::read_to_string(&startup_path)
+        let startup = read_text(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
 
         assert!(
@@ -16394,7 +16429,7 @@ mod tests {
         );
 
         let launcher_path = repository_path(LOCAL_LAUNCHER_PATH);
-        let launcher = std::fs::read_to_string(&launcher_path)
+        let launcher = read_text(&launcher_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", launcher_path.display()));
         let launcher = uncommented(&launcher);
         assert!(
@@ -16443,7 +16478,7 @@ mod tests {
         );
 
         let workdir_path = repository_path(WORKDIR_PATH);
-        let workdir = std::fs::read_to_string(&workdir_path)
+        let workdir = read_text(&workdir_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", workdir_path.display()));
         let named = function_body(&workdir, "project_root_named").unwrap_or_else(|| {
             panic!(
@@ -16477,7 +16512,7 @@ mod tests {
         // The folder is named where a person can read it, and specifically not
         // in the corner the owner has just had emptied.
         let panel_path = repository_path(AGENT_PANEL_PATH);
-        let panel = std::fs::read_to_string(&panel_path)
+        let panel = read_text(&panel_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
         let header = function_body(&panel, "render_thread_identity").unwrap_or_else(|| {
             panic!(
@@ -16526,7 +16561,7 @@ mod tests {
         );
 
         let composer_path = repository_path(THREAD_VIEW_PATH);
-        let composer = std::fs::read_to_string(&composer_path)
+        let composer = read_text(&composer_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", composer_path.display()));
         assert!(
             !composer.contains("display_for_person"),
@@ -16561,7 +16596,7 @@ mod tests {
     #[test]
     fn a_transcript_file_link_opens_a_reader_in_zero_base() {
         let peek_path = repository_path(FILE_PEEK_PATH);
-        let peek_source = std::fs::read_to_string(&peek_path)
+        let peek_source = read_text(&peek_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", peek_path.display()));
         // Comments are dropped before anything is looked for. The prose in this
         // file names the call that produced the bug, on purpose, and a check
@@ -16613,7 +16648,7 @@ mod tests {
         );
 
         let caller_path = repository_path(CONVERSATION_VIEW_PATH);
-        let caller = std::fs::read_to_string(&caller_path)
+        let caller = read_text(&caller_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", caller_path.display()));
         let reader_call = caller
             .find("crate::omega_file_peek::open_from_transcript_link(")
@@ -16652,7 +16687,7 @@ mod tests {
         );
 
         let thread_path = repository_path(THREAD_VIEW_PATH);
-        let thread = std::fs::read_to_string(&thread_path)
+        let thread = read_text(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
         assert!(
             thread.contains("self.thread.read(cx).work_dirs(),"),
@@ -16730,7 +16765,7 @@ mod tests {
     #[test]
     fn the_wait_for_an_executor_is_one_a_person_can_type_through() {
         let view_path = repository_path(CONVERSATION_VIEW_PATH);
-        let view_source = std::fs::read_to_string(&view_path)
+        let view_source = read_text(&view_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", view_path.display()));
         // Not `production_source`: it cuts at the first `#[cfg(test)]`, and in
         // this file that is a test-only `use` on line 12, which would leave
@@ -16863,7 +16898,7 @@ mod tests {
 
         // The one face, declared once.
         let editor_path = repository_path(MESSAGE_EDITOR_PATH);
-        let editor_source = std::fs::read_to_string(&editor_path)
+        let editor_source = read_text(&editor_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", editor_path.display()));
         let editor = uncommented(production_source(&editor_source));
         assert!(
@@ -17789,7 +17824,7 @@ mod tests {
     #[test]
     fn a_thoughts_title_reaches_the_header_and_is_not_left_in_the_body() {
         let split_path = repository_path(THINKING_BLOCK_SPLIT_PATH);
-        let split_source = std::fs::read_to_string(&split_path)
+        let split_source = read_text(&split_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", split_path.display()));
         let split = production_source(&split_source);
 
@@ -17838,7 +17873,7 @@ mod tests {
         // 3. The renderer draws the split, not the chunk. This is the check
         //    that fails on the defect that shipped.
         let view_path = repository_path(THREAD_VIEW_PATH);
-        let view_source = std::fs::read_to_string(&view_path)
+        let view_source = read_text(&view_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", view_path.display()));
         // Read whole, not through `production_source`: `thread_view.rs` carries
         // a `#[cfg(test)]` item near the top, so trimming at the first one
@@ -17901,7 +17936,7 @@ mod tests {
         //    the body has lines removed from above them, so highlighting the
         //    chunk while rendering the body lands on the wrong words.
         let search_path = repository_path(THREAD_SEARCH_BAR_PATH);
-        let search_source = std::fs::read_to_string(&search_path)
+        let search_source = read_text(&search_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", search_path.display()));
         let search = production_source(&search_source);
         assert!(
@@ -18627,7 +18662,7 @@ mod tests {
     #[test]
     fn markdown_still_arriving_completes_its_markers_and_gives_them_back() {
         let streaming_path = repository_path(MARKDOWN_STREAMING_PATH);
-        let streaming_source = std::fs::read_to_string(&streaming_path)
+        let streaming_source = read_text(&streaming_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", streaming_path.display()));
         assert!(
             production_source(&streaming_source)
@@ -18637,7 +18672,7 @@ mod tests {
         );
 
         let markdown_path = repository_path(MARKDOWN_PATH);
-        let markdown_source = std::fs::read_to_string(&markdown_path)
+        let markdown_source = read_text(&markdown_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", markdown_path.display()));
         let markdown = production_source(&markdown_source);
 
@@ -18679,7 +18714,7 @@ mod tests {
         // 4. Both paths that arm the repair also end it. An arm with no end is
         //    the failure in 2, reached one caller further out.
         let thread_path = repository_path(ACP_THREAD_PATH);
-        let thread_source = std::fs::read_to_string(&thread_path)
+        let thread_source = read_text(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
         let thread = production_source(&thread_source);
         for (arms, ends, what) in [
@@ -21707,7 +21742,7 @@ mod tests {
 
         let mut offending = Vec::new();
         for path in sources {
-            let source = std::fs::read_to_string(&path)
+            let source = read_text(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             let literals = string_literal_contents(&source).to_lowercase();
             // `issue 31` is the prose form and `issue31 ` is the prose form
@@ -21785,7 +21820,7 @@ mod tests {
     #[test]
     fn enter_while_connecting_queues_the_message_and_never_loses_it() {
         let view_path = repository_path(CONVERSATION_VIEW_PATH);
-        let view_source = std::fs::read_to_string(&view_path)
+        let view_source = read_text(&view_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", view_path.display()));
         // Not `production_source`: it cuts at the first `#[cfg(test)]`, and in
         // this file that is a test-only `use` on line 12, which would leave
@@ -22238,7 +22273,7 @@ mod tests {
         let raw_reveals = sources
             .into_iter()
             .filter_map(|path| {
-                let source = std::fs::read_to_string(&path).ok()?;
+                let source = read_text(&path).ok()?;
                 source
                     .contains(".reveal_zero_base_center(window, cx)")
                     .then_some(path)
@@ -23746,7 +23781,7 @@ mod tests {
                 .unwrap_or("<unnamed>")
                 .to_string();
             let manifest: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(manifest_path)
+                &read_text(manifest_path)
                     .unwrap_or_else(|error| panic!("cannot read {manifest_name}: {error}")),
             )
             .unwrap_or_else(|error| panic!("{manifest_name} is not valid JSON: {error}"));
@@ -23799,7 +23834,7 @@ mod tests {
                         });
 
                     let evidence_path = repository_path(relative);
-                    let bytes = std::fs::read(&evidence_path).unwrap_or_else(|error| {
+                    let bytes = read_bytes_normalized(&evidence_path).unwrap_or_else(|error| {
                         panic!(
                             "OMEGA-DELTA-0219: {manifest_name} row `{row_id}` names evidence \
                              `{relative}`, which cannot be read: {error}"
@@ -27638,18 +27673,24 @@ mod tests {
                       that owns the report writer; this runs them. There is no \
                       async runtime here."
         )]
-        let output = std::process::Command::new(&script_path)
-            .arg("--self-test")
-            .output()
-            .expect("run the release-gate self-test");
-        assert!(
-            output.status.success(),
-            "OMEGA-DELTA-0219: `script/omega-release-gate --self-test` failed, \
-             so authored prose is no longer proven to survive a regeneration:\n\
-             {}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        // The release gate is a POSIX script; Windows cannot execute it
+        // directly. The report/source agreement checks above still hold the
+        // tree to its authored prose, so the regeneration self-test is run on
+        // Unix where the script can run.
+        if cfg!(unix) {
+            let output = std::process::Command::new(&script_path)
+                .arg("--self-test")
+                .output()
+                .expect("run the release-gate self-test");
+            assert!(
+                output.status.success(),
+                "OMEGA-DELTA-0219: `script/omega-release-gate --self-test` failed, \
+                 so authored prose is no longer proven to survive a regeneration:\n\
+                 {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     /// OMEGA-DELTA-0223. Omega exposes real working folders rather than a
@@ -29375,7 +29416,7 @@ mod tests {
         }
 
         let ui_path = repository_path("crates/lnmarkets_ui/src/lnmarkets_ui.rs");
-        let ui = std::fs::read_to_string(&ui_path)
+        let ui = read_text(&ui_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
         for required in [
             "window.prompt(",
@@ -29399,7 +29440,7 @@ mod tests {
         let hyperliquid_ui_path =
             repository_path("crates/trading_workspace_ui/src/agent_wallet_ui.rs");
         let hyperliquid_ui =
-            std::fs::read_to_string(&hyperliquid_ui_path).unwrap_or_else(|error| {
+            read_text(&hyperliquid_ui_path).unwrap_or_else(|error| {
                 panic!("cannot read {}: {error}", hyperliquid_ui_path.display())
             });
         for required in [
@@ -29434,7 +29475,8 @@ mod tests {
             let relative = path
                 .strip_prefix(repository_path("."))
                 .unwrap_or(path)
-                .to_string_lossy();
+                .to_string_lossy()
+                .replace('\\', "/");
             if relative == mandate_path
                 || relative == "crates/lnmarkets_ui/src/lnmarkets_ui.rs"
                 || relative == "crates/trading_workspace_ui/src/agent_wallet_ui.rs"
@@ -29443,7 +29485,7 @@ mod tests {
                 return;
             }
             if code_of(source).contains(".apply_ui_approved(") {
-                forbidden_callers.push(relative.into_owned());
+                forbidden_callers.push(relative);
             }
         });
         assert!(
@@ -31874,7 +31916,7 @@ mod tests {
         );
 
         let fixture_path = repository_path("crates/market_ui/fixtures/swp-client-engine-v1.json");
-        let fixture = std::fs::read(&fixture_path)
+        let fixture = read_bytes_normalized(&fixture_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", fixture_path.display()));
         assert_eq!(
             sha256_hex(&fixture),
